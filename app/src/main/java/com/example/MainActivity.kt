@@ -525,6 +525,9 @@ fun FaceSwapStudioApp(
                     onFaceScaleChanged = viewModel::setFaceScaleAdjust,
                     onResetAdjustments = viewModel::resetPositionAdjustments,
                     onToggleCompareOriginal = viewModel::toggleComparisonMode,
+                    onNegativeArtifactSuppressionChanged = viewModel::setNegativeArtifactSuppression,
+                    onLcmInpaintingChanged = viewModel::setLcmInpainting,
+                    onFaceAgingFactorChanged = viewModel::setFaceAgingFactor,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
                     onImportAllFromFolder = {
                         onnxFolderTreePicker.launch(null)

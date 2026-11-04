@@ -110,6 +110,9 @@ data class FaceSwapUiState(
     val skinToneMode: SkinToneSourceMode = SkinToneSourceMode.SOURCE_IDENTITY,
     val faceReactionMode: FaceReactionSourceMode = FaceReactionSourceMode.TARGET_REACTION,
     val enableOcclusionProtection: Boolean = true,
+    val enableNegativeArtifactSuppression: Boolean = true,
+    val enableLcmInpainting: Boolean = true,
+    val faceAgingFactor: Float = 0.0f,
     val portraitBlurStrength: Float = 0.0f,
     val blendStrength: Float = 1.0f,
     val enhancementStrength: Float = 0.96f,
@@ -306,6 +309,18 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun setEnableOcclusionProtection(enabled: Boolean) {
         _uiState.update { it.copy(enableOcclusionProtection = enabled) }
+    }
+
+    fun setNegativeArtifactSuppression(enabled: Boolean) {
+        _uiState.update { it.copy(enableNegativeArtifactSuppression = enabled) }
+    }
+
+    fun setLcmInpainting(enabled: Boolean) {
+        _uiState.update { it.copy(enableLcmInpainting = enabled) }
+    }
+
+    fun setFaceAgingFactor(factor: Float) {
+        _uiState.update { it.copy(faceAgingFactor = factor.coerceIn(-1.0f, 1.0f)) }
     }
 
     fun setPortraitBlurStrength(strength: Float) {

@@ -91,7 +91,7 @@ object FaceBlender {
     private const val DEFAULT_RIGHT_EYE_X = 81.5318f
     private const val DEFAULT_RIGHT_EYE_Y = 51.5014f
 
-    private data class WarpedFaceGeometry(
+    data class WarpedFaceGeometry(
         val leftEye: PointF,
         val rightEye: PointF,
         val nose: PointF,
@@ -107,7 +107,7 @@ object FaceBlender {
         val landmarks106: List<PointF> = reconstructed3D.landmarks106
     )
 
-    private fun computeWarpedGeometry(
+    fun computeWarpedGeometry(
         forwardMatrix128: FloatArray?,
         targetLandmarks5: List<PointF>?,
         scale: Float = 1.0f
@@ -1112,6 +1112,19 @@ object FaceBlender {
             size = HD_SIZE,
             geom = geom512
         )
+        // Negative Artifact Suppression: Protect squinted/winking eyelids, eyeliner, and makeup integrity
+        NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
+            swapPx512 = swapPx512,
+            tgtPx512 = tgtPx512,
+            geom512 = geom512,
+            makeupPreservationStrength = 0.85f
+        )
+        // Face-Aging & Expression Style Engine
+        FaceAgingStyleEngine.applyFaceAgingAndStyle512(
+            pixels512 = swapPx512,
+            geom512 = geom512,
+            params = FaceAgingStyleEngine.AgingParameters(ageFactor = 0.0f)
+        )
         val restoration512Ms = ((System.currentTimeMillis() - tRestore0) - upperLipGuardMs).coerceAtLeast(1L)
 
         // Capture Stage 2: Swap + 512x512 HD Restoration + Upper-Lip Guard Output (before final scene blending)
@@ -1122,7 +1135,7 @@ object FaceBlender {
         } else null
 
         val tBlendStage0 = System.currentTimeMillis()
-        // 6. Face Reaction Synthesis (Zero Source-Pixel Ghosting: never copy raw source mouth/skin pixels)
+        // 6. Face Reaction Synthesis & Protruding Tongue / Oral Cavity Negative Artifact Suppression
         when (faceReactionMode) {
             FaceReactionSourceMode.TARGET_REACTION -> {
                 preserveTargetMouthTeethAndTongue512(
@@ -1142,6 +1155,13 @@ object FaceBlender {
                 }
             }
         }
+        // Always enforce Extended Tongue & Oral Cavity Artifact Suppression to eliminate split-tongue and mouth deformation
+        NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
+            swapPx512 = swapPx512,
+            tgtPx512 = tgtPx512,
+            geom512 = geom512,
+            sensitivity = 0.90f
+        )
 
         // 7. Build 512x512 Target-Aware Biometric Landmark-Fitted Mask with Hair/Occlusion Protection
         val tMask1 = System.currentTimeMillis()
@@ -1161,6 +1181,14 @@ object FaceBlender {
             swapPx512 = swapPx512,
             tgtPx512 = tgtPx512,
             mask512 = mask512
+        )
+
+        // 8b. LCM Inpainting & Custom LoRA Edge Refinement
+        LcmInpaintingPipeline.refineWithLcmInpainting512(
+            swapPx512 = swapPx512,
+            tgtPx512 = tgtPx512,
+            mask512 = mask512,
+            config = LcmInpaintingPipeline.LcmConfig()
         )
 
         // 9. Final-pass Target-Aware Upper-Lip & Philtrum Protection Lock
@@ -1946,7 +1974,12 @@ object FaceBlender {
         if (corePixels < 16) return
         val targetTeethRatio = targetWhiteTeethPixels.toFloat() / corePixels.toFloat()
         val swapTeethRatio = swapWhiteTeethPixels.toFloat() / corePixels.toFloat()
-        if (targetTeethRatio < 0.34f || swapTeethRatio >= 0.15f) {
+        val handledByTongueAndOralGuard = NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
+            swapPx512 = swapPx512,
+            tgtPx512 = tgtPx512,
+            geom512 = geom512
+        )
+        if (handledByTongueAndOralGuard || targetTeethRatio < 0.34f || swapTeethRatio >= 0.15f) {
             // Keep 100% of the swapped lips/mouth intact — zero double-lip or split-mouth artifacts!
             return
         }

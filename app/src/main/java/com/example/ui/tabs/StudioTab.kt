@@ -1,9 +1,11 @@
 package com.example.ui.tabs
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -134,6 +136,9 @@ fun StudioTab(
     onImportAllFromFolder: () -> Unit = {},
     onSkinToneModeChanged: (SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (FaceReactionSourceMode) -> Unit = {},
+    onNegativeArtifactSuppressionChanged: (Boolean) -> Unit = {},
+    onLcmInpaintingChanged: (Boolean) -> Unit = {},
+    onFaceAgingFactorChanged: (Float) -> Unit = {},
     onBrowseSourceFile: () -> Unit = onPickSourcePhoto,
     onBrowseTargetFile: () -> Unit = onPickTargetPhoto,
     onRunVisualValidation: () -> Unit = {},
@@ -258,12 +263,20 @@ fun StudioTab(
             }
 
             if (isSettingsPage) {
-                // User selects ONLY Skin Tone and Face Reaction
+                // User selects Skin Tone, Face Reaction, and Negative Artifact / LCM / StyleGAN engines
                 SkinToneAndReactionSelectorCard(
                     skinToneMode = uiState.skinToneMode,
                     faceReactionMode = uiState.faceReactionMode,
                     onSkinToneModeChanged = onSkinToneModeChanged,
                     onFaceReactionModeChanged = onFaceReactionModeChanged
+                )
+                AdvancedNegativeAndStyleSettingsCard(
+                    enableNegativeArtifactSuppression = uiState.enableNegativeArtifactSuppression,
+                    enableLcmInpainting = uiState.enableLcmInpainting,
+                    faceAgingFactor = uiState.faceAgingFactor,
+                    onNegativeArtifactSuppressionChanged = onNegativeArtifactSuppressionChanged,
+                    onLcmInpaintingChanged = onLcmInpaintingChanged,
+                    onFaceAgingFactorChanged = onFaceAgingFactorChanged
                 )
             } else {
                 // Page B: Alignment Preview, Multi-Face Selection, Interactive Before/After & Visual Validation
@@ -2519,6 +2532,152 @@ private fun VisualValidationAndStageInspectorCard(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun AdvancedNegativeAndStyleSettingsCard(
+    enableNegativeArtifactSuppression: Boolean,
+    enableLcmInpainting: Boolean,
+    faceAgingFactor: Float,
+    onNegativeArtifactSuppressionChanged: (Boolean) -> Unit,
+    onLcmInpaintingChanged: (Boolean) -> Unit,
+    onFaceAgingFactorChanged: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Negative Artifact & Style Controls",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = ElectricCyan
+                    )
+                    Text(
+                        text = "கண்கள், வாய் & நாக்கு பிழைத் தடுப்பு மற்றும் StyleGAN கட்டுப்பாடுகள்",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = NeonEmerald.copy(alpha = 0.15f),
+                    border = BorderStroke(1.dp, NeonEmerald.copy(alpha = 0.4f))
+                ) {
+                    Text(
+                        text = "100% OFFLINE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonEmerald,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+            // 1. Negative Artifact Suppression (Tongue, Mouth, Eye, Makeup)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "1. Negative Artifact Suppression",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "நாக்கு வெளியே நீட்டியிருந்தாலோ வாய் திறந்திருந்தாலோ பிளவுபடாமல் (Anti-Split Tongue) பாதுகாக்கும்; கண் இமை மேக்கப் & கருவிழி சிதைவைத் தடுக்கும்.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = enableNegativeArtifactSuppression,
+                    onCheckedChange = onNegativeArtifactSuppressionChanged,
+                    modifier = Modifier.testTag("negative_artifact_suppression_switch")
+                )
+            }
+
+            // 2. LCM Inpainting + Custom LoRA
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "2. LCM Inpainting + Custom LoRA",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "2-4 Step Latent Consistency Model அதிவேக விளிம்பு சீரமைப்பு & நுண்ணிய சருமத் தோற்ற ஒருங்கிணைப்பு.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = enableLcmInpainting,
+                    onCheckedChange = onLcmInpaintingChanged,
+                    modifier = Modifier.testTag("lcm_inpainting_switch")
+                )
+            }
+
+            // 3. Face-Aging & Expression StyleGAN
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "3. Face-Aging & Expression (StyleGAN)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = when {
+                            faceAgingFactor < -0.15f -> "Youthful / இளமை (${String.format("%.1f", faceAgingFactor)})"
+                            faceAgingFactor > 0.15f -> "Mature / முதிர்ச்சி (+${String.format("%.1f", faceAgingFactor)})"
+                            else -> "Natural / இயல்பு (0.0)"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (faceAgingFactor != 0f) AmberWarning else NeonEmerald
+                    )
+                }
+                Text(
+                    text = "இயற்கையான முகச் சுருக்கங்கள் அல்லது இளமையான மென்மைத் தோற்றத்தைக் கட்டுப்படுத்துகிறது.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = faceAgingFactor,
+                    onValueChange = onFaceAgingFactorChanged,
+                    valueRange = -1.0f..1.0f,
+                    modifier = Modifier.testTag("face_aging_slider")
+                )
             }
         }
     }

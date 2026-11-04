@@ -997,4 +997,88 @@ class ExampleRobolectricTest {
         assertEquals(512, warped512.height)
         warped512.recycle()
     }
+
+    @Test
+    fun test15_negativeArtifactSuppressionAndTongueProtection() {
+        val size = 512
+        val tgtPx = IntArray(size * size) { (0xFF shl 24) or (210 shl 16) or (175 shl 8) or 150 }
+        val swapPx = IntArray(size * size) { (0xFF shl 24) or (205 shl 16) or (170 shl 8) or 145 }
+
+        // Synthetic target with open mouth and protruding pink tongue
+        val mouthMidX = 256f
+        val mouthMidY = 360f
+        val tongueColor = (0xFF shl 24) or (225 shl 16) or (85 shl 8) or 110 // Pink/reddish tongue
+        val teethColor = (0xFF shl 24) or (245 shl 16) or (242 shl 8) or 240 // White enamel teeth
+
+        // Fill mouth cavity & teeth
+        for (y in 345..355) {
+            for (x in 220..290) {
+                tgtPx[y * size + x] = teethColor
+            }
+        }
+        // Fill protruding tongue extending downwards from lower lip
+        for (y in 356..410) {
+            for (x in 230..280) {
+                tgtPx[y * size + x] = tongueColor
+            }
+        }
+
+        // Swapper erroneously painted skin on the tongue
+        for (y in 345..410) {
+            for (x in 220..290) {
+                swapPx[y * size + x] = (0xFF shl 24) or (205 shl 16) or (170 shl 8) or 145
+            }
+        }
+
+        val geom = com.example.onnx.FaceBlender.computeWarpedGeometry(
+            FloatArray(6) { 0f }.apply { this[0] = 1f; this[4] = 1f },
+            listOf(
+                android.graphics.PointF(200f, 220f),
+                android.graphics.PointF(312f, 220f),
+                android.graphics.PointF(256f, 290f),
+                android.graphics.PointF(215f, 355f),
+                android.graphics.PointF(297f, 355f)
+            ),
+            scale = 1.0f
+        )
+
+        // 1. Run Negative Artifact Suppression for Oral Cavity & Protruding Tongue
+        val suppressed = com.example.onnx.NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
+            swapPx512 = swapPx,
+            tgtPx512 = tgtPx,
+            geom512 = geom,
+            sensitivity = 0.90f
+        )
+        assertTrue("Oral and tongue suppression must detect and protect protruding tongue", suppressed)
+
+        // Verify tongue pixels are restored from Target (high red channel, tongue hue)
+        val sampleTonguePx = swapPx[380 * size + 256]
+        val tongueR = (sampleTonguePx ushr 16) and 0xFF
+        val tongueG = (sampleTonguePx ushr 8) and 0xFF
+        assertTrue("Restored tongue pixel must retain tongue pink redness (R=$tongueR, G=$tongueG)", tongueR > tongueG + 50)
+
+        // 2. Run Ocular & Eyelid Makeup Suppression
+        com.example.onnx.NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
+            swapPx512 = swapPx,
+            tgtPx512 = tgtPx,
+            geom512 = geom,
+            makeupPreservationStrength = 0.85f
+        )
+
+        // 3. Run Face-Aging Engine
+        com.example.onnx.FaceAgingStyleEngine.applyFaceAgingAndStyle512(
+            pixels512 = swapPx,
+            geom512 = geom,
+            params = com.example.onnx.FaceAgingStyleEngine.AgingParameters(ageFactor = 0.5f)
+        )
+
+        // 4. Run LCM Inpainting Pipeline
+        val mask = FloatArray(size * size) { 0.5f }
+        com.example.onnx.LcmInpaintingPipeline.refineWithLcmInpainting512(
+            swapPx512 = swapPx,
+            tgtPx512 = tgtPx,
+            mask512 = mask,
+            config = com.example.onnx.LcmInpaintingPipeline.LcmConfig(enableLcmInpainting = true)
+        )
+    }
 }
