@@ -273,7 +273,7 @@ fun FaceSwapStudioApp(
 
                     Spacer(modifier = Modifier.width(4.dp))
 
-                    // Settings gear icon button (⚙️) -> opens/closes Settings containing Models, History & Safety
+                    // Settings gear icon button (⚙️) -> highly visible luminous frosted button
                     val isInsideSettings = uiState.currentTab != AppTab.STUDIO ||
                         uiState.studioSubPage == StudioSubPage.SETTINGS_AND_DIAGNOSTICS
                     IconButton(
@@ -286,16 +286,22 @@ fun FaceSwapStudioApp(
                             }
                         },
                         modifier = Modifier
+                            .size(38.dp)
                             .clip(CircleShape)
                             .background(
-                                if (isInsideSettings) Color(0xFF1C163B) else Color.Transparent
+                                if (isInsideSettings) Color(0xFFE0F2FE) else Color(0xF2FFFFFF)
+                            )
+                            .border(
+                                width = 1.2.dp,
+                                color = if (isInsideSettings) Color(0xFF0284C7) else Color(0x9938BDF8),
+                                shape = CircleShape
                             )
                             .testTag("top_settings_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Settings (Models, History, Safety)",
-                            tint = if (isInsideSettings) ElectricCyan else Color(0xFF9FB0D0),
+                            tint = if (isInsideSettings) Color(0xFF0284C7) else Color(0xFF0F172A),
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -451,25 +457,30 @@ fun FaceSwapStudioApp(
                 visible = uiState.errorBannerMessage != null || uiState.statusBannerMessage != null
             ) {
                 val isError = uiState.errorBannerMessage != null
-                val bannerColor = if (isError) CoralError else NeonEmerald
+                val bannerBg = Color(0xF7FFFFFF) // Solid frosted white surface
+                val borderColor = if (isError) Color(0xFFEF4444) else Color(0xFF10B981)
+                val textAccentColor = if (isError) Color(0xFF991B1B) else Color(0xFF065F46) // Deep, high-contrast readable text
                 val message = uiState.errorBannerMessage ?: uiState.statusBannerMessage.orEmpty()
 
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(bannerColor.copy(alpha = 0.16f))
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(bannerBg)
+                        .border(1.5.dp, borderColor, RoundedCornerShape(14.dp))
                         .clickable { viewModel.clearMessages() }
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
                         text = message,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = bannerColor,
-                        fontWeight = FontWeight.SemiBold,
+                        color = textAccentColor,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.5.sp,
+                        lineHeight = 17.sp,
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(
@@ -479,7 +490,7 @@ fun FaceSwapStudioApp(
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Dismiss notification",
-                            tint = bannerColor,
+                            tint = textAccentColor,
                             modifier = Modifier.size(18.dp)
                         )
                     }

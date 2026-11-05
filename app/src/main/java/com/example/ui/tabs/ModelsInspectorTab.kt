@@ -356,7 +356,8 @@ private fun ModelInspectionCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        border = BorderStroke(1.2.dp, Color(0x6638BDF8)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xE6FFFFFF))
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -429,8 +430,8 @@ private fun ModelInspectionCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(RoyalViolet.copy(alpha = 0.14f))
-                    .border(1.dp, ElectricCyan.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .background(Color(0xFFF0FDF4))
+                    .border(1.dp, Color(0xFF86EFAC), RoundedCornerShape(12.dp))
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -438,12 +439,12 @@ private fun ModelInspectionCard(
                     text = "தமிழ் விளக்கம்: ${slot.tamilTitle}",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
-                    color = NeonEmerald
+                    color = Color(0xFF065F46)
                 )
                 Text(
                     text = slot.tamilRoleSummary,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = Color(0xFF1E293B)
                 )
             }
 
