@@ -197,26 +197,12 @@ fun StudioFrontPage(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
-        // Dreamy Pastel Soap Bubbles Wallpaper Background
+        // Dreamy Pastel Soap Bubbles Wallpaper Background - 100% CLEAN & LUMINOUS
         Image(
             painter = painterResource(id = R.drawable.bg_dreamy_bubbles),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
-        )
-        // Soft gradient overlay to enhance glassmorphism contrast and maintain high text legibility
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0x990A1329),
-                            Color(0x66081024),
-                            Color(0xBB060C1E)
-                        )
-                    )
-                )
         )
         Column(
             modifier = Modifier
@@ -423,29 +409,22 @@ private fun FrontChooseModeSection(
             Text(
                 text = "Choose Mode",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFF0F172A),
                 fontSize = 18.sp
             )
 
-            // 1-Tap Auto-Import All .onnx from Folder pill button at the red arrow position
+            // 1-Tap Auto-Import All .onnx from Folder pill button in Frosted Glass style
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                Color(0xFF0B2246),
-                                Color(0xFF091B3A)
-                            )
-                        )
-                    )
+                    .background(Color(0xD9FFFFFF))
                     .border(
                         width = 1.2.dp,
                         brush = Brush.horizontalGradient(
                             colors = listOf(
-                                Color(0xFF1E88E5),
-                                Color(0xFF00B4FF)
+                                Color(0xFF38BDF8),
+                                Color(0xFFA855F7)
                             )
                         ),
                         shape = RoundedCornerShape(50)
@@ -520,19 +499,19 @@ private fun ModeSelectionCard(
     val bgBrush = if (isSelected) {
         Brush.horizontalGradient(
             colors = listOf(
-                Color(0xEB0C275E),
-                Color(0xD9103378)
+                Color(0xF2FFFFFF),
+                Color(0xE6F0F9FF)
             )
         )
     } else {
         Brush.horizontalGradient(
             colors = listOf(
-                Color(0xB30E1838),
-                Color(0x9913214A)
+                Color(0xCCFFFFFF),
+                Color(0xB3F8FAFC)
             )
         )
     }
-    val borderColor = if (isSelected) Color(0xFF38BDF8) else Color(0x4067E8F9)
+    val borderColor = if (isSelected) Color(0xFF0284C7) else Color(0x6638BDF8)
 
     Box(
         modifier = modifier
@@ -540,7 +519,7 @@ private fun ModeSelectionCard(
             .clip(shape)
             .background(bgBrush)
             .border(
-                width = if (isSelected) 1.6.dp else 1.dp,
+                width = if (isSelected) 1.8.dp else 1.2.dp,
                 color = borderColor,
                 shape = shape
             )
@@ -558,11 +537,11 @@ private fun ModeSelectionCard(
                     .size(46.dp)
                     .clip(CircleShape)
                     .background(
-                        if (isSelected) Color(0xFF052456) else Color(0xFF15203B)
+                        if (isSelected) Color(0xFFE0F2FE) else Color(0xFFF1F5F9)
                     )
                     .border(
                         width = 1.4.dp,
-                        color = if (isSelected) Color(0xFF00D4FF) else Color(0xFF566B98),
+                        color = if (isSelected) Color(0xFF0284C7) else Color(0xFF94A3B8),
                         shape = CircleShape
                     ),
                 contentAlignment = Alignment.Center
@@ -571,12 +550,12 @@ private fun ModeSelectionCard(
                     Icon(
                         imageVector = Icons.Default.People,
                         contentDescription = title,
-                        tint = if (isSelected) Color(0xFF18E0FF) else Color(0xFFB8C7E6),
+                        tint = if (isSelected) Color(0xFF0284C7) else Color(0xFF475569),
                         modifier = Modifier.size(25.dp)
                     )
                 } else {
                     HeadWithHairSilhouetteIcon(
-                        tint = if (isSelected) Color(0xFF18E0FF) else Color(0xFFD6E2F8),
+                        tint = if (isSelected) Color(0xFF0284C7) else Color(0xFF475569),
                         modifier = Modifier.size(26.dp)
                     )
                 }
@@ -590,8 +569,8 @@ private fun ModeSelectionCard(
             ) {
                 Text(
                     text = title,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0F172A),
+                    fontWeight = FontWeight.ExtraBold,
                     fontSize = 13.5.sp,
                     lineHeight = 16.sp,
                     maxLines = 2,
@@ -600,9 +579,10 @@ private fun ModeSelectionCard(
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = subtitle,
-                    color = if (isSelected) Color(0xFFB8D4F8) else Color(0xFF8EA0C4),
+                    color = Color(0xFF475569),
                     fontSize = 10.5.sp,
                     lineHeight = 13.sp,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -674,8 +654,8 @@ private fun FrontMainWorkspaceCard(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = cardShape,
-        color = Color(0xD90E1938),
-        border = BorderStroke(1.dp, Color(0x4D38BDF8))
+        color = Color(0xE6FFFFFF), // Luminous Frosted Glass (matching Image 1)
+        border = BorderStroke(1.2.dp, Color(0x6638BDF8))
     ) {
         Column(
             modifier = Modifier
@@ -687,7 +667,7 @@ private fun FrontMainWorkspaceCard(
             PhotoStepRow(
                 stepNumber = "1",
                 stepCircleBrush = Brush.verticalGradient(
-                    colors = listOf(Color(0xFF1E90FF), Color(0xFF0066FF))
+                    colors = listOf(Color(0xFF0284C7), Color(0xFF0369A1))
                 ),
                 title = "Source Face",
                 subtitle = if (uiState.sourceFaces.isNotEmpty()) {
@@ -697,22 +677,22 @@ private fun FrontMainWorkspaceCard(
                 },
                 bitmap = uiState.sourceBitmap,
                 isLoading = uiState.isDetectingSource,
-                thumbnailBorderColor = Color(0xFF00D4FF),
+                thumbnailBorderColor = Color(0xFF0284C7),
                 buttonFillBrush = Brush.horizontalGradient(
-                    colors = listOf(Color(0xFF0C2246), Color(0xFF0E2A56))
+                    colors = listOf(Color(0xFFE0F2FE), Color(0xFFBAE6FD))
                 ),
-                buttonBorderColor = Color(0xFF00B4FF),
+                buttonBorderColor = Color(0xFF0284C7),
                 buttonTestTag = "btn_select_source",
                 onPickPhoto = onPickSourcePhoto
             )
 
-            HorizontalDivider(color = Color(0xFF182442), thickness = 1.dp)
+            HorizontalDivider(color = Color(0x330284C7), thickness = 1.dp)
 
             // Row 2: 2 Target Photo
             PhotoStepRow(
                 stepNumber = "2",
                 stepCircleBrush = Brush.verticalGradient(
-                    colors = listOf(Color(0xFF8B5CF6), Color(0xFF6D28D9))
+                    colors = listOf(Color(0xFF9333EA), Color(0xFF7E22CE))
                 ),
                 title = "Target Photo",
                 subtitle = if (uiState.targetFaces.isNotEmpty()) {
@@ -722,32 +702,32 @@ private fun FrontMainWorkspaceCard(
                 },
                 bitmap = uiState.targetBitmap,
                 isLoading = uiState.isDetectingTarget,
-                thumbnailBorderColor = Color(0xFF38BDF8),
+                thumbnailBorderColor = Color(0xFF9333EA),
                 buttonFillBrush = Brush.horizontalGradient(
-                    colors = listOf(Color(0xFF4C249E), Color(0xFF6432C8))
+                    colors = listOf(Color(0xFFF3E8FF), Color(0xFFE9D5FF))
                 ),
-                buttonBorderColor = Color(0xFF9F67FF),
+                buttonBorderColor = Color(0xFF9333EA),
                 buttonTestTag = "btn_select_target",
                 onPickPhoto = onPickTargetPhoto
             )
 
-            HorizontalDivider(color = Color(0xFF182442), thickness = 1.dp)
+            HorizontalDivider(color = Color(0x330284C7), thickness = 1.dp)
 
             // Direct User Selection: 1. Skin Tone (தோல் நிறம்) & 2. Face Reaction (முகபாவனை)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF0E1832))
-                    .border(1.dp, Color(0xFF22335C), RoundedCornerShape(14.dp))
+                    .background(Color(0x80F0F9FF))
+                    .border(1.dp, Color(0x4D0284C7), RoundedCornerShape(14.dp))
                     .padding(horizontal = 10.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // 1. Skin Tone Selector
                 Text(
                     text = "Skin Tone (தோல் நிறம்)",
-                    color = Color(0xFF93C5FD),
-                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF0369A1),
+                    fontWeight = FontWeight.Bold,
                     fontSize = 12.sp
                 )
                 Row(
@@ -999,17 +979,18 @@ private fun PhotoStepRow(
         ) {
             Text(
                 text = title,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
+                color = Color(0xFF0F172A),
+                fontWeight = FontWeight.ExtraBold,
                 fontSize = 15.sp,
                 lineHeight = 18.sp
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = subtitle,
-                color = Color(0xFF98A8C8),
+                color = Color(0xFF334155),
                 fontSize = 11.5.sp,
                 lineHeight = 14.sp,
+                fontWeight = FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1148,8 +1129,8 @@ private fun FrontResultShowcaseCard(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = cardShape,
-        color = Color(0xD90E1938),
-        border = BorderStroke(1.dp, Color(0x4D38BDF8))
+        color = Color(0xE6FFFFFF), // Luminous Frosted Glass (matching Image 1)
+        border = BorderStroke(1.2.dp, Color(0x66C084FC))
     ) {
         Column(
             modifier = Modifier
@@ -1170,13 +1151,13 @@ private fun FrontResultShowcaseCard(
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = null,
-                        tint = Color(0xFF9F67FF),
+                        tint = Color(0xFF7E22CE),
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
                         text = "Result",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0F172A),
+                        fontWeight = FontWeight.ExtraBold,
                         fontSize = 15.5.sp
                     )
                 }

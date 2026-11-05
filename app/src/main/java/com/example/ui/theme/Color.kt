@@ -19,3 +19,13 @@ val LightSurface = Color(0xFFFFFFFF)
 val LightSurfaceVariant = Color(0xFFE4E9F7)
 val DeepCyan = Color(0xFF006876)
 val DeepViolet = Color(0xFF512DA8)
+
+// Pastel Glassmorphism Tokens (matching Reference Image 1)
+val GlassWhiteSurface = Color(0xCCFFFFFF) // 80% translucent crystal white
+val GlassWhiteElevated = Color(0xE6FFFFFF) // 90% translucent white
+val GlassBorderCyan = Color(0x9938BDF8) // Soft pastel cyan border glow
+val GlassBorderPurple = Color(0x99C084FC) // Soft pastel lavender border glow
+val GlassTextNavy = Color(0xFF0F172A) // High contrast deep navy for crystal clear reading
+val GlassTextMuted = Color(0xFF334155) // Slate gray for secondary descriptions
+val GlassPillActive = Color(0xE60EA5E9) // Vibrant blue pill
+

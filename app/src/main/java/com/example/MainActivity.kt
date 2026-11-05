@@ -301,8 +301,8 @@ fun FaceSwapStudioApp(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xD90A1329),
-                    titleContentColor = Color.White
+                    containerColor = Color(0xB3FFFFFF),
+                    titleContentColor = Color(0xFF0F172A)
                 )
             )
         }
@@ -315,26 +315,12 @@ fun FaceSwapStudioApp(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Dreamy pastel bubbles background wallpaper
+            // Dreamy pastel bubbles background wallpaper - 100% CLEAN & FULLY VISIBLE (matching Image 1)
             androidx.compose.foundation.Image(
                 painter = androidx.compose.ui.res.painterResource(id = R.drawable.bg_dreamy_bubbles),
                 contentDescription = null,
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
-            )
-            // Soft atmospheric overlay for high contrast and readability
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color(0xB3081024),
-                                Color(0x8C0A1530),
-                                Color(0xCC060B1A)
-                            )
-                        )
-                    )
             )
 
             Column(
@@ -345,7 +331,8 @@ fun FaceSwapStudioApp(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xD90E1838))
+                            .background(Color(0xD9FFFFFF))
+                            .border(1.dp, Color(0x6638BDF8))
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {

@@ -1,7 +1,9 @@
 package com.example.ui.tabs
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -81,7 +83,8 @@ fun ModelsInspectorTab(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                border = androidx.compose.foundation.BorderStroke(1.2.dp, Color(0x6638BDF8)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xE6FFFFFF))
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -90,25 +93,27 @@ fun ModelsInspectorTab(
                     Text(
                         text = "தற்போது மெமரியில் (RAM) உள்ள மாடல்கள் & அவற்றின் பயன்கள்",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = NeonEmerald
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF0F172A)
                     )
                     Text(
                         text = "ONNX Runtime In-Memory Service • Active in RAM: ${memoryServiceState.activeSessionCount} மாடல்கள்",
                         style = MaterialTheme.typography.labelMedium,
-                        color = ElectricCyan
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0369A1)
                     )
                     Text(
                         text = "கீழே உள்ள பட்டியலில் எந்தெந்த .onnx மாடல்கள் தற்போது நேரடியாக RAM மெமரியில் ஏற்றப்பட்டுள்ளன என்பதையும், ஒவ்வொரு மாடலும் எதற்காகப் பயன்படுகிறது என்பதையும் தமிழில் காணலாம்:",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = Color(0xFF334155)
                     )
 
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .background(ObsidianBg)
+                            .background(Color(0xB3F1F5F9))
+                            .border(1.dp, Color(0x4D38BDF8), RoundedCornerShape(10.dp))
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
