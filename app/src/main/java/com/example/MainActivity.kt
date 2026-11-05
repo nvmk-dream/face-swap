@@ -301,7 +301,7 @@ fun FaceSwapStudioApp(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF070C1A),
+                    containerColor = Color(0xD90A1329),
                     titleContentColor = Color.White
                 )
             )
@@ -310,21 +310,45 @@ fun FaceSwapStudioApp(
         val isInsideSettings = uiState.currentTab != AppTab.STUDIO ||
             uiState.studioSubPage == StudioSubPage.SETTINGS_AND_DIAGNOSTICS
 
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF070C1A))
                 .padding(innerPadding)
         ) {
-            // Settings Hub Header & Switcher (Models, History, Safety) shown ONLY when ⚙️ Settings is opened
-            AnimatedVisibility(visible = isInsideSettings) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF0B1328))
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+            // Dreamy pastel bubbles background wallpaper
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(id = R.drawable.bg_dreamy_bubbles),
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            // Soft atmospheric overlay for high contrast and readability
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xB3081024),
+                                Color(0x8C0A1530),
+                                Color(0xCC060B1A)
+                            )
+                        )
+                    )
+            )
+
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // Settings Hub Header & Switcher (Models, History, Safety) shown ONLY when ⚙️ Settings is opened
+                AnimatedVisibility(visible = isInsideSettings) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xD90E1838))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -562,5 +586,6 @@ fun FaceSwapStudioApp(
                 AppTab.ETHICS -> SafetyLicensesTab()
             }
         }
+    }
     }
 }

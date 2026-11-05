@@ -194,19 +194,30 @@ fun StudioFrontPage(
     val scrollState = rememberScrollState()
 
     Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF070C1A),
-                        Color(0xFF0B1226),
-                        Color(0xFF070C1A)
-                    )
-                )
-            ),
+        modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
+        // Dreamy Pastel Soap Bubbles Wallpaper Background
+        Image(
+            painter = painterResource(id = R.drawable.bg_dreamy_bubbles),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+        // Soft gradient overlay to enhance glassmorphism contrast and maintain high text legibility
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0x990A1329),
+                            Color(0x66081024),
+                            Color(0xBB060C1E)
+                        )
+                    )
+                )
+        )
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -509,19 +520,19 @@ private fun ModeSelectionCard(
     val bgBrush = if (isSelected) {
         Brush.horizontalGradient(
             colors = listOf(
-                Color(0xFF082E6D),
-                Color(0xFF0B224E)
+                Color(0xEB0C275E),
+                Color(0xD9103378)
             )
         )
     } else {
         Brush.horizontalGradient(
             colors = listOf(
-                Color(0xFF0E162B),
-                Color(0xFF0D1426)
+                Color(0xB30E1838),
+                Color(0x9913214A)
             )
         )
     }
-    val borderColor = if (isSelected) Color(0xFF00E5FF) else Color(0xFF233253)
+    val borderColor = if (isSelected) Color(0xFF38BDF8) else Color(0x4067E8F9)
 
     Box(
         modifier = modifier
@@ -663,8 +674,8 @@ private fun FrontMainWorkspaceCard(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = cardShape,
-        color = Color(0xFF0C1428),
-        border = BorderStroke(1.dp, Color(0xFF1E2D50))
+        color = Color(0xD90E1938),
+        border = BorderStroke(1.dp, Color(0x4D38BDF8))
     ) {
         Column(
             modifier = Modifier
@@ -1137,8 +1148,8 @@ private fun FrontResultShowcaseCard(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = cardShape,
-        color = Color(0xFF0C1428),
-        border = BorderStroke(1.dp, Color(0xFF1E2D50))
+        color = Color(0xD90E1938),
+        border = BorderStroke(1.dp, Color(0x4D38BDF8))
     ) {
         Column(
             modifier = Modifier

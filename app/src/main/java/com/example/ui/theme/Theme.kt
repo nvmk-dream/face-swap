@@ -18,12 +18,12 @@ private val DarkColorScheme = darkColorScheme(
     onSecondaryContainer = Color(0xFFE3D6FF),
     tertiary = NeonEmerald,
     onTertiary = Color(0xFF003919),
-    background = ObsidianBg,
+    background = Color(0xFF070E22),
     onBackground = TextPrimaryDark,
-    surface = ObsidianSurface,
+    surface = Color(0xCC0E1838), // Translucent Glassmorphism Surface
     onSurface = TextPrimaryDark,
-    surfaceVariant = ObsidianSurfaceVariant,
-    onSurfaceVariant = TextSecondaryDark,
+    surfaceVariant = Color(0xD917244D), // Elevated Glass Card Variant
+    onSurfaceVariant = Color(0xFFD4E2FD),
     error = CoralError,
     onError = Color.White
 )
