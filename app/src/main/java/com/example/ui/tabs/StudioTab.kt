@@ -490,7 +490,11 @@ private fun StudioModeSwitcherCard(
                 StudioMode.entries.forEach { mode ->
                     val selected = currentMode == mode
                     val containerColor = if (selected) {
-                        if (mode == StudioMode.HEAD_REPLACEMENT) NeonEmerald else ElectricCyan
+                        when (mode) {
+                            StudioMode.HEAD_REPLACEMENT -> NeonEmerald
+                            StudioMode.IDENTITY_PRESERVED -> AmberWarning
+                            else -> ElectricCyan
+                        }
                     } else {
                         MaterialTheme.colorScheme.surfaceVariant
                     }
@@ -508,10 +512,10 @@ private fun StudioModeSwitcherCard(
                             .background(containerColor)
                             .clickable { onSelectMode(mode) }
                             .testTag(
-                                if (mode == StudioMode.FACE_SWAP) {
-                                    "mode_selector_face_swap"
-                                } else {
-                                    "mode_selector_head_replacement"
+                                when (mode) {
+                                    StudioMode.FACE_SWAP -> "mode_selector_face_swap"
+                                    StudioMode.IDENTITY_PRESERVED -> "mode_selector_identity_preserved"
+                                    StudioMode.HEAD_REPLACEMENT -> "mode_selector_head_replacement"
                                 }
                             ),
                         contentAlignment = Alignment.Center
@@ -528,7 +532,11 @@ private fun StudioModeSwitcherCard(
             Text(
                 text = currentMode.badge,
                 style = MaterialTheme.typography.labelMedium,
-                color = if (currentMode == StudioMode.HEAD_REPLACEMENT) NeonEmerald else ElectricCyan
+                color = when (currentMode) {
+                    StudioMode.HEAD_REPLACEMENT -> NeonEmerald
+                    StudioMode.IDENTITY_PRESERVED -> AmberWarning
+                    else -> ElectricCyan
+                }
             )
         }
     }

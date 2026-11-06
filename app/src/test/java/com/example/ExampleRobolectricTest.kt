@@ -27,7 +27,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34])
 class ExampleRobolectricTest {
 
     private val context: Context
@@ -1080,5 +1080,34 @@ class ExampleRobolectricTest {
             mask512 = mask,
             config = com.example.onnx.LcmInpaintingPipeline.LcmConfig(enableLcmInpainting = true)
         )
+    }
+
+    @Test
+    fun testIdentityPreservation_ZeroDifferenceOutsideBoundary() {
+        val landmarks5 = listOf(
+            PointF(192f, 240f),
+            PointF(320f, 240f),
+            PointF(256f, 310f),
+            PointF(210f, 380f),
+            PointF(302f, 380f)
+        )
+
+        val mask = com.example.onnx.FaceIdentityPreserver.createZeroDifferenceTargetBoundaryMask512(
+            targetLandmarks5 = landmarks5,
+            dstSize = 512,
+            featherRadiusPx = 5.0f
+        )
+        assertNotNull("Mask must be generated", mask)
+        assertEquals("Mask size must be 512x512", 512 * 512, mask.size)
+
+        // Strict verification: corners and edges (outside face boundary) must be exactly 0.0f
+        assertEquals("Top-left pixel must be strictly 0.0 (untouched)", 0.0f, mask[0], 1e-4f)
+        assertEquals("Top-right pixel must be strictly 0.0 (untouched)", 0.0f, mask[511], 1e-4f)
+        assertEquals("Bottom-left pixel must be strictly 0.0 (untouched)", 0.0f, mask[511 * 512], 1e-4f)
+        assertEquals("Bottom-right pixel must be strictly 0.0 (untouched)", 0.0f, mask[512 * 512 - 1], 1e-4f)
+
+        // Center face pixel (between eyes and nose) must have high weight
+        val centerIdx = 290 * 512 + 256
+        assertTrue("Face core pixel must have high alpha coverage (actual=${mask[centerIdx]})", mask[centerIdx] > 0.85f)
     }
 }

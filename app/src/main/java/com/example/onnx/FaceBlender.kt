@@ -922,6 +922,7 @@ object FaceBlender {
         segformerFile: File? = null,
         preloadedGfpganSession: OrtSession? = null,
         preloadedSegformerSession: OrtSession? = null,
+        identityPreservationMode: Boolean = false,
         onStagesCaptured: ((stage1SwapOnly512: Bitmap, stage2SwapRestore512: Bitmap, stage3FinalBlend512: Bitmap) -> Unit)? = null,
         onSubStageTimings: ((restoration512Ms: Long, upperLipGuardMs: Long, maskGenerationMs: Long, finalBlendingMs: Long) -> Unit)? = null
     ): Bitmap {
@@ -957,7 +958,7 @@ object FaceBlender {
 
         val clampedEnhance = enhancementStrength.coerceIn(0f, 1f)
         val tRestore0 = System.currentTimeMillis()
-        val gfp512 = if (clampedEnhance > 0.05f && (preloadedGfpganSession != null || gfpganFile != null)) {
+        val gfp512 = if (!identityPreservationMode && clampedEnhance > 0.05f && (preloadedGfpganSession != null || gfpganFile != null)) {
             runOptionalGfpganEnhancement512(
                 ortEnv = ortEnv,
                 gfpganFile = gfpganFile,
@@ -1013,118 +1014,130 @@ object FaceBlender {
             )
         }
 
-        // 1b. 34-Point 3D Anatomical Feature Disentanglement + VAE/GAN Spatially-Adaptive Feature-Fusion (AdaIN/SPADE):
-        //     Adapts side-view 3D surface shading across NoseBridge, NoseTip, NostrilBulge, LipUpper, and Puffer
-        //     while reinforcing high-frequency GAN micro-detail without any pixel cutouts.
-        LatentFeatureFusionEngine.applyVaeGanLatentFeatureFusion512(
-            swappedPixels512 = swapPx512,
-            targetPixels512 = tgtPx512,
-            targetRecon3D512 = geom512.reconstructed3D,
-            skinToneMode = skinToneMode
-        )
-
-        // 2. First-pass Target-Aware Upper-Lip / Philtrum Moustache & Grey-Patch Guard
-        val tGuard0 = System.currentTimeMillis()
-        val hadDonorMoustache = protectTargetUpperLipAndEliminateMoustache512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            geom512 = geom512,
-            forceMoustacheCleanse = false
-        )
-        var upperLipGuardMs = (System.currentTimeMillis() - tGuard0).coerceAtLeast(1L)
-
-        // 3. Apply frequency-separated 512x512 HD anatomical feature crispness boost on eyes, nose nostrils/bridge, and lips
-        //    (strictly excluding the philtrum/upper-lip skin region)
-        enhanceAnatomicalFeatures512(
-            swapPx512 = swapPx512,
-            geom512 = geom512,
-            strength = (0.42f + 0.52f * clampedEnhance).coerceIn(0.32f, 0.94f)
-        )
-
-        // 4. Subtle 512x512 Skin Pore Micro-Texture Harmonization strictly on smooth cheek/forehead skin
-        val poreScale = (if (skinToneMode == SkinToneSourceMode.SOURCE_IDENTITY) 0.08f else 0.14f) *
-            (0.4f + 0.6f * clampedEnhance)
-        val mouthMidX512 = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
-        val mouthMidY512 = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
-        for (y in 24 until HD_SIZE - 24) {
-            val row = y * HD_SIZE
-            for (x in 24 until HD_SIZE - 24) {
-                if (computeEyeAndBrowProtectionWeight(x.toFloat(), y.toFloat(), geom512) > 0.05f) continue
-                val dNoseSq = orientedEllipseDistSq(
-                    x.toFloat(), y.toFloat(),
-                    geom512.nose.x, geom512.nose.y,
-                    geom512.eyeDist * 0.40f, geom512.eyeDist * 0.48f,
-                    geom512.cosA, geom512.sinA
-                )
-                if (dNoseSq <= 1.0f) continue
-                val dMouthSq = orientedEllipseDistSq(
-                    x.toFloat(), y.toFloat(),
-                    mouthMidX512, mouthMidY512,
-                    geom512.eyeDist * 0.62f, geom512.eyeDist * 0.46f,
-                    geom512.cosA, geom512.sinA
-                )
-                if (dMouthSq <= 1.0f) continue
-
-                val idx = row + x
-                val tc = tgtPx512[idx]
-                val tR = (tc ushr 16) and 0xFF
-                val tG = (tc ushr 8) and 0xFF
-                val tB = tc and 0xFF
-                val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
-
-                val n = tgtPx512[(y - 2) * HD_SIZE + x]
-                val s = tgtPx512[(y + 2) * HD_SIZE + x]
-                val l = tgtPx512[row + x - 2]
-                val r = tgtPx512[row + x + 2]
-                val tAvgLum = (
-                    (0.299f * (n ushr 16 and 0xFF) + 0.587f * (n ushr 8 and 0xFF) + 0.114f * (n and 0xFF)) +
-                    (0.299f * (s ushr 16 and 0xFF) + 0.587f * (s ushr 8 and 0xFF) + 0.114f * (s and 0xFF)) +
-                    (0.299f * (l ushr 16 and 0xFF) + 0.587f * (l ushr 8 and 0xFF) + 0.114f * (l and 0xFF)) +
-                    (0.299f * (r ushr 16 and 0xFF) + 0.587f * (r ushr 8 and 0xFF) + 0.114f * (r and 0xFF))
-                ) * 0.25f
-
-                val poreDiff = tLum - tAvgLum
-                if (tLum > 85f && abs(poreDiff) < 7f) {
-                    val sc = swapPx512[idx]
-                    val sr = (sc ushr 16) and 0xFF
-                    val sg = (sc ushr 8) and 0xFF
-                    val sb = sc and 0xFF
-                    val poreBoost = poreDiff * poreScale
-                    val nr = (sr + poreBoost).toInt().coerceIn(0, 255)
-                    val ng = (sg + poreBoost).toInt().coerceIn(0, 255)
-                    val nb = (sb + poreBoost).toInt().coerceIn(0, 255)
-                    swapPx512[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-                }
-            }
+        var srcWarpBmp: Bitmap? = null
+        if (identityPreservationMode && sourceBitmap != null && sourceLandmarks5 != null && sourceLandmarks5.size >= 5) {
+            srcWarpBmp = FaceIdentityPreserver.warpSourceTextureToTargetGeometry512(
+                sourceBitmap = sourceBitmap,
+                sourceLandmarks5 = sourceLandmarks5,
+                targetLandmarks5 = targetLandmarks5,
+                dstSize = HD_SIZE
+            )
         }
 
-        // 5. Dynamic Landmark Eye & Eyebrow Protection (preserves 100% of swapped eye/brow identity)
-        restoreDynamicEyebrowContinuity(
-            outPx = swapPx512,
-            tgtPx = tgtPx512,
-            size = HD_SIZE,
-            geom = geom512
-        )
-        restoreDynamicOcularSockets(
-            outPx = swapPx512,
-            tgtPx = tgtPx512,
-            srcPx = null,
-            size = HD_SIZE,
-            geom = geom512
-        )
-        // Negative Artifact Suppression: Protect squinted/winking eyelids, eyeliner, and makeup integrity
-        NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            geom512 = geom512,
-            makeupPreservationStrength = 0.85f
-        )
-        // Face-Aging & Expression Style Engine
-        FaceAgingStyleEngine.applyFaceAgingAndStyle512(
-            pixels512 = swapPx512,
-            geom512 = geom512,
-            params = FaceAgingStyleEngine.AgingParameters(ageFactor = 0.0f)
-        )
+        var hadDonorMoustache = false
+        var upperLipGuardMs = 1L
+
+        if (!identityPreservationMode) {
+            // 1b. 34-Point 3D Anatomical Feature Disentanglement + VAE/GAN Spatially-Adaptive Feature-Fusion (AdaIN/SPADE):
+            LatentFeatureFusionEngine.applyVaeGanLatentFeatureFusion512(
+                swappedPixels512 = swapPx512,
+                targetPixels512 = tgtPx512,
+                targetRecon3D512 = geom512.reconstructed3D,
+                skinToneMode = skinToneMode
+            )
+
+            // 2. First-pass Target-Aware Upper-Lip / Philtrum Moustache & Grey-Patch Guard
+            val tGuard0 = System.currentTimeMillis()
+            hadDonorMoustache = protectTargetUpperLipAndEliminateMoustache512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                geom512 = geom512,
+                forceMoustacheCleanse = false
+            )
+            upperLipGuardMs = (System.currentTimeMillis() - tGuard0).coerceAtLeast(1L)
+
+            // 3. Apply frequency-separated 512x512 HD anatomical feature crispness boost
+            enhanceAnatomicalFeatures512(
+                swapPx512 = swapPx512,
+                geom512 = geom512,
+                strength = (0.42f + 0.52f * clampedEnhance).coerceIn(0.32f, 0.94f)
+            )
+
+            // 4. Subtle 512x512 Skin Pore Micro-Texture Harmonization strictly on smooth cheek/forehead skin
+            val poreScale = (if (skinToneMode == SkinToneSourceMode.SOURCE_IDENTITY) 0.08f else 0.14f) *
+                (0.4f + 0.6f * clampedEnhance)
+            val mouthMidX512 = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
+            val mouthMidY512 = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
+            for (y in 24 until HD_SIZE - 24) {
+                val row = y * HD_SIZE
+                for (x in 24 until HD_SIZE - 24) {
+                    if (computeEyeAndBrowProtectionWeight(x.toFloat(), y.toFloat(), geom512) > 0.05f) continue
+                    val dNoseSq = orientedEllipseDistSq(
+                        x.toFloat(), y.toFloat(),
+                        geom512.nose.x, geom512.nose.y,
+                        geom512.eyeDist * 0.40f, geom512.eyeDist * 0.48f,
+                        geom512.cosA, geom512.sinA
+                    )
+                    if (dNoseSq <= 1.0f) continue
+                    val dMouthSq = orientedEllipseDistSq(
+                        x.toFloat(), y.toFloat(),
+                        mouthMidX512, mouthMidY512,
+                        geom512.eyeDist * 0.62f, geom512.eyeDist * 0.46f,
+                        geom512.cosA, geom512.sinA
+                    )
+                    if (dMouthSq <= 1.0f) continue
+
+                    val idx = row + x
+                    val tc = tgtPx512[idx]
+                    val tR = (tc ushr 16) and 0xFF
+                    val tG = (tc ushr 8) and 0xFF
+                    val tB = tc and 0xFF
+                    val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
+
+                    val n = tgtPx512[(y - 2) * HD_SIZE + x]
+                    val s = tgtPx512[(y + 2) * HD_SIZE + x]
+                    val l = tgtPx512[row + x - 2]
+                    val r = tgtPx512[row + x + 2]
+                    val tAvgLum = (
+                        (0.299f * (n ushr 16 and 0xFF) + 0.587f * (n ushr 8 and 0xFF) + 0.114f * (n and 0xFF)) +
+                        (0.299f * (s ushr 16 and 0xFF) + 0.587f * (s ushr 8 and 0xFF) + 0.114f * (s and 0xFF)) +
+                        (0.299f * (l ushr 16 and 0xFF) + 0.587f * (l ushr 8 and 0xFF) + 0.114f * (l and 0xFF)) +
+                        (0.299f * (r ushr 16 and 0xFF) + 0.587f * (r ushr 8 and 0xFF) + 0.114f * (r and 0xFF))
+                    ) * 0.25f
+
+                    val poreDiff = tLum - tAvgLum
+                    if (tLum > 85f && abs(poreDiff) < 7f) {
+                        val sc = swapPx512[idx]
+                        val sr = (sc ushr 16) and 0xFF
+                        val sg = (sc ushr 8) and 0xFF
+                        val sb = sc and 0xFF
+                        val poreBoost = poreDiff * poreScale
+                        val nr = (sr + poreBoost).toInt().coerceIn(0, 255)
+                        val ng = (sg + poreBoost).toInt().coerceIn(0, 255)
+                        val nb = (sb + poreBoost).toInt().coerceIn(0, 255)
+                        swapPx512[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                    }
+                }
+            }
+
+            // 5. Dynamic Landmark Eye & Eyebrow Protection
+            restoreDynamicEyebrowContinuity(
+                outPx = swapPx512,
+                tgtPx = tgtPx512,
+                size = HD_SIZE,
+                geom = geom512
+            )
+            restoreDynamicOcularSockets(
+                outPx = swapPx512,
+                tgtPx = tgtPx512,
+                srcPx = null,
+                size = HD_SIZE,
+                geom = geom512
+            )
+            // Negative Artifact Suppression: Protect squinted/winking eyelids, eyeliner, and makeup integrity
+            NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                geom512 = geom512,
+                makeupPreservationStrength = 0.85f
+            )
+            // Face-Aging & Expression Style Engine
+            FaceAgingStyleEngine.applyFaceAgingAndStyle512(
+                pixels512 = swapPx512,
+                geom512 = geom512,
+                params = FaceAgingStyleEngine.AgingParameters(ageFactor = 0.0f)
+            )
+        }
         val restoration512Ms = ((System.currentTimeMillis() - tRestore0) - upperLipGuardMs).coerceAtLeast(1L)
 
         // Capture Stage 2: Swap + 512x512 HD Restoration + Upper-Lip Guard Output (before final scene blending)
@@ -1135,72 +1148,98 @@ object FaceBlender {
         } else null
 
         val tBlendStage0 = System.currentTimeMillis()
-        // 6. Face Reaction Synthesis & Protruding Tongue / Oral Cavity Negative Artifact Suppression
-        when (faceReactionMode) {
-            FaceReactionSourceMode.TARGET_REACTION -> {
-                preserveTargetMouthTeethAndTongue512(
-                    swapPx512 = swapPx512,
-                    tgtPx512 = tgtPx512,
-                    geom512 = geom512
-                )
-            }
-            FaceReactionSourceMode.SOURCE_REACTION -> {
-                if (srcPx512 != null && srcGeom512 != null) {
-                    transferSourceReactionSmileTeethTongue512(
+        if (!identityPreservationMode) {
+            // 6. Face Reaction Synthesis & Protruding Tongue / Oral Cavity Negative Artifact Suppression
+            when (faceReactionMode) {
+                FaceReactionSourceMode.TARGET_REACTION -> {
+                    preserveTargetMouthTeethAndTongue512(
                         swapPx512 = swapPx512,
-                        srcPx512 = srcPx512,
-                        tgtGeom512 = geom512,
-                        srcGeom512 = srcGeom512
+                        tgtPx512 = tgtPx512,
+                        geom512 = geom512
                     )
                 }
+                FaceReactionSourceMode.SOURCE_REACTION -> {
+                    if (srcPx512 != null && srcGeom512 != null) {
+                        transferSourceReactionSmileTeethTongue512(
+                            swapPx512 = swapPx512,
+                            srcPx512 = srcPx512,
+                            tgtGeom512 = geom512,
+                            srcGeom512 = srcGeom512
+                        )
+                    }
+                }
             }
+            NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                geom512 = geom512,
+                sensitivity = 0.90f
+            )
         }
-        // Always enforce Extended Tongue & Oral Cavity Artifact Suppression to eliminate split-tongue and mouth deformation
-        NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            geom512 = geom512,
-            sensitivity = 0.90f
-        )
 
-        // 7. Build 512x512 Target-Aware Biometric Landmark-Fitted Mask with Hair/Occlusion Protection
+        // 7. Build 512x512 Target-Aware Biometric Landmark-Fitted Mask
         val tMask1 = System.currentTimeMillis()
-        val mask512 = createBiometricFaceMask512(
-            geom512 = geom512,
-            tgtPx512 = tgtPx512,
-            swapPx512 = swapPx512,
-            skinToneMode = skinToneMode,
-            enableOcclusionProtection = enableOcclusionProtection,
-            neuralOcclusionGate512 = neuralOcclusionGate512
-        )
+        val mask512 = if (identityPreservationMode) {
+            FaceIdentityPreserver.createZeroDifferenceTargetBoundaryMask512(
+                targetLandmarks5 = targetLandmarks5,
+                forwardMatrix512 = m512,
+                dstSize = HD_SIZE,
+                featherRadiusPx = 5.0f
+            )
+        } else {
+            createBiometricFaceMask512(
+                geom512 = geom512,
+                tgtPx512 = tgtPx512,
+                swapPx512 = swapPx512,
+                skinToneMode = skinToneMode,
+                enableOcclusionProtection = enableOcclusionProtection,
+                neuralOcclusionGate512 = neuralOcclusionGate512
+            )
+        }
         val maskElapsed = (System.currentTimeMillis() - tMask1).coerceAtLeast(1L)
         maskGenMs = (maskGenMs + maskElapsed).coerceAtLeast(1L)
 
-        // 8. 2-Band Multi-Band (Low-Frequency Illumination + High-Frequency Facial Detail) Boundary Fusion
-        applyMultiBandBoundaryAndJawlineFusion512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            mask512 = mask512
-        )
+        if (identityPreservationMode && srcWarpBmp != null) {
+            val srcWarpPx = IntArray(total512)
+            srcWarpBmp.getPixels(srcWarpPx, 0, HD_SIZE, 0, 0, HD_SIZE, HD_SIZE)
+            srcWarpBmp.recycle()
+            val preservedPx = FaceIdentityPreserver.blendIdentityPreservedFace512(
+                sourceWarped512 = srcWarpPx,
+                target512 = tgtPx512,
+                mask512 = mask512,
+                preserveMakeup = true
+            )
+            System.arraycopy(preservedPx, 0, swapPx512, 0, total512)
+        }
 
-        // 8b. LCM Inpainting & Custom LoRA Edge Refinement
-        LcmInpaintingPipeline.refineWithLcmInpainting512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            mask512 = mask512,
-            config = LcmInpaintingPipeline.LcmConfig()
-        )
+        var guard2Elapsed = 0L
+        if (!identityPreservationMode) {
+            // 8. 2-Band Multi-Band Boundary Fusion
+            applyMultiBandBoundaryAndJawlineFusion512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                mask512 = mask512
+            )
 
-        // 9. Final-pass Target-Aware Upper-Lip & Philtrum Protection Lock
-        val tGuard1 = System.currentTimeMillis()
-        protectTargetUpperLipAndEliminateMoustache512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            geom512 = geom512,
-            forceMoustacheCleanse = hadDonorMoustache
-        )
-        val guard2Elapsed = (System.currentTimeMillis() - tGuard1).coerceAtLeast(0L)
-        upperLipGuardMs = (upperLipGuardMs + guard2Elapsed).coerceAtLeast(1L)
+            // 8b. LCM Inpainting & Custom LoRA Edge Refinement
+            LcmInpaintingPipeline.refineWithLcmInpainting512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                mask512 = mask512,
+                config = LcmInpaintingPipeline.LcmConfig()
+            )
+
+            // 9. Final-pass Target-Aware Upper-Lip & Philtrum Protection Lock
+            val tGuard1 = System.currentTimeMillis()
+            protectTargetUpperLipAndEliminateMoustache512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                geom512 = geom512,
+                forceMoustacheCleanse = hadDonorMoustache
+            )
+            guard2Elapsed = (System.currentTimeMillis() - tGuard1).coerceAtLeast(0L)
+            upperLipGuardMs = (upperLipGuardMs + guard2Elapsed).coerceAtLeast(1L)
+        }
 
         // 10. Direct High-Resolution Warp of 512x512 HD Face onto full-resolution targetPixels using Catmull-Rom Bicubic
         val inv = FaceAlignment.invertAffine2x3(m512)

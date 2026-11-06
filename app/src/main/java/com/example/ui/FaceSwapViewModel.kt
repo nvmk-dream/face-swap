@@ -52,7 +52,8 @@ enum class StudioSubPage {
 
 enum class StudioMode(val title: String, val badge: String) {
     FACE_SWAP("FACE SWAP", "MODE 1 — HyperSwap 1b (256px) Primary Production Engine"),
-    HEAD_REPLACEMENT("FULL HEAD REPLACEMENT", "MODE 2 — GHOST 2.0 Android Full Head/Hair/Neck")
+    HEAD_REPLACEMENT("FULL HEAD REPLACEMENT", "MODE 2 — GHOST 2.0 Android Full Head/Hair/Neck"),
+    IDENTITY_PRESERVED("IDENTITY PRESERVED", "MODE 3 — High-Fidelity Source Identity & Texture (No AI Hallucination)")
 }
 
 enum class ProcessingQualityLevel(
@@ -982,6 +983,31 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             offsetX = state.faceOffsetX,
                             offsetY = state.faceOffsetY,
                             scaleAdjust = state.faceScaleAdjust,
+                            identityPreservationMode = false,
+                            onProgress = { progress ->
+                                _uiState.update { s -> s.copy(swapProgress = progress) }
+                            }
+                        )
+
+                        StudioMode.IDENTITY_PRESERVED -> modelService.swapFaces(
+                            sourceBitmap = srcBitmap,
+                            sourceFace = selectedSourceFace,
+                            targetBitmap = tgtBitmap,
+                            targetFacesToReplace = targetsToSwap,
+                            enableColorTransfer = state.enableColorTransfer,
+                            enableProvenanceWatermark = state.enableProvenanceWatermark,
+                            allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
+                            preferHardwareAccel = state.preferHardwareAcceleration,
+                            skinToneMode = state.skinToneMode,
+                            faceReactionMode = state.faceReactionMode,
+                            enableOcclusionProtection = state.enableOcclusionProtection,
+                            portraitBlurStrength = state.portraitBlurStrength,
+                            blendStrength = state.blendStrength,
+                            enhancementStrength = 0.0f, // No synthetic GAN enhancement
+                            offsetX = state.faceOffsetX,
+                            offsetY = state.faceOffsetY,
+                            scaleAdjust = state.faceScaleAdjust,
+                            identityPreservationMode = true,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                             }

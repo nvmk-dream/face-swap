@@ -457,29 +457,45 @@ private fun FrontChooseModeSection(
             }
         }
 
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            ModeSelectionCard(
-                title = "Face Swap",
-                subtitle = "Swap faces between people",
-                isSelected = selectedMode == StudioMode.FACE_SWAP,
-                isHeadMode = false,
-                onClick = { onSelectMode(StudioMode.FACE_SWAP) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("mode_tab_face_swap")
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ModeSelectionCard(
+                    title = "Face Swap",
+                    subtitle = "Standard AI swap",
+                    isSelected = selectedMode == StudioMode.FACE_SWAP,
+                    iconType = 0,
+                    onClick = { onSelectMode(StudioMode.FACE_SWAP) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("mode_tab_face_swap")
+                )
+
+                ModeSelectionCard(
+                    title = "Identity Preserved",
+                    subtitle = "Pure real eyes & lips",
+                    isSelected = selectedMode == StudioMode.IDENTITY_PRESERVED,
+                    iconType = 2,
+                    onClick = { onSelectMode(StudioMode.IDENTITY_PRESERVED) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("mode_tab_identity_preserved")
+                )
+            }
 
             ModeSelectionCard(
                 title = "Full Head Replacement",
-                subtitle = "Replace entire head (face + hair)",
+                subtitle = "Replace entire head (face + hair + neck)",
                 isSelected = selectedMode == StudioMode.HEAD_REPLACEMENT,
-                isHeadMode = true,
+                iconType = 1,
                 onClick = { onSelectMode(StudioMode.HEAD_REPLACEMENT) },
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
                     .testTag("mode_tab_head_replacement")
             )
         }
@@ -491,7 +507,7 @@ private fun ModeSelectionCard(
     title: String,
     subtitle: String,
     isSelected: Boolean,
-    isHeadMode: Boolean,
+    iconType: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -511,7 +527,9 @@ private fun ModeSelectionCard(
             )
         )
     }
-    val borderColor = if (isSelected) Color(0xFF0284C7) else Color(0x6638BDF8)
+    val borderColor = if (isSelected) {
+        if (iconType == 2) Color(0xFFD97706) else Color(0xFF0284C7)
+    } else Color(0x6638BDF8)
 
     Box(
         modifier = modifier
@@ -537,26 +555,35 @@ private fun ModeSelectionCard(
                     .size(46.dp)
                     .clip(CircleShape)
                     .background(
-                        if (isSelected) Color(0xFFE0F2FE) else Color(0xFFF1F5F9)
+                        if (isSelected) {
+                            if (iconType == 2) Color(0xFFFEF3C7) else Color(0xFFE0F2FE)
+                        } else Color(0xFFF1F5F9)
                     )
                     .border(
                         width = 1.4.dp,
-                        color = if (isSelected) Color(0xFF0284C7) else Color(0xFF94A3B8),
+                        color = if (isSelected) {
+                            if (iconType == 2) Color(0xFFD97706) else Color(0xFF0284C7)
+                        } else Color(0xFF94A3B8),
                         shape = CircleShape
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                if (!isHeadMode) {
-                    Icon(
+                when (iconType) {
+                    0 -> Icon(
                         imageVector = Icons.Default.People,
                         contentDescription = title,
                         tint = if (isSelected) Color(0xFF0284C7) else Color(0xFF475569),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    1 -> HeadWithHairSilhouetteIcon(
+                        tint = if (isSelected) Color(0xFF0284C7) else Color(0xFF475569),
                         modifier = Modifier.size(25.dp)
                     )
-                } else {
-                    HeadWithHairSilhouetteIcon(
-                        tint = if (isSelected) Color(0xFF0284C7) else Color(0xFF475569),
-                        modifier = Modifier.size(26.dp)
+                    else -> Icon(
+                        imageVector = Icons.Default.Face,
+                        contentDescription = title,
+                        tint = if (isSelected) Color(0xFFD97706) else Color(0xFF475569),
+                        modifier = Modifier.size(25.dp)
                     )
                 }
             }
@@ -857,6 +884,7 @@ private fun FrontMainWorkspaceCard(
             val ctaLabel = when {
                 uiState.isSwapping -> uiState.swapProgress?.stageTitle ?: "Swapping Face..."
                 uiState.studioMode == StudioMode.HEAD_REPLACEMENT -> "Replace Head"
+                uiState.studioMode == StudioMode.IDENTITY_PRESERVED -> "Swap (Preserve Identity)"
                 else -> "Swap Face"
             }
 

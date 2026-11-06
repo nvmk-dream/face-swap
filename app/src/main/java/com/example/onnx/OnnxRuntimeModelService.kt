@@ -120,6 +120,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         offsetX: Float = 0f,
         offsetY: Float = 0f,
         scaleAdjust: Float = 1.0f,
+        identityPreservationMode: Boolean = false,
         captureDiagnostics: Boolean = false,
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
@@ -488,6 +489,7 @@ class OnnxRuntimeModelService(
         offsetX: Float,
         offsetY: Float,
         scaleAdjust: Float,
+        identityPreservationMode: Boolean,
         captureDiagnostics: Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -515,6 +517,7 @@ class OnnxRuntimeModelService(
             offsetY = offsetY,
             scaleAdjust = scaleAdjust,
             preferHardwareAccel = preferHardwareAccel,
+            identityPreservationMode = identityPreservationMode,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedGfpganSession = null,

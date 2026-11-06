@@ -167,6 +167,7 @@ object InSwapperEngine {
         offsetY: Float = 0f,
         scaleAdjust: Float = 1.0f,
         preferHardwareAccel: Boolean = false,
+        identityPreservationMode: Boolean = false,
         preloadedArcFaceSession: OrtSession? = null,
         preloadedSwapSession: OrtSession? = null,
         preloadedGfpganSession: OrtSession? = null,
@@ -420,6 +421,7 @@ object InSwapperEngine {
                         segformerFile = if (segFile.exists() && segFile.length() > 1024L) segFile else null,
                         preloadedGfpganSession = preloadedGfpganSession,
                         preloadedSegformerSession = preloadedSegformerSession,
+                        identityPreservationMode = identityPreservationMode,
                         onStagesCaptured = if (captureDiagnostics && firstTargetCrop == null) {
                             { s1, s2, _ ->
                                 capturedS1 = s1
