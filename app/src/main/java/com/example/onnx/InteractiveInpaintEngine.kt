@@ -2,6 +2,7 @@ package com.example.onnx
 
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import java.io.File
@@ -19,9 +20,11 @@ data class InpaintExecutionResult(
 /**
  * Interactive Inpainting Engine for the Inpaint Page.
  *
- * Uses `lama_fp32.onnx` via ONNX Runtime when installed in the Inpainting model slot,
- * and falls back cleanly to an on-device Multi-Scale Boundary-Diffusion Patch Inpainter
- * so users can always paint a mask and inpaint offline.
+ * Execution routing priority (when in AUTO mode):
+ *  1. `SD 1.5 Inpaint (FP16)` ONNX pack (Text-prompt + Mask)
+ *  2. `RealVis 5.1 (INT8)` ONNX pack (Second option, Text-prompt + Mask)
+ *  3. `lama_fp32.onnx` (Object / gap removal)
+ *  4. Built-in Multi-Scale Boundary-Diffusion Patch Inpainter fallback
  *
  * Unmasked pixels outside the user's painted mask are preserved 100% pixel-identical
  * from [sourceBitmap].
@@ -35,8 +38,61 @@ object InteractiveInpaintEngine {
         prompt: String,
         fastMode: Boolean,
         lamaModelFile: File?,
-        preferHardwareAccel: Boolean = true
+        preferHardwareAccel: Boolean = true,
+        selectedOption: InpaintModelOption = InpaintModelOption.AUTO,
+        primarySdPack: InstalledSdInpaintPack? = null,
+        secondarySdPack: InstalledSdInpaintPack? = null,
+        onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
+        val safetyViolation = SdInpaintOnnxEngine.validatePromptSafety(prompt)
+        require(safetyViolation == null) { safetyViolation!! }
+
+        // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority 1: FP16, Priority 2: INT8)
+        if (ortEnv != null &&
+            selectedOption != InpaintModelOption.LAMA_ONNX &&
+            selectedOption != InpaintModelOption.CV_FALLBACK
+        ) {
+            if (primarySdPack != null) {
+                if (selectedOption == InpaintModelOption.AUTO && secondarySdPack != null) {
+                    val primaryAttempt = runCatching {
+                        SdInpaintOnnxEngine.inpaint(
+                            ortEnv = ortEnv,
+                            pack = primarySdPack,
+                            sourceBitmap = sourceBitmap,
+                            maskBitmap = maskBitmap,
+                            prompt = prompt,
+                            fastMode = fastMode,
+                            preferHardwareAccel = preferHardwareAccel,
+                            onProgress = onProgress
+                        )
+                    }
+                    if (primaryAttempt.isSuccess) return primaryAttempt.getOrThrow()
+                    onProgress("Switching to second option (${secondarySdPack.packType.displayLabel})...")
+                    return SdInpaintOnnxEngine.inpaint(
+                        ortEnv = ortEnv,
+                        pack = secondarySdPack,
+                        sourceBitmap = sourceBitmap,
+                        maskBitmap = maskBitmap,
+                        prompt = prompt,
+                        fastMode = fastMode,
+                        preferHardwareAccel = preferHardwareAccel,
+                        onProgress = onProgress
+                    )
+                } else {
+                    return SdInpaintOnnxEngine.inpaint(
+                        ortEnv = ortEnv,
+                        pack = primarySdPack,
+                        sourceBitmap = sourceBitmap,
+                        maskBitmap = maskBitmap,
+                        prompt = prompt,
+                        fastMode = fastMode,
+                        preferHardwareAccel = preferHardwareAccel,
+                        onProgress = onProgress
+                    )
+                }
+            }
+        }
+
         val t0 = System.currentTimeMillis()
         val width = sourceBitmap.width
         val height = sourceBitmap.height
@@ -86,11 +142,17 @@ object InteractiveInpaintEngine {
             "Please draw a mask over the area you want to edit using 'Draw Mask'."
         }
 
-        // Try ONNX LaMa inpainting if lama_fp32.onnx is installed
+        // 2. Try ONNX LaMa inpainting if lama_fp32.onnx is installed (and not forced CV_FALLBACK)
         var inpaintedFull: Bitmap? = null
         var engineLabel = "On-Device Boundary-Diffusion Inpainter"
 
-        if (ortEnv != null && lamaModelFile != null && lamaModelFile.exists() && lamaModelFile.length() > 1024L) {
+        if (selectedOption != InpaintModelOption.CV_FALLBACK &&
+            ortEnv != null &&
+            lamaModelFile != null &&
+            lamaModelFile.exists() &&
+            lamaModelFile.length() > 1024L
+        ) {
+            onProgress("Running LaMa ONNX inpainting...")
             val lamaOut = runCatching {
                 runLamaInpaint(
                     ortEnv = ortEnv,
@@ -102,11 +164,13 @@ object InteractiveInpaintEngine {
             }.getOrNull()
             if (lamaOut != null) {
                 inpaintedFull = lamaOut
-                engineLabel = "LaMa ONNX (lama_fp32.onnx)"
+                engineLabel = "LaMa ONNX (${lamaModelFile.name})"
             }
         }
 
+        // 3. Built-in boundary-diffusion fallback
         if (inpaintedFull == null) {
+            onProgress("Running offline boundary-diffusion inpainter...")
             inpaintedFull = runBoundaryDiffusionInpaint(
                 sourceBitmap = sourceBitmap,
                 fullMaskAlpha = maskAlpha,
@@ -173,37 +237,6 @@ object InteractiveInpaintEngine {
     ): Bitmap {
         val origW = sourceBitmap.width
         val origH = sourceBitmap.height
-        val modelSize = 512
-        val scaled = if (origW == modelSize && origH == modelSize) {
-            sourceBitmap
-        } else {
-            Bitmap.createScaledBitmap(sourceBitmap, modelSize, modelSize, true)
-        }
-        val hw = modelSize * modelSize
-        val pixels = IntArray(hw)
-        scaled.getPixels(pixels, 0, modelSize, 0, 0, modelSize, modelSize)
-        if (scaled !== sourceBitmap) scaled.recycle()
-
-        val imgBuf = FloatBuffer.allocate(3 * hw)
-        val maskBuf = FloatBuffer.allocate(hw)
-        for (y in 0 until modelSize) {
-            val sy = (y * origH / modelSize).coerceIn(0, origH - 1)
-            for (x in 0 until modelSize) {
-                val sx = (x * origW / modelSize).coerceIn(0, origW - 1)
-                val i = y * modelSize + x
-                val m = if (fullMaskAlpha[sy * origW + sx] > 0.15f) 1.0f else 0.0f
-                val c = pixels[i]
-                val r = ((c ushr 16) and 0xFF) / 255.0f
-                val g = ((c ushr 8) and 0xFF) / 255.0f
-                val b = (c and 0xFF) / 255.0f
-                imgBuf.put(i, r * (1f - m))
-                imgBuf.put(hw + i, g * (1f - m))
-                imgBuf.put(2 * hw + i, b * (1f - m))
-                maskBuf.put(i, m)
-            }
-        }
-        imgBuf.rewind()
-        maskBuf.rewind()
 
         OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel).use { opts ->
             ortEnv.createSession(lamaFile.absolutePath, opts).use { session ->
@@ -212,8 +245,43 @@ object InteractiveInpaintEngine {
                 val maskName = names.firstOrNull { it.contains("mask", ignoreCase = true) }
                     ?: names.getOrElse(1) { names[0] }
 
-                OnnxTensor.createTensor(ortEnv, imgBuf, longArrayOf(1L, 3L, 512L, 512L)).use { imgT ->
-                    OnnxTensor.createTensor(ortEnv, maskBuf, longArrayOf(1L, 1L, 512L, 512L)).use { maskT ->
+                val imgInfo = session.inputInfo[imgName]?.info as? TensorInfo
+                val modelH = imgInfo?.shape?.getOrNull(2)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+                val modelW = imgInfo?.shape?.getOrNull(3)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+
+                val scaled = if (origW == modelW && origH == modelH) {
+                    sourceBitmap
+                } else {
+                    Bitmap.createScaledBitmap(sourceBitmap, modelW, modelH, true)
+                }
+                val hw = modelW * modelH
+                val pixels = IntArray(hw)
+                scaled.getPixels(pixels, 0, modelW, 0, 0, modelW, modelH)
+                if (scaled !== sourceBitmap) scaled.recycle()
+
+                val imgBuf = FloatBuffer.allocate(3 * hw)
+                val maskBuf = FloatBuffer.allocate(hw)
+                for (y in 0 until modelH) {
+                    val sy = (y * origH / modelH).coerceIn(0, origH - 1)
+                    for (x in 0 until modelW) {
+                        val sx = (x * origW / modelW).coerceIn(0, origW - 1)
+                        val i = y * modelW + x
+                        val m = if (fullMaskAlpha[sy * origW + sx] > 0.15f) 1.0f else 0.0f
+                        val c = pixels[i]
+                        val r = ((c ushr 16) and 0xFF) / 255.0f
+                        val g = ((c ushr 8) and 0xFF) / 255.0f
+                        val b = (c and 0xFF) / 255.0f
+                        imgBuf.put(i, r * (1f - m))
+                        imgBuf.put(hw + i, g * (1f - m))
+                        imgBuf.put(2 * hw + i, b * (1f - m))
+                        maskBuf.put(i, m)
+                    }
+                }
+                imgBuf.rewind()
+                maskBuf.rewind()
+
+                OnnxTensor.createTensor(ortEnv, imgBuf, longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())).use { imgT ->
+                    OnnxTensor.createTensor(ortEnv, maskBuf, longArrayOf(1L, 1L, modelH.toLong(), modelW.toLong())).use { maskT ->
                         session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
                             val outT = res[0] as OnnxTensor
                             val outFloats = FloatArray(3 * hw)
@@ -227,13 +295,13 @@ object InteractiveInpaintEngine {
                                 val b = (outFloats[2 * hw + i] * scale).toInt().coerceIn(0, 255)
                                 outPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                             }
-                            val bmp512 = Bitmap.createBitmap(modelSize, modelSize, Bitmap.Config.ARGB_8888)
-                            bmp512.setPixels(outPx, 0, modelSize, 0, 0, modelSize, modelSize)
-                            return if (origW == modelSize && origH == modelSize) {
-                                bmp512
+                            val outBmp = Bitmap.createBitmap(modelW, modelH, Bitmap.Config.ARGB_8888)
+                            outBmp.setPixels(outPx, 0, modelW, 0, 0, modelW, modelH)
+                            return if (origW == modelW && origH == modelH) {
+                                outBmp
                             } else {
-                                val resized = Bitmap.createScaledBitmap(bmp512, origW, origH, true)
-                                bmp512.recycle()
+                                val resized = Bitmap.createScaledBitmap(outBmp, origW, origH, true)
+                                outBmp.recycle()
                                 resized
                             }
                         }

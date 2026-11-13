@@ -1,31 +1,23 @@
 package com.example.ui.tabs
 
 import android.graphics.Bitmap
-import android.graphics.Canvas as AndroidCanvas
-import android.graphics.Paint as AndroidPaint
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -35,14 +27,12 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
@@ -51,63 +41,58 @@ import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.example.R
+import com.example.onnx.InpaintModelOption
+import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
+import com.example.ui.components.DrawMaskEditorDialog
 
-private data class NormalizedMaskStroke(
-    val points: List<Offset>, // Normalized 0f..1f coordinates inside canvas
-    val brushFraction: Float  // Brush radius relative to min(width, height)
+private val SAFE_FASHION_PRESETS = listOf(
+    "Knee-length sleeveless dress",
+    "Full-sleeve modest jacket",
+    "Layered inner top with cardigan",
+    "Traditional silk kurti with lining",
+    "Remove object cleanly"
 )
 
 /**
- * Interactive Inpaint Screen matching the user's mockup layout and
- * Dreamy Bubbles + Frosted White Glassmorphism aesthetic.
+ * Offline Mage.space-style Inpaint Screen with SD 1.5 FP16 (Priority 1) &
+ * RealVis 5.1 INT8 (Priority 2) support, Dreamy Bubbles + Frosted Glassmorphism UI.
  */
 @Composable
 fun InpaintPage(
     uiState: FaceSwapUiState,
     onBack: () -> Unit,
     onPickSourceFromFolder: () -> Unit,
+    onSelectModelOption: (InpaintModelOption) -> Unit,
+    onImportModelFolder: () -> Unit,
     onMaskUpdated: (Bitmap?) -> Unit,
     onPromptChanged: (String) -> Unit,
     onFastModeChanged: (Boolean) -> Unit,
@@ -123,6 +108,7 @@ fun InpaintPage(
 
     var showModelDropdown by remember { mutableStateOf(false) }
     var showDrawMaskDialog by remember { mutableStateOf(false) }
+    var showOriginalCompare by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -133,7 +119,6 @@ fun InpaintPage(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
-        // Dreamy pastel bubbles wallpaper background matching Front Home
         Image(
             painter = painterResource(id = R.drawable.bg_dreamy_bubbles),
             contentDescription = null,
@@ -147,7 +132,7 @@ fun InpaintPage(
                 .widthIn(max = 600.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Top Bar: Back Button + "Inpaint" Title
             Row(
@@ -183,13 +168,12 @@ fun InpaintPage(
                 )
             }
 
-            // Top Row: Left Source Image Card + Right (Model Dropdown [Coming Soon], Draw Mask, Create)
+            // Top Row: Left Source Image Card + Right (Model Dropdown, Draw Mask, Create)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.Top
             ) {
-                // Left: Source Image Card (tapping opens Mobile Memory -> Folder picker)
                 val sourceBmp = uiState.inpaintSourceBitmap
                 val maskBmp = uiState.inpaintMaskBitmap
                 val cardShape = RoundedCornerShape(18.dp)
@@ -221,7 +205,6 @@ fun InpaintPage(
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
-                        // Resolution + Folder badge overlay
                         Row(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
@@ -272,7 +255,7 @@ fun InpaintPage(
                     }
                 }
 
-                // Right Column: Model ("Coming Soon"), Draw Mask, Create (exact mockup top-right layout)
+                // Right Column: Model Dropdown (Priority 1: FP16, Priority 2: INT8), Draw Mask, Create
                 Column(
                     modifier = Modifier.weight(0.95f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -284,7 +267,6 @@ fun InpaintPage(
                         fontSize = 16.sp
                     )
 
-                    // Model Dropdown ("Coming Soon" only — no model names per user request)
                     Box {
                         val dropShape = RoundedCornerShape(12.dp)
                         Row(
@@ -295,7 +277,7 @@ fun InpaintPage(
                                 .background(frostedCardBg)
                                 .border(1.2.dp, frostedBorderColor, dropShape)
                                 .clickable { showModelDropdown = true }
-                                .padding(horizontal = 12.dp)
+                                .padding(horizontal = 10.dp)
                                 .testTag("inpaint_model_dropdown"),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -304,24 +286,98 @@ fun InpaintPage(
                                 text = uiState.inpaintModelLabel,
                                 color = darkSlate,
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.5.sp,
+                                fontSize = 13.sp,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
                             Icon(
                                 imageVector = Icons.Default.KeyboardArrowDown,
                                 contentDescription = "Model options",
-                                tint = darkSlate
+                                tint = darkSlate,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
+
+                        val hasFp16 = SdInpaintPackType.SD15_FP16 in uiState.installedSdInpaintPacks
+                        val hasInt8 = SdInpaintPackType.REALVIS_INT8 in uiState.installedSdInpaintPacks
+                        val hasLama = uiState.isLamaInpaintReady
 
                         DropdownMenu(
                             expanded = showModelDropdown,
                             onDismissRequest = { showModelDropdown = false }
                         ) {
+                            ModelDropdownEntry(
+                                title = "Auto (FP16 > INT8)",
+                                statusBadge = if (hasFp16 || hasInt8) "Priority" else "Coming Soon",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.AUTO,
+                                enabled = true,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.AUTO)
+                                    showModelDropdown = false
+                                }
+                            )
+                            ModelDropdownEntry(
+                                title = "SD 1.5 Inpaint (FP16)",
+                                statusBadge = if (hasFp16) "1st • Ready" else "Missing",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.SD15_FP16,
+                                enabled = hasFp16,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.SD15_FP16)
+                                    showModelDropdown = false
+                                }
+                            )
+                            ModelDropdownEntry(
+                                title = "RealVis 5.1 (INT8)",
+                                statusBadge = if (hasInt8) "2nd • Ready" else "Missing",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.REALVIS_INT8,
+                                enabled = hasInt8,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.REALVIS_INT8)
+                                    showModelDropdown = false
+                                }
+                            )
+                            ModelDropdownEntry(
+                                title = "LaMa (Object Remove)",
+                                statusBadge = if (hasLama) "Ready" else "Missing",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.LAMA_ONNX,
+                                enabled = hasLama,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.LAMA_ONNX)
+                                    showModelDropdown = false
+                                }
+                            )
+                            ModelDropdownEntry(
+                                title = "Fast Offline CV",
+                                statusBadge = "Built-in",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.CV_FALLBACK,
+                                enabled = true,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.CV_FALLBACK)
+                                    showModelDropdown = false
+                                }
+                            )
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                             DropdownMenuItem(
-                                text = { Text("Coming Soon", fontWeight = FontWeight.SemiBold) },
-                                onClick = { showModelDropdown = false }
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.FolderOpen,
+                                        contentDescription = "Import Model Folder",
+                                        tint = Color(0xFF0284C7)
+                                    )
+                                },
+                                text = {
+                                    Text(
+                                        text = "Import Model Folder (FP16 / INT8)",
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF0284C7),
+                                        fontSize = 13.sp
+                                    )
+                                },
+                                onClick = {
+                                    showModelDropdown = false
+                                    onImportModelFolder()
+                                }
                             )
                         }
                     }
@@ -368,7 +424,7 @@ fun InpaintPage(
                         )
                     }
 
-                    // Create Button (Top-right under Draw Mask per mockup)
+                    // Create Button
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -472,10 +528,46 @@ fun InpaintPage(
                             .testTag("inpaint_prompt_input")
                     )
                 }
+
+                // Safe Fashion Design Quick Preset Chips
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SAFE_FASHION_PRESETS.forEach { preset ->
+                        val isSelected = uiState.inpaintPrompt.equals(preset, ignoreCase = true)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (isSelected) Color(0xFF0284C7) else Color(0xCCFFFFFF))
+                                .border(
+                                    1.dp,
+                                    if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
+                                    RoundedCornerShape(50)
+                                )
+                                .clickable { onPromptChanged(preset) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = preset,
+                                color = if (isSelected) Color.White else darkSlate,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
             }
 
             // Large Frosted Result Card
             val resultBmp = uiState.inpaintResultBitmap
+            val displayedBmp = if (showOriginalCompare && uiState.inpaintSourceBitmap != null) {
+                uiState.inpaintSourceBitmap
+            } else {
+                resultBmp
+            }
             val resultShape = RoundedCornerShape(20.dp)
             Box(
                 modifier = Modifier
@@ -498,32 +590,60 @@ fun InpaintPage(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Result",
+                        text = if (showOriginalCompare && resultBmp != null) "Original" else "Result",
                         color = darkSlate,
                         fontWeight = FontWeight.Bold,
                         fontSize = 20.sp
                     )
                     if (resultBmp != null && !uiState.isInpainting) {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .background(Color(0xCC0F172A))
-                                .padding(horizontal = 9.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ZoomIn,
-                                contentDescription = "Tap to zoom",
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = "Tap to Zoom",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (uiState.inpaintSourceBitmap != null) {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(
+                                            if (showOriginalCompare) Color(0xFF0284C7) else Color(0x990F172A)
+                                        )
+                                        .clickable { showOriginalCompare = !showOriginalCompare }
+                                        .padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Compare,
+                                        contentDescription = "Compare original and result",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = if (showOriginalCompare) "After" else "Before",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(Color(0xCC0F172A))
+                                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ZoomIn,
+                                    contentDescription = "Tap to zoom",
+                                    tint = Color(0xFF38BDF8),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = "Zoom",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                 }
@@ -539,7 +659,8 @@ fun InpaintPage(
                         uiState.isInpainting -> {
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.padding(horizontal = 12.dp)
                             ) {
                                 CircularProgressIndicator(
                                     color = Color(0xFF0284C7),
@@ -547,16 +668,17 @@ fun InpaintPage(
                                     modifier = Modifier.size(44.dp)
                                 )
                                 Text(
-                                    text = "Inpainting...",
+                                    text = uiState.inpaintProgressText ?: "Inpainting...",
                                     color = darkSlate,
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 17.sp
+                                    fontSize = 14.5.sp,
+                                    textAlign = TextAlign.Center
                                 )
                             }
                         }
-                        resultBmp != null -> {
+                        displayedBmp != null -> {
                             Image(
-                                bitmap = resultBmp.asImageBitmap(),
+                                bitmap = displayedBmp.asImageBitmap(),
                                 contentDescription = "Inpaint Result Image (Tap to Zoom)",
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier
@@ -575,7 +697,7 @@ fun InpaintPage(
                     }
                 }
 
-                // Bottom-Right Dimensions & Time Info (e.g. "1220 x 1600, 0.42s")
+                // Bottom-Right Dimensions & Time Info
                 val dimsText = if (resultBmp != null) {
                     "${resultBmp.width} x ${resultBmp.height}"
                 } else if (uiState.inpaintSourceBitmap != null) {
@@ -653,6 +775,54 @@ fun InpaintPage(
 }
 
 @Composable
+private fun ModelDropdownEntry(
+    title: String,
+    statusBadge: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    DropdownMenuItem(
+        enabled = enabled,
+        trailingIcon = if (selected) {
+            {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Selected",
+                    tint = Color(0xFF0284C7),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        } else null,
+        text = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = title,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    fontSize = 13.5.sp
+                )
+                Text(
+                    text = statusBadge,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (statusBadge.contains("Ready") || statusBadge.contains("Priority")) {
+                        Color(0xFF059669)
+                    } else if (statusBadge == "Built-in") {
+                        Color(0xFF0284C7)
+                    } else {
+                        Color(0xFF64748B)
+                    }
+                )
+            }
+        },
+        onClick = onClick
+    )
+}
+
+@Composable
 private fun InpaintBottomActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
@@ -688,350 +858,4 @@ private fun InpaintBottomActionButton(
             overflow = TextOverflow.Ellipsis
         )
     }
-}
-
-/**
- * Interactive Touch-Drawing Mask Overlay Dialog for painting areas to inpaint.
- */
-@Composable
-private fun DrawMaskEditorDialog(
-    sourceBitmap: Bitmap,
-    onDismiss: () -> Unit,
-    onApplyMask: (Bitmap) -> Unit
-) {
-    val strokes = remember { mutableStateListOf<NormalizedMaskStroke>() }
-    var activePoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
-    var brushFraction by remember { mutableFloatStateOf(0.06f) } // 6% of min side
-    var canvasSize by remember { mutableStateOf(IntSize(1, 1)) }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF090F20))
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Top bar
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF1E293B))
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Cancel Draw Mask",
-                        tint = Color.White
-                    )
-                }
-
-                Text(
-                    text = "Paint Mask Area",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp
-                )
-
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(Color(0xFF0284C7))
-                        .clickable {
-                            val maskBmp = renderMaskBitmap(
-                                width = sourceBitmap.width,
-                                height = sourceBitmap.height,
-                                strokes = strokes.toList()
-                            )
-                            onApplyMask(maskBmp)
-                        }
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                        .testTag("draw_mask_apply_btn"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Apply Mask",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = "Done",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
-                }
-            }
-
-            // Drawing Canvas centered with Source Image aspect ratio
-            BoxWithConstraints(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                val aspectRatio = sourceBitmap.width.toFloat() / sourceBitmap.height.coerceAtLeast(1).toFloat()
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(aspectRatio)
-                        .clip(RoundedCornerShape(14.dp))
-                        .border(1.5.dp, Color(0xFF38BDF8), RoundedCornerShape(14.dp))
-                        .onSizeChanged { canvasSize = it }
-                        .pointerInput(brushFraction) {
-                            detectTapGestures { pos ->
-                                val w = size.width.coerceAtLeast(1).toFloat()
-                                val h = size.height.coerceAtLeast(1).toFloat()
-                                val norm = Offset(
-                                    (pos.x / w).coerceIn(0f, 1f),
-                                    (pos.y / h).coerceIn(0f, 1f)
-                                )
-                                strokes.add(
-                                    NormalizedMaskStroke(
-                                        points = listOf(norm, norm),
-                                        brushFraction = brushFraction
-                                    )
-                                )
-                            }
-                        }
-                        .pointerInput(brushFraction) {
-                            detectDragGestures(
-                                onDragStart = { start ->
-                                    val w = size.width.coerceAtLeast(1).toFloat()
-                                    val h = size.height.coerceAtLeast(1).toFloat()
-                                    activePoints = listOf(
-                                        Offset(
-                                            (start.x / w).coerceIn(0f, 1f),
-                                            (start.y / h).coerceIn(0f, 1f)
-                                        )
-                                    )
-                                },
-                                onDrag = { change, _ ->
-                                    change.consume()
-                                    val w = size.width.coerceAtLeast(1).toFloat()
-                                    val h = size.height.coerceAtLeast(1).toFloat()
-                                    val p = Offset(
-                                        (change.position.x / w).coerceIn(0f, 1f),
-                                        (change.position.y / h).coerceIn(0f, 1f)
-                                    )
-                                    activePoints = activePoints + p
-                                },
-                                onDragEnd = {
-                                    if (activePoints.isNotEmpty()) {
-                                        strokes.add(
-                                            NormalizedMaskStroke(
-                                                points = activePoints,
-                                                brushFraction = brushFraction
-                                            )
-                                        )
-                                    }
-                                    activePoints = emptyList()
-                                },
-                                onDragCancel = {
-                                    activePoints = emptyList()
-                                }
-                            )
-                        }
-                ) {
-                    Image(
-                        bitmap = sourceBitmap.asImageBitmap(),
-                        contentDescription = "Draw Mask Target",
-                        contentScale = ContentScale.FillBounds,
-                        modifier = Modifier.fillMaxSize()
-                    )
-
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val minSide = minOf(size.width, size.height)
-                        val maskColor = Color(0xFF00E5FF).copy(alpha = 0.58f)
-
-                        fun drawNormalizedStroke(stroke: NormalizedMaskStroke) {
-                            val strokePx = (stroke.brushFraction * minSide).coerceAtLeast(6f)
-                            if (stroke.points.size <= 1) {
-                                stroke.points.firstOrNull()?.let { pt ->
-                                    drawCircle(
-                                        color = maskColor,
-                                        radius = strokePx / 2f,
-                                        center = Offset(pt.x * size.width, pt.y * size.height)
-                                    )
-                                }
-                                return
-                            }
-                            val path = Path().apply {
-                                val first = stroke.points.first()
-                                moveTo(first.x * size.width, first.y * size.height)
-                                for (i in 1 until stroke.points.size) {
-                                    val pt = stroke.points[i]
-                                    lineTo(pt.x * size.width, pt.y * size.height)
-                                }
-                            }
-                            drawPath(
-                                path = path,
-                                color = maskColor,
-                                style = Stroke(
-                                    width = strokePx,
-                                    cap = StrokeCap.Round,
-                                    join = StrokeJoin.Round
-                                )
-                            )
-                        }
-
-                        strokes.forEach { drawNormalizedStroke(it) }
-                        if (activePoints.isNotEmpty()) {
-                            drawNormalizedStroke(
-                                NormalizedMaskStroke(activePoints, brushFraction)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Brush Size + Undo / Clear controls
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF15203B))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Brush,
-                        contentDescription = "Brush Size",
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = "Brush Size",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Slider(
-                        value = brushFraction,
-                        onValueChange = { brushFraction = it },
-                        valueRange = 0.02f..0.16f,
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color(0xFF38BDF8),
-                            activeTrackColor = Color(0xFF0284C7)
-                        ),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF1E293B))
-                            .clickable(enabled = strokes.isNotEmpty()) {
-                                if (strokes.isNotEmpty()) strokes.removeAt(strokes.lastIndex)
-                            },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Undo,
-                            contentDescription = "Undo stroke",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Undo",
-                            color = Color.White,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 13.5.sp
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF3F1D2B))
-                            .clickable(enabled = strokes.isNotEmpty()) {
-                                strokes.clear()
-                            },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Clear mask",
-                            tint = Color(0xFFFCA5A5),
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Clear",
-                            color = Color(0xFFFCA5A5),
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 13.5.sp
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-private fun renderMaskBitmap(
-    width: Int,
-    height: Int,
-    strokes: List<NormalizedMaskStroke>
-): Bitmap {
-    val bmp = Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
-    val canvas = AndroidCanvas(bmp)
-    val paint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.argb(255, 0, 229, 255)
-        style = AndroidPaint.Style.STROKE
-        strokeCap = AndroidPaint.Cap.ROUND
-        strokeJoin = AndroidPaint.Join.ROUND
-    }
-    val minSide = minOf(width, height).toFloat()
-    for (stroke in strokes) {
-        paint.strokeWidth = (stroke.brushFraction * minSide).coerceAtLeast(8f)
-        if (stroke.points.size <= 1) {
-            stroke.points.firstOrNull()?.let { pt ->
-                canvas.drawPoint(pt.x * width, pt.y * height, paint)
-            }
-        } else {
-            val path = android.graphics.Path()
-            val first = stroke.points.first()
-            path.moveTo(first.x * width, first.y * height)
-            for (i in 1 until stroke.points.size) {
-                val pt = stroke.points[i]
-                path.lineTo(pt.x * width, pt.y * height)
-            }
-            canvas.drawPath(path, paint)
-        }
-    }
-    return bmp
 }

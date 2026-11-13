@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceReactionSourceMode
+import com.example.onnx.InpaintModelOption
 import com.example.onnx.ModelSlot
 import com.example.onnx.SkinToneSourceMode
 import com.example.ui.FaceSwapUiState
@@ -145,6 +146,7 @@ fun StudioTab(
     onSaveValidationSheet: (Boolean) -> Unit = {},
     onSelectStudioSubPage: (StudioSubPage) -> Unit = {},
     onPickInpaintSourceFromFolder: () -> Unit = {},
+    onSelectInpaintModelOption: (InpaintModelOption) -> Unit = {},
     onInpaintMaskUpdated: (android.graphics.Bitmap?) -> Unit = {},
     onInpaintPromptChanged: (String) -> Unit = {},
     onInpaintFastModeChanged: (Boolean) -> Unit = {},
@@ -198,6 +200,8 @@ fun StudioTab(
             uiState = uiState,
             onBack = { onSelectStudioSubPage(StudioSubPage.FRONT_HOME) },
             onPickSourceFromFolder = onPickInpaintSourceFromFolder,
+            onSelectModelOption = onSelectInpaintModelOption,
+            onImportModelFolder = onImportAllFromFolder,
             onMaskUpdated = onInpaintMaskUpdated,
             onPromptChanged = onInpaintPromptChanged,
             onFastModeChanged = onInpaintFastModeChanged,

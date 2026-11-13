@@ -597,6 +597,7 @@ fun FaceSwapStudioApp(
                     onPickInpaintSourceFromFolder = {
                         inpaintSourceFolderPicker.launch(arrayOf("image/*"))
                     },
+                    onSelectInpaintModelOption = viewModel::selectInpaintModelOption,
                     onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
                     onInpaintPromptChanged = viewModel::setInpaintPrompt,
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,

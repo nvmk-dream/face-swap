@@ -590,7 +590,7 @@ object OnnxProtobufInspector {
             val dataFilesByName = mutableMapOf<String, Pair<String, Long>>() // lowercase name -> (docId, size)
 
             fun scanDocumentDirectory(parentDocId: String, depth: Int) {
-                if (depth > 2) return
+                if (depth > 3) return
                 val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(
                     treeUri,
                     parentDocId
@@ -793,7 +793,17 @@ object OnnxProtobufInspector {
                 }
             }
 
-            if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty()) {
+            // Import Stable Diffusion 1.5 Inpainting ONNX folders (Priority 1: FP16, Priority 2: INT8)
+            onProgress("Checking for SD 1.5 Inpaint ONNX folders (FP16 / INT8)...")
+            val importedSdPacks = runCatching {
+                SdInpaintPackManager.importSdInpaintPacksFromTreeUri(
+                    context = context,
+                    treeUri = treeUri,
+                    onProgress = onProgress
+                )
+            }.getOrDefault(emptyList())
+
+            if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty() || importedSdPacks.isNotEmpty()) {
                 saveLinkedModelsFolderUri(context, treeUri)
             }
             Result.success(importedSlots)

@@ -18,12 +18,15 @@ import com.example.onnx.FaceReactionSourceMode
 import com.example.onnx.FaceSwapAndRestorationService
 import com.example.onnx.FaceSwapExecutionResult
 import com.example.onnx.HeadSegmentationAndInpainting
+import com.example.onnx.InpaintModelOption
 import com.example.onnx.InteractiveInpaintEngine
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxMemoryServiceState
 import com.example.onnx.OnnxModelInspection
 import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.OnnxRuntimeModelService
+import com.example.onnx.SdInpaintPackManager
+import com.example.onnx.SdInpaintPackType
 import com.example.onnx.SkinToneSourceMode
 import com.example.onnx.SwapStageProgress
 import com.example.onnx.VisualValidationBenchmark
@@ -138,9 +141,13 @@ data class FaceSwapUiState(
     val inpaintPrompt: String = "",
     val inpaintFastMode: Boolean = true,
     val isInpainting: Boolean = false,
+    val inpaintProgressText: String? = null,
     val inpaintResultBitmap: Bitmap? = null,
     val inpaintElapsedSec: Float? = null,
     val inpaintEngineLabel: String? = null,
+    val inpaintModelOption: InpaintModelOption = InpaintModelOption.AUTO,
+    val installedSdInpaintPacks: List<SdInpaintPackType> = emptyList(),
+    val isLamaInpaintReady: Boolean = false,
     val inpaintModelLabel: String = "Coming Soon",
     val statusBannerMessage: String? = null,
     val errorBannerMessage: String? = null
@@ -425,18 +432,45 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     memoryServiceState = it.memoryServiceState.copy(isLoading = true)
                 )
             }
-            val (inspections, memState) = withContext(Dispatchers.IO) {
-                val insp = OnnxProtobufInspector.inspectAllModels(getApplication(), ortEnv)
+            val (inspections, memState, sdPackTypes, lamaReady) = withContext(Dispatchers.IO) {
+                val ctx = getApplication<Application>()
+                val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                 val mem = modelService.loadModelsIntoMemory(
                     preferHardwareAccel = _uiState.value.preferHardwareAcceleration,
                     lowMemoryMode = _uiState.value.lowMemoryMode
                 )
-                insp to mem
+                val packs = SdInpaintPackManager.discoverInstalledPacks(ctx).map { it.packType }
+                val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+                val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
+                listOf(insp, mem, packs, hasLama)
+            }.let { list ->
+                @Suppress("UNCHECKED_CAST")
+                Quadruple(
+                    list[0] as List<OnnxModelInspection>,
+                    list[1] as OnnxMemoryServiceState,
+                    list[2] as List<SdInpaintPackType>,
+                    list[3] as Boolean
+                )
             }
+            val lamaFile = OnnxProtobufInspector.resolveModelFile(getApplication(), ModelSlot.INPAINTING)
+            val resolvedOption = if (_uiState.value.inpaintModelOption == InpaintModelOption.AUTO) {
+                SdInpaintPackManager.determineDefaultModelOption(getApplication(), if (lamaReady) lamaFile else null)
+            } else {
+                _uiState.value.inpaintModelOption
+            }
+            val label = SdInpaintPackManager.formatDropdownLabel(
+                getApplication(),
+                resolvedOption,
+                if (lamaReady) lamaFile else null
+            )
             _uiState.update {
                 it.copy(
                     modelInspections = inspections,
                     memoryServiceState = memState,
+                    installedSdInpaintPacks = sdPackTypes,
+                    isLamaInpaintReady = lamaReady,
+                    inpaintModelOption = resolvedOption,
+                    inpaintModelLabel = label,
                     isInspectingModels = false
                 )
             }
@@ -571,30 +605,46 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             result.fold(
                 onSuccess = { importedSlots ->
-                    val (inspections, memState) = withContext(Dispatchers.IO) {
-                        val insp = OnnxProtobufInspector.inspectAllModels(getApplication(), ortEnv)
+                    val ctx = getApplication<Application>()
+                    val (inspections, memState, sdPackTypes, lamaFile) = withContext(Dispatchers.IO) {
+                        val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                         val mem = modelService.loadModelsIntoMemory(
                             preferHardwareAccel = _uiState.value.preferHardwareAcceleration,
                             lowMemoryMode = _uiState.value.lowMemoryMode
                         )
-                        insp to mem
+                        val packs = SdInpaintPackManager.discoverInstalledPacks(ctx).map { it.packType }
+                        val lama = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+                        Quadruple(insp, mem, packs, lama)
                     }
+                    val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
+                    val defaultOpt = SdInpaintPackManager.determineDefaultModelOption(ctx, if (hasLama) lamaFile else null)
+                    val label = SdInpaintPackManager.formatDropdownLabel(ctx, defaultOpt, if (hasLama) lamaFile else null)
+
+                    val importedNames = buildList {
+                        importedSlots.forEach { s ->
+                            add(OnnxProtobufInspector.resolveModelFile(ctx, s).name)
+                        }
+                        sdPackTypes.forEach { packType ->
+                            add(packType.displayLabel)
+                        }
+                    }
+
                     _uiState.update {
                         it.copy(
                             modelInspections = inspections,
                             memoryServiceState = memState,
+                            installedSdInpaintPacks = sdPackTypes,
+                            isLamaInpaintReady = hasLama,
+                            inpaintModelOption = defaultOpt,
+                            inpaintModelLabel = label,
                             isInspectingModels = false,
-                            statusBannerMessage = if (importedSlots.isNotEmpty()) {
-                                "Auto-imported & verified ${importedSlots.size} model(s): ${
-                                    importedSlots.joinToString { s ->
-                                        OnnxProtobufInspector.resolveModelFile(getApplication(), s).name
-                                    }
-                                }."
+                            statusBannerMessage = if (importedNames.isNotEmpty()) {
+                                "Auto-imported & verified ${importedNames.size} model(s): ${importedNames.joinToString()}."
                             } else {
                                 null
                             },
-                            errorBannerMessage = if (importedSlots.isEmpty()) {
-                                "No matching .onnx files (det_10g, w600k_r50, hyperswap_1b_256/inswapper_128, segformer, modnet, lama, gfpgan) found in selected folder."
+                            errorBannerMessage = if (importedNames.isEmpty()) {
+                                "No matching .onnx models or SD 1.5 Inpaint folders (fp16 / int8) found in selected folder."
                             } else {
                                 null
                             }
@@ -1320,6 +1370,23 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(inpaintFastMode = fastMode) }
     }
 
+    fun selectInpaintModelOption(option: InpaintModelOption) {
+        val ctx = getApplication<Application>()
+        val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+        val label = SdInpaintPackManager.formatDropdownLabel(
+            ctx,
+            option,
+            if (lamaFile.exists()) lamaFile else null
+        )
+        _uiState.update {
+            it.copy(
+                inpaintModelOption = option,
+                inpaintModelLabel = label,
+                errorBannerMessage = null
+            )
+        }
+    }
+
     fun reuseInpaintResultAsSource() {
         val resultBmp = _uiState.value.inpaintResultBitmap ?: return
         _uiState.update {
@@ -1354,16 +1421,26 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             _uiState.update {
                 it.copy(
                     isInpainting = true,
+                    inpaintProgressText = "Preparing offline inpainting engine...",
                     errorBannerMessage = null,
                     statusBannerMessage = null
                 )
             }
             try {
                 val res = withContext(Dispatchers.Default) {
-                    val lamaFile = OnnxProtobufInspector.resolveModelFile(
-                        getApplication(),
-                        ModelSlot.INPAINTING
-                    )
+                    val ctx = getApplication<Application>()
+                    val installedPacks = SdInpaintPackManager.discoverInstalledPacks(ctx)
+                    val primaryPack = SdInpaintPackManager.resolvePackForOption(ctx, state.inpaintModelOption)
+                    val secondaryPack = if (state.inpaintModelOption == InpaintModelOption.AUTO) {
+                        installedPacks.firstOrNull { it.packType != primaryPack?.packType }
+                    } else {
+                        null
+                    }
+                    if (primaryPack != null) {
+                        // Free FaceSwap ONNX sessions before running multi-stage SD 1.5 diffusion
+                        modelService.releaseAllSessions()
+                    }
+                    val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
                     InteractiveInpaintEngine.inpaint(
                         ortEnv = ortEnv,
                         sourceBitmap = srcBmp,
@@ -1371,7 +1448,13 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         prompt = state.inpaintPrompt,
                         fastMode = state.inpaintFastMode,
                         lamaModelFile = if (lamaFile.exists()) lamaFile else null,
-                        preferHardwareAccel = state.preferHardwareAcceleration
+                        preferHardwareAccel = state.preferHardwareAcceleration,
+                        selectedOption = state.inpaintModelOption,
+                        primarySdPack = primaryPack,
+                        secondarySdPack = secondaryPack,
+                        onProgress = { progressMsg ->
+                            _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
+                        }
                     )
                 }
 
@@ -1401,9 +1484,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update {
                     it.copy(
                         isInpainting = false,
+                        inpaintProgressText = null,
                         inpaintResultBitmap = res.outputBitmap,
                         inpaintElapsedSec = sec,
                         inpaintEngineLabel = res.engineUsed,
+                        memoryServiceState = modelService.getMemoryState(),
                         statusBannerMessage = "Inpaint finished in ${"%.2f".format(sec)}s (${res.engineUsed})."
                     )
                 }
@@ -1411,6 +1496,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update {
                     it.copy(
                         isInpainting = false,
+                        inpaintProgressText = null,
                         errorBannerMessage = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
                     )
                 }
@@ -1488,3 +1574,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         return if (mb >= 1.0) "%.1f MB".format(mb) else "${bytes / 1024} KB"
     }
 }
+
+private data class Quadruple<A, B, C, D>(
+    val first: A,
+    val second: B,
+    val third: C,
+    val fourth: D
+)
