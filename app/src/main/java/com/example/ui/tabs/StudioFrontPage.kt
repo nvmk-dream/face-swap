@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CropFree
@@ -488,16 +489,32 @@ private fun FrontChooseModeSection(
                 )
             }
 
-            ModeSelectionCard(
-                title = "Full Head Replacement",
-                subtitle = "Replace entire head (face + hair + neck)",
-                isSelected = selectedMode == StudioMode.HEAD_REPLACEMENT,
-                iconType = 1,
-                onClick = { onSelectMode(StudioMode.HEAD_REPLACEMENT) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("mode_tab_head_replacement")
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ModeSelectionCard(
+                    title = "Full Head Replacement",
+                    subtitle = "Replace entire head (face + hair + neck)",
+                    isSelected = selectedMode == StudioMode.HEAD_REPLACEMENT,
+                    iconType = 1,
+                    onClick = { onSelectMode(StudioMode.HEAD_REPLACEMENT) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("mode_tab_head_replacement")
+                )
+
+                ModeSelectionCard(
+                    title = "Inpaint",
+                    subtitle = "Edit specific parts",
+                    isSelected = false,
+                    iconType = 3,
+                    onClick = {},
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("mode_tab_inpaint")
+                )
+            }
         }
     }
 }
@@ -542,7 +559,7 @@ private fun ModeSelectionCard(
                 shape = shape
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 10.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxSize(),
@@ -579,6 +596,12 @@ private fun ModeSelectionCard(
                         tint = if (isSelected) Color(0xFF0284C7) else Color(0xFF475569),
                         modifier = Modifier.size(25.dp)
                     )
+                    3 -> Icon(
+                        imageVector = Icons.Default.AutoFixHigh,
+                        contentDescription = title,
+                        tint = Color(0xFF475569),
+                        modifier = Modifier.size(24.dp)
+                    )
                     else -> Icon(
                         imageVector = Icons.Default.Face,
                         contentDescription = title,
@@ -598,8 +621,8 @@ private fun ModeSelectionCard(
                     text = title,
                     color = Color(0xFF0F172A),
                     fontWeight = FontWeight.ExtraBold,
-                    fontSize = 13.5.sp,
-                    lineHeight = 16.sp,
+                    fontSize = 13.sp,
+                    lineHeight = 15.5.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -607,8 +630,8 @@ private fun ModeSelectionCard(
                 Text(
                     text = subtitle,
                     color = Color(0xFF475569),
-                    fontSize = 10.5.sp,
-                    lineHeight = 13.sp,
+                    fontSize = 10.sp,
+                    lineHeight = 12.5.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
