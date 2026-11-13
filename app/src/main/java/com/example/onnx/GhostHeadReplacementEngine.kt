@@ -345,11 +345,25 @@ object GhostHeadReplacementEngine {
         val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         finalBitmap.setPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
 
+        val targetDepthMap = if (portraitBlurStrength > 0.03f &&
+            DepthEstimationEngine.hasInstalledDepthModel(context)
+        ) {
+            runCatching {
+                DepthEstimationEngine.estimateDepth(
+                    context = context,
+                    ortEnv = ortEnv,
+                    sourceBitmap = targetBitmap,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+            }.getOrNull()
+        } else null
+
         if (portraitBlurStrength > 0.03f) {
             HeadSegmentationAndInpainting.applyPortraitModeBackgroundBokeh(
                 bitmap = finalBitmap,
                 faces = targetFacesToReplace,
-                blurStrength = portraitBlurStrength
+                blurStrength = portraitBlurStrength,
+                depthMap = targetDepthMap
             )
         }
 
@@ -368,7 +382,8 @@ object GhostHeadReplacementEngine {
                 append(" + gfpgan_1.4.onnx (512x512 HD)")
             }
             if (portraitBlurStrength > 0.03f) {
-                append(" + DSLR Bokeh ${(portraitBlurStrength * 100).toInt()}%")
+                val prefix = if (targetDepthMap != null) " + 3D Depth Bokeh" else " + DSLR Bokeh"
+                append("$prefix ${(portraitBlurStrength * 100).toInt()}%")
             }
         }
 

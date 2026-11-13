@@ -96,6 +96,8 @@ fun InpaintPage(
     onMaskUpdated: (Bitmap?) -> Unit,
     onPromptChanged: (String) -> Unit,
     onFastModeChanged: (Boolean) -> Unit,
+    onDepthGuardChanged: (Boolean) -> Unit = {},
+    onComputeInpaintDepth: () -> Unit = {},
     onCreateInpaint: () -> Unit,
     onSaveToFolder: (Bitmap) -> Unit,
     onDownloadToGallery: (Bitmap) -> Unit,
@@ -529,6 +531,51 @@ fun InpaintPage(
                     )
                 }
 
+                // Optional Depth Guard Row (protects foreground subject from background mask bleed)
+                if (uiState.isDepthModelReady) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xB3FFFFFF))
+                            .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Depth Guard (Protect Foreground)",
+                                color = darkSlate,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.5.sp
+                            )
+                            Text(
+                                text = if (uiState.inpaintDepthMap != null) {
+                                    "Depth cached • ${uiState.inpaintDepthMap.modelUsedLabel}"
+                                } else {
+                                    "Uses Depth Anything V2 / sentis-MiDaS"
+                                },
+                                color = mutedSlate,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Switch(
+                            checked = uiState.inpaintDepthGuardEnabled,
+                            onCheckedChange = onDepthGuardChanged,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF059669),
+                                uncheckedThumbColor = Color.White,
+                                uncheckedTrackColor = Color(0xFF94A3B8)
+                            ),
+                            modifier = Modifier.testTag("inpaint_depth_guard_switch")
+                        )
+                    }
+                }
+
                 // Safe Fashion Design Quick Preset Chips
                 Row(
                     modifier = Modifier
@@ -765,6 +812,10 @@ fun InpaintPage(
     if (showDrawMaskDialog && uiState.inpaintSourceBitmap != null) {
         DrawMaskEditorDialog(
             sourceBitmap = uiState.inpaintSourceBitmap,
+            depthMap = uiState.inpaintDepthMap,
+            isDepthModelReady = uiState.isDepthModelReady,
+            isComputingDepth = uiState.isComputingInpaintDepth,
+            onRequestDepthMap = onComputeInpaintDepth,
             onDismiss = { showDrawMaskDialog = false },
             onApplyMask = { generatedMask ->
                 onMaskUpdated(generatedMask)

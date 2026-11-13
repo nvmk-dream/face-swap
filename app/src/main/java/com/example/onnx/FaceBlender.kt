@@ -923,6 +923,7 @@ object FaceBlender {
         preloadedGfpganSession: OrtSession? = null,
         preloadedSegformerSession: OrtSession? = null,
         identityPreservationMode: Boolean = false,
+        depthMap: DepthMapResult? = null,
         onStagesCaptured: ((stage1SwapOnly512: Bitmap, stage2SwapRestore512: Bitmap, stage3FinalBlend512: Bitmap) -> Unit)? = null,
         onSubStageTimings: ((restoration512Ms: Long, upperLipGuardMs: Long, maskGenerationMs: Long, finalBlendingMs: Long) -> Unit)? = null
     ): Bitmap {
@@ -933,9 +934,9 @@ object FaceBlender {
         val alignedTarget512 = FaceAlignment.warpAffineCrop(targetBitmap, m512, HD_SIZE)
         val geom512 = computeWarpedGeometry(m128, targetLandmarks5, scale = 4.0f)
 
-        // Optional Neural Occlusion Gate via segformer_B5_ce.onnx (when explicitly provided for Mode 2)
+        // Optional Neural Occlusion Gate via segformer_B5_ce.onnx and/or Depth Anything V2 / sentis-MiDaS
         val tMask0 = System.currentTimeMillis()
-        val neuralOcclusionGate512 = if (enableOcclusionProtection && (preloadedSegformerSession != null || segformerFile != null)) {
+        val segOcclusionGate512 = if (enableOcclusionProtection && (preloadedSegformerSession != null || segformerFile != null)) {
             HeadSegmentationAndInpainting.computeFaceOcclusionGate512(
                 ortEnv = ortEnv,
                 alignedTarget512 = alignedTarget512,
@@ -944,6 +945,28 @@ object FaceBlender {
                 preloadedSegformerSession = preloadedSegformerSession
             )
         } else null
+        val depthOcclusionGate512 = if (enableOcclusionProtection && depthMap != null) {
+            runCatching {
+                val invM512 = FaceAlignment.invertAffine2x3(m512)
+                DepthEstimationEngine.computeFaceOcclusionGate512(
+                    depthMap = depthMap,
+                    targetWidth = targetWidth,
+                    targetHeight = targetHeight,
+                    invM512 = invM512,
+                    leftEye = geom512.leftEye,
+                    rightEye = geom512.rightEye,
+                    nose = geom512.nose,
+                    leftMouth = geom512.leftMouth,
+                    rightMouth = geom512.rightMouth
+                )
+            }.getOrNull()
+        } else null
+        val neuralOcclusionGate512 = when {
+            segOcclusionGate512 != null && depthOcclusionGate512 != null ->
+                FloatArray(segOcclusionGate512.size) { i -> min(segOcclusionGate512[i], depthOcclusionGate512[i]) }
+            segOcclusionGate512 != null -> segOcclusionGate512
+            else -> depthOcclusionGate512
+        }
         var maskGenMs = (System.currentTimeMillis() - tMask0).coerceAtLeast(0L)
 
         val alignedSource512 = if (sourceBitmap != null && sourceLandmarks5 != null && sourceLandmarks5.size >= 5) {

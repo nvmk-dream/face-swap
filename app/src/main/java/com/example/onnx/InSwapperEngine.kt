@@ -243,6 +243,29 @@ object InSwapperEngine {
         )
         val embMs = (System.currentTimeMillis() - tEmbStart).coerceAtLeast(1L)
 
+        // Optional Stage 3b: Compute 3D Depth Map once for Occlusion Guard & True Depth DSLR Bokeh
+        val targetDepthMap = if ((enableOcclusionProtection || portraitBlurStrength > 0.03f) &&
+            DepthEstimationEngine.hasInstalledDepthModel(context)
+        ) {
+            onProgress(
+                SwapStageProgress(
+                    stepIndex = 3,
+                    totalSteps = 5,
+                    stageTitle = "Stage 3/5: 3D Depth Map",
+                    detailMessage = "Estimating 3D foreground/background depth...",
+                    progressFraction = 0.44f
+                )
+            )
+            runCatching {
+                DepthEstimationEngine.estimateDepth(
+                    context = context,
+                    ortEnv = ortEnv,
+                    sourceBitmap = targetBitmap,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+            }.getOrNull()
+        } else null
+
         // Stage 4: Run Face Swap ONNX model (supports both 256x256 HyperSwap 1a/1b/1c and 128x128 inswapper_128)
         val targetW = targetBitmap.width
         val targetH = targetBitmap.height
@@ -422,6 +445,7 @@ object InSwapperEngine {
                         preloadedGfpganSession = preloadedGfpganSession,
                         preloadedSegformerSession = preloadedSegformerSession,
                         identityPreservationMode = identityPreservationMode,
+                        depthMap = targetDepthMap,
                         onStagesCaptured = if (captureDiagnostics && firstTargetCrop == null) {
                             { s1, s2, _ ->
                                 capturedS1 = s1
@@ -538,7 +562,8 @@ object InSwapperEngine {
             HeadSegmentationAndInpainting.applyPortraitModeBackgroundBokeh(
                 bitmap = finalBitmap,
                 faces = targetFacesToReplace,
-                blurStrength = portraitBlurStrength
+                blurStrength = portraitBlurStrength,
+                depthMap = targetDepthMap
             )
         }
 
@@ -564,9 +589,12 @@ object InSwapperEngine {
         println(stageTimings.toFormattedReport())
 
         val gfpTag = " -> 512x512 HD Restore + Upper-Lip Guard"
-        val segTag = if (enableOcclusionProtection) " + Target Occlusion Guard" else ""
+        val segTag = if (enableOcclusionProtection) {
+            if (targetDepthMap != null) " + Depth Occlusion Guard" else " + Target Occlusion Guard"
+        } else ""
         val bokehTag = if (portraitBlurStrength > 0.03f) {
-            " + DSLR Bokeh ${(portraitBlurStrength * 100).toInt()}%"
+            val prefix = if (targetDepthMap != null) " + 3D Depth Bokeh" else " + DSLR Bokeh"
+            "$prefix ${(portraitBlurStrength * 100).toInt()}%"
         } else ""
 
         return FaceSwapExecutionResult(

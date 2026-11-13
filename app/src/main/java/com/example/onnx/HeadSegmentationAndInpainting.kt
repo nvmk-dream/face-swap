@@ -990,7 +990,8 @@ object HeadSegmentationAndInpainting {
     fun applyPortraitModeBackgroundBokeh(
         bitmap: Bitmap,
         faces: List<DetectedFace>,
-        blurStrength: Float
+        blurStrength: Float,
+        depthMap: DepthMapResult? = null
     ) {
         val clampedStrength = blurStrength.coerceIn(0f, 1f)
         if (clampedStrength <= 0.03f || faces.isEmpty()) return
@@ -1074,6 +1075,16 @@ object HeadSegmentationAndInpainting {
             val bodyRx: Float,
             val bodyRy: Float
         )
+        // Compute subject foreground depth reference if a Depth Map is available
+        val subjectNearRef = if (depthMap != null && faces.isNotEmpty()) {
+            val faceNearSamples = faces.map { f ->
+                val cx = (f.boundingBox.centerX() / w.toFloat()).coerceIn(0f, 1f)
+                val cy = (f.boundingBox.centerY() / h.toFloat()).coerceIn(0f, 1f)
+                depthMap.sampleBilinear(cx, cy)
+            }.sorted()
+            faceNearSamples[faceNearSamples.size / 2]
+        } else null
+
         val subjects = faces.map { face ->
             val box = face.boundingBox
             val fw = box.width().coerceAtLeast(24f)
@@ -1120,7 +1131,18 @@ object HeadSegmentationAndInpainting {
                     if (keep > maxSubjectKeep) maxSubjectKeep = keep
                 }
 
-                val bgBlurWeight = ((1.0f - maxSubjectKeep) * clampedStrength).coerceIn(0f, 1f)
+                val depthBgFactor = if (depthMap != null && subjectNearRef != null) {
+                    val nx = if (w > 1) xf / (w - 1f) else 0.5f
+                    val ny = if (h > 1) yf / (h - 1f) else 0.5f
+                    val near = depthMap.sampleBilinear(nx, ny)
+                    val deltaBehind = (subjectNearRef - near - 0.06f).coerceAtLeast(0f)
+                    val gradual = (deltaBehind / 0.36f).coerceIn(0f, 1f)
+                    // Keep subjects sharp (head/face protection + foreground depth protection)
+                    gradual * (1.0f - maxSubjectKeep * 0.85f)
+                } else {
+                    1.0f - maxSubjectKeep
+                }
+                val bgBlurWeight = (depthBgFactor * clampedStrength).coerceIn(0f, 1f)
                 if (bgBlurWeight > 0.01f) {
                     val idx = row + x
                     val oc = origPixels[idx]

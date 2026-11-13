@@ -19,6 +19,8 @@ import com.example.onnx.FaceSwapAndRestorationService
 import com.example.onnx.FaceSwapExecutionResult
 import com.example.onnx.HeadSegmentationAndInpainting
 import com.example.onnx.InpaintModelOption
+import com.example.onnx.DepthEstimationEngine
+import com.example.onnx.DepthMapResult
 import com.example.onnx.InteractiveInpaintEngine
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxMemoryServiceState
@@ -140,6 +142,9 @@ data class FaceSwapUiState(
     val inpaintMaskBitmap: Bitmap? = null,
     val inpaintPrompt: String = "",
     val inpaintFastMode: Boolean = true,
+    val inpaintDepthGuardEnabled: Boolean = false,
+    val inpaintDepthMap: DepthMapResult? = null,
+    val isComputingInpaintDepth: Boolean = false,
     val isInpainting: Boolean = false,
     val inpaintProgressText: String? = null,
     val inpaintResultBitmap: Bitmap? = null,
@@ -163,6 +168,9 @@ data class FaceSwapUiState(
 
     val isSegmentationOnnxReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.SEGMENTATION && it.isValidOnnx }
+
+    val isDepthModelReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.DEPTH && it.isValidOnnx }
 
     val canExecuteSwap: Boolean
         get() = !isSwapping &&
@@ -1337,6 +1345,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         it.copy(
                             inpaintSourceBitmap = bitmap,
                             inpaintMaskBitmap = null,
+                            inpaintDepthMap = null,
                             inpaintResultBitmap = null,
                             inpaintElapsedSec = null,
                             statusBannerMessage = "Loaded Inpaint Source (${bitmap.width}×${bitmap.height}) from folder."
@@ -1370,6 +1379,59 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(inpaintFastMode = fastMode) }
     }
 
+    fun setInpaintDepthGuardEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(inpaintDepthGuardEnabled = enabled) }
+        if (enabled && _uiState.value.inpaintDepthMap == null && _uiState.value.inpaintSourceBitmap != null) {
+            computeInpaintDepthMap()
+        }
+    }
+
+    fun computeInpaintDepthMap() {
+        val state = _uiState.value
+        val srcBmp = state.inpaintSourceBitmap ?: return
+        if (state.isComputingInpaintDepth) return
+        if (!DepthEstimationEngine.hasInstalledDepthModel(getApplication())) {
+            _uiState.update {
+                it.copy(
+                    errorBannerMessage = "Install Depth Anything V2 or sentis-MiDaS ONNX in Models tab (1-Tap Auto-Import) to use Auto Depth Mask."
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isComputingInpaintDepth = true,
+                    errorBannerMessage = null,
+                    statusBannerMessage = "Analyzing 3D depth map for Auto-Mask..."
+                )
+            }
+            val depthRes = withContext(Dispatchers.Default) {
+                modelService.releaseAllSessions()
+                DepthEstimationEngine.estimateDepth(
+                    context = getApplication(),
+                    ortEnv = ortEnv,
+                    sourceBitmap = srcBmp,
+                    preferHardwareAccel = state.preferHardwareAcceleration
+                )
+            }
+            _uiState.update {
+                if (depthRes != null) {
+                    it.copy(
+                        isComputingInpaintDepth = false,
+                        inpaintDepthMap = depthRes,
+                        statusBannerMessage = "Depth map ready (${depthRes.modelUsedLabel}, ${depthRes.elapsedMs}ms)."
+                    )
+                } else {
+                    it.copy(
+                        isComputingInpaintDepth = false,
+                        errorBannerMessage = "Could not run Depth model on this image. Check Depth ONNX file in Models tab."
+                    )
+                }
+            }
+        }
+    }
+
     fun selectInpaintModelOption(option: InpaintModelOption) {
         val ctx = getApplication<Application>()
         val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
@@ -1393,6 +1455,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             it.copy(
                 inpaintSourceBitmap = resultBmp,
                 inpaintMaskBitmap = null,
+                inpaintDepthMap = null,
                 inpaintResultBitmap = null,
                 inpaintElapsedSec = null,
                 statusBannerMessage = "Result loaded as Source Image. Draw a new mask to edit further."
@@ -1440,6 +1503,19 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         // Free FaceSwap ONNX sessions before running multi-stage SD 1.5 diffusion
                         modelService.releaseAllSessions()
                     }
+                    val activeDepthMap = if (state.inpaintDepthGuardEnabled && state.inpaintDepthMap == null &&
+                        DepthEstimationEngine.hasInstalledDepthModel(ctx)
+                    ) {
+                        DepthEstimationEngine.estimateDepth(
+                            context = ctx,
+                            ortEnv = ortEnv,
+                            sourceBitmap = srcBmp,
+                            preferHardwareAccel = state.preferHardwareAcceleration,
+                            onProgress = { msg -> _uiState.update { s -> s.copy(inpaintProgressText = msg) } }
+                        )
+                    } else {
+                        state.inpaintDepthMap
+                    }
                     val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
                     InteractiveInpaintEngine.inpaint(
                         ortEnv = ortEnv,
@@ -1452,6 +1528,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         selectedOption = state.inpaintModelOption,
                         primarySdPack = primaryPack,
                         secondarySdPack = secondaryPack,
+                        depthMap = activeDepthMap,
+                        enableDepthGuard = state.inpaintDepthGuardEnabled,
                         onProgress = { progressMsg ->
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
                         }

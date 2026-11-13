@@ -601,6 +601,8 @@ fun FaceSwapStudioApp(
                     onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
                     onInpaintPromptChanged = viewModel::setInpaintPrompt,
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,
+                    onInpaintDepthGuardChanged = viewModel::setInpaintDepthGuardEnabled,
+                    onComputeInpaintDepth = viewModel::computeInpaintDepthMap,
                     onRunInpaint = viewModel::runInpaint,
                     onReuseInpaintResult = viewModel::reuseInpaintResultAsSource,
                     onSaveBitmapToFolder = requestSaveToFolder,

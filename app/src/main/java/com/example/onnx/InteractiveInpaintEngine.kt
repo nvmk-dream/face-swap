@@ -31,6 +31,78 @@ data class InpaintExecutionResult(
  */
 object InteractiveInpaintEngine {
 
+    /**
+     * Protects closer foreground pixels from accidental brush overlap when painting background edits.
+     * Ensures at least 8 masked pixels remain so downstream engines never receive an empty mask.
+     */
+    private fun applyDepthForegroundGuardToMask(
+        sourceBitmap: Bitmap,
+        maskBitmap: Bitmap,
+        depthMap: DepthMapResult
+    ): Bitmap {
+        val w = sourceBitmap.width.coerceAtLeast(1)
+        val h = sourceBitmap.height.coerceAtLeast(1)
+        val aligned = if (maskBitmap.width == w && maskBitmap.height == h) {
+            maskBitmap
+        } else {
+            Bitmap.createScaledBitmap(maskBitmap, w, h, true)
+        }
+        val total = w * h
+        val px = IntArray(total)
+        aligned.getPixels(px, 0, w, 0, 0, w, h)
+        if (aligned !== maskBitmap) aligned.recycle()
+
+        val cutoff = depthMap.suggestForegroundCutoff()
+        val maskDepths = FloatArray(min(total, 4096))
+        var sampleIdx = 0
+        val step = max(1, total / 4096)
+        var i = 0
+        while (i < total && sampleIdx < maskDepths.size) {
+            val c = px[i]
+            val s = max((c ushr 24) and 0xFF, max((c ushr 16) and 0xFF, max((c ushr 8) and 0xFF, c and 0xFF)))
+            if (s > 32) {
+                val y = i / w
+                val x = i % w
+                val nx = if (w > 1) x / (w - 1f) else 0.5f
+                val ny = if (h > 1) y / (h - 1f) else 0.5f
+                maskDepths[sampleIdx++] = depthMap.sampleBilinear(nx, ny)
+            }
+            i += step
+        }
+        if (sampleIdx < 8) return maskBitmap
+        val sortedMaskDepths = maskDepths.copyOf(sampleIdx).apply { sort() }
+        val medianMaskNear = sortedMaskDepths[sampleIdx / 2]
+        // Only protect closer foreground if the painted mask is targeting the background/midground
+        if (medianMaskNear >= cutoff + 0.08f) return maskBitmap
+
+        val protectThreshold = (cutoff + 0.04f).coerceIn(0.25f, 0.90f)
+        val outPx = px.copyOf()
+        var keptCount = 0
+        val invW = if (w > 1) 1f / (w - 1f) else 0f
+        val invH = if (h > 1) 1f / (h - 1f) else 0f
+        for (y in 0 until h) {
+            val rowOff = y * w
+            val ny = y * invH
+            for (x in 0 until w) {
+                val idx = rowOff + x
+                val c = outPx[idx]
+                val s = max((c ushr 24) and 0xFF, max((c ushr 16) and 0xFF, max((c ushr 8) and 0xFF, c and 0xFF)))
+                if (s > 32) {
+                    val near = depthMap.sampleBilinear(x * invW, ny)
+                    if (near >= protectThreshold) {
+                        outPx[idx] = Color.TRANSPARENT
+                    } else {
+                        keptCount++
+                    }
+                }
+            }
+        }
+        if (keptCount < 8) return maskBitmap
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setPixels(outPx, 0, w, 0, 0, w, h)
+        }
+    }
+
     fun inpaint(
         ortEnv: OrtEnvironment?,
         sourceBitmap: Bitmap,
@@ -42,8 +114,15 @@ object InteractiveInpaintEngine {
         selectedOption: InpaintModelOption = InpaintModelOption.AUTO,
         primarySdPack: InstalledSdInpaintPack? = null,
         secondarySdPack: InstalledSdInpaintPack? = null,
+        depthMap: DepthMapResult? = null,
+        enableDepthGuard: Boolean = false,
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
+        val guardedMaskBitmap = if (enableDepthGuard && depthMap != null) {
+            applyDepthForegroundGuardToMask(sourceBitmap, maskBitmap, depthMap)
+        } else {
+            maskBitmap
+        }
        
         // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority 1: FP16, Priority 2: INT8)
         if (ortEnv != null &&
@@ -57,7 +136,7 @@ object InteractiveInpaintEngine {
                             ortEnv = ortEnv,
                             pack = primarySdPack,
                             sourceBitmap = sourceBitmap,
-                            maskBitmap = maskBitmap,
+                            maskBitmap = guardedMaskBitmap,
                             prompt = prompt,
                             fastMode = fastMode,
                             preferHardwareAccel = preferHardwareAccel,
@@ -70,7 +149,7 @@ object InteractiveInpaintEngine {
                         ortEnv = ortEnv,
                         pack = secondarySdPack,
                         sourceBitmap = sourceBitmap,
-                        maskBitmap = maskBitmap,
+                        maskBitmap = guardedMaskBitmap,
                         prompt = prompt,
                         fastMode = fastMode,
                         preferHardwareAccel = preferHardwareAccel,
@@ -81,7 +160,7 @@ object InteractiveInpaintEngine {
                         ortEnv = ortEnv,
                         pack = primarySdPack,
                         sourceBitmap = sourceBitmap,
-                        maskBitmap = maskBitmap,
+                        maskBitmap = guardedMaskBitmap,
                         prompt = prompt,
                         fastMode = fastMode,
                         preferHardwareAccel = preferHardwareAccel,
@@ -96,16 +175,16 @@ object InteractiveInpaintEngine {
         val height = sourceBitmap.height
 
         // Scale mask to match sourceBitmap dimensions if needed
-        val alignedMask = if (maskBitmap.width == width && maskBitmap.height == height) {
-            maskBitmap
+        val alignedMask = if (guardedMaskBitmap.width == width && guardedMaskBitmap.height == height) {
+            guardedMaskBitmap
         } else {
-            Bitmap.createScaledBitmap(maskBitmap, width, height, true)
+            Bitmap.createScaledBitmap(guardedMaskBitmap, width, height, true)
         }
 
         val total = width * height
         val maskPx = IntArray(total)
         alignedMask.getPixels(maskPx, 0, width, 0, 0, width, height)
-        if (alignedMask !== maskBitmap) {
+        if (alignedMask !== guardedMaskBitmap) {
             alignedMask.recycle()
         }
 

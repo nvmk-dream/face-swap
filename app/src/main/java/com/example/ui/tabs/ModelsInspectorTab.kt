@@ -297,6 +297,7 @@ fun ModelsInspectorTab(
                                 "├── segmentation/   (segformer_B5_ce.onnx — or built-in Geodesic Matte)\n" +
                                 "├── matting/        (modnet.onnx — or built-in Joint Bilateral Filter)\n" +
                                 "├── inpainting/     (lama_fp32.onnx — or built-in Boundary Marching)\n" +
+                                "├── depth/          (Depth Anything V2 Small [P1] / sentis-MiDaS [P2])\n" +
                                 "└── enhancement/    (gfpgan_1.4.onnx — or built-in Tiled Unsharp Pass)",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface

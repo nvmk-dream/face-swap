@@ -269,7 +269,7 @@ class OnnxRuntimeModelService(
                 closeSlotInternal(slot)
                 return null
             }
-            if (slot != ModelSlot.DETECTOR && file.length() > 30L * 1024L * 1024L) {
+            if (slot == ModelSlot.DEPTH || (slot != ModelSlot.DETECTOR && file.length() > 30L * 1024L * 1024L)) {
                 val info = LoadedSessionInfo(
                     slot = slot,
                     canonicalFileName = file.name,
