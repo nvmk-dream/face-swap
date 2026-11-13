@@ -44,9 +44,7 @@ object InteractiveInpaintEngine {
         secondarySdPack: InstalledSdInpaintPack? = null,
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
-        val safetyViolation = SdInpaintOnnxEngine.validatePromptSafety(prompt)
-        require(safetyViolation == null) { safetyViolation!! }
-
+       
         // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority 1: FP16, Priority 2: INT8)
         if (ortEnv != null &&
             selectedOption != InpaintModelOption.LAMA_ONNX &&

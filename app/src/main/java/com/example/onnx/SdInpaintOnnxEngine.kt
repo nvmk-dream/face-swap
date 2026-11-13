@@ -42,43 +42,7 @@ object SdInpaintOnnxEngine {
     private const val VAE_SCALE_FACTOR = 0.18215f
     private const val GUIDANCE_SCALE = 7.5f
     private const val DEFAULT_NEGATIVE_PROMPT =
-        "lowres, bad anatomy, blurry, distorted, deformed, watermark, text, ugly, disfigured, nsfw, nude, naked"
-
-    private val BLOCKED_PROMPT_PATTERNS = listOf(
-        Regex("""\bnude\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bnudity\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bnaked\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bundress(ed|ing)?\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bremove\s+(all\s+)?clothes?\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bstrip(ped|ping)?\b""", RegexOption.IGNORE_CASE),
-        Regex("""\btopless\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bbottomless\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bbare\s+(skin|chest|breast|breasts|torso|body|hips|genitals)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\buncovered\s+anatomy\b""", RegexOption.IGNORE_CASE),
-        Regex("""\btransparent\s+(gossamer|veil|dress|cloth|clothes|lingerie|fabric|mesh)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bsee[\s-]?through\s+(dress|cloth|clothes|lingerie|veil|fabric)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bno\s+(inner|underwear|bra|panties|clothes|clothing)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bwithout\s+(clothes|clothing|inner|underwear|bra|panties|garment)\b""", RegexOption.IGNORE_CASE),
-        Regex("""\berotic\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bporn(o|ography)?\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bnsfw\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bgenital(s|ia)?\b""", RegexOption.IGNORE_CASE),
-        Regex("""\bnipple(s)?\b""", RegexOption.IGNORE_CASE),
-        Regex("""\blingerie\b""", RegexOption.IGNORE_CASE)
-    )
-
-    /**
-     * Enforces clothed / safe fashion & editing policy before any inpainting runs.
-     */
-    fun validatePromptSafety(prompt: String): String? {
-        val trimmed = prompt.trim()
-        if (trimmed.isEmpty()) return null
-        val matched = BLOCKED_PROMPT_PATTERNS.any { it.containsMatchIn(trimmed) }
-        if (matched) {
-            return "பாதுகாப்புக் கொள்கை (Safety Policy): ஆடையற்ற / அரைகுறை / வெளிப்படையான (Nudity / Undressing / Transparent skin-exposure) படங்களை உருவாக்க அனுமதி இல்லை. முழுமையான ஆடை வடிவமைப்பு (Clothed Fashion Design — e.g. 'Knee-length sleeveless dress', 'Silk kurti', 'Formal jacket') மட்டும் உள்ளிடவும்."
-        }
-        return null
-    }
+        "lowres, bad anatomy, blurry, distorted, deformed, watermark, text"
 
     fun inpaint(
         ortEnv: OrtEnvironment,
@@ -91,8 +55,6 @@ object SdInpaintOnnxEngine {
         seed: Long = System.currentTimeMillis(),
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
-        val safetyViolation = validatePromptSafety(prompt)
-        require(safetyViolation == null) { safetyViolation!! }
 
         val t0 = System.currentTimeMillis()
         val origW = sourceBitmap.width

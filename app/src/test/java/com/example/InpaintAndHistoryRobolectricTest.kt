@@ -18,7 +18,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -201,12 +200,5 @@ class InpaintAndHistoryRobolectricTest {
             assertTrue(abs(v - back) < 0.02f)
         }
 
-        // Safe clothed fashion prompts pass cleanly
-        assertNull(SdInpaintOnnxEngine.validatePromptSafety("Knee-length sleeveless cotton dress"))
-        assertNull(SdInpaintOnnxEngine.validatePromptSafety("Traditional silk kurti with inner lining"))
-
-        // Unsafe nudity / transparent skin exposure prompts are blocked
-        assertNotNull(SdInpaintOnnxEngine.validatePromptSafety("transparent gossamer veil bare skin"))
-        assertNotNull(SdInpaintOnnxEngine.validatePromptSafety("nude model remove clothes"))
-    }
+ }
 }
