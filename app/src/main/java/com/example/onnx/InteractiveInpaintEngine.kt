@@ -117,6 +117,7 @@ object InteractiveInpaintEngine {
         sourceBitmap: Bitmap,
         maskBitmap: Bitmap,
         prompt: String,
+        negativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
         fastMode: Boolean,
         lamaModelFile: File?,
         preferHardwareAccel: Boolean = true,
@@ -135,7 +136,8 @@ object InteractiveInpaintEngine {
             maskBitmap
         }
 
-        val requiresExplicitSdPack = selectedOption == InpaintModelOption.SD15_FP16 ||
+        val requiresExplicitSdPack = selectedOption == InpaintModelOption.SD15_FP32 ||
+            selectedOption == InpaintModelOption.SD15_FP16 ||
             selectedOption == InpaintModelOption.REALVIS_INT8
         if (requiresExplicitSdPack && primarySdPack == null) {
             throw IllegalStateException(
@@ -143,7 +145,7 @@ object InteractiveInpaintEngine {
             )
         }
 
-        // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority 1: FP16, Priority 2: INT8)
+        // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority: FP32 CPU -> RealVis INT8 -> FP16 Secondary)
         if (ortEnv != null &&
             selectedOption != InpaintModelOption.LAMA_ONNX &&
             selectedOption != InpaintModelOption.CV_FALLBACK
@@ -157,6 +159,7 @@ object InteractiveInpaintEngine {
                             sourceBitmap = sourceBitmap,
                             maskBitmap = guardedMaskBitmap,
                             prompt = prompt,
+                            negativePrompt = negativePrompt,
                             fastMode = fastMode,
                             preferHardwareAccel = preferHardwareAccel,
                             strength = strength,
@@ -165,13 +168,14 @@ object InteractiveInpaintEngine {
                         )
                     }
                     if (primaryAttempt.isSuccess) return primaryAttempt.getOrThrow()
-                    onProgress("Switching to second option (${secondarySdPack.packType.displayLabel})...")
+                    onProgress("Switching to secondary option (${secondarySdPack.packType.displayLabel})...")
                     return SdInpaintOnnxEngine.inpaint(
                         ortEnv = ortEnv,
                         pack = secondarySdPack,
                         sourceBitmap = sourceBitmap,
                         maskBitmap = guardedMaskBitmap,
                         prompt = prompt,
+                        negativePrompt = negativePrompt,
                         fastMode = fastMode,
                         preferHardwareAccel = preferHardwareAccel,
                         strength = strength,
@@ -185,6 +189,7 @@ object InteractiveInpaintEngine {
                         sourceBitmap = sourceBitmap,
                         maskBitmap = guardedMaskBitmap,
                         prompt = prompt,
+                        negativePrompt = negativePrompt,
                         fastMode = fastMode,
                         preferHardwareAccel = preferHardwareAccel,
                         strength = strength,

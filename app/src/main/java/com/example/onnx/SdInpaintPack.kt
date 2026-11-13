@@ -11,9 +11,10 @@ enum class SdInpaintPackType(
     val displayLabel: String,
     val priorityOrder: Int
 ) {
-    SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", 1),
+    SD15_FP32("sd15_fp32", "SD 1.5 Inpaint (FP32)", 1),
     REALVIS_INT8("realvis51_int8", "RealVis 5.1 (INT8)", 2),
-    CUSTOM_SD("custom_sd", "SD 1.5 Inpaint (Custom)", 3)
+    CUSTOM_SD("custom_sd", "SD 1.5 Inpaint (Custom)", 3),
+    SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", 4)
 }
 
 enum class InpaintModelOption(
@@ -21,9 +22,10 @@ enum class InpaintModelOption(
     val displayName: String,
     val shortBadge: String
 ) {
-    AUTO("auto", "Auto (FP16 > INT8)", "AUTO"),
-    SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", "FP16"),
+    AUTO("auto", "Auto (FP32 / INT8 > FP16)", "AUTO"),
+    SD15_FP32("sd15_fp32", "SD 1.5 Inpaint (FP32)", "FP32"),
     REALVIS_INT8("realvis51_int8", "RealVis 5.1 (INT8)", "INT8"),
+    SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", "FP16"),
     LAMA_ONNX("lama_fp32", "LaMa (Object Remove)", "LAMA"),
     CV_FALLBACK("cv_fallback", "Fast Offline CV", "CV")
 }
@@ -67,6 +69,10 @@ object SdInpaintPackManager {
     fun classifyPackType(folderName: String): SdInpaintPackType {
         val lower = folderName.trim().lowercase()
         return when {
+            lower.contains("fp32") ||
+                lower.contains("f32") ||
+                lower.contains("float32") -> SdInpaintPackType.SD15_FP32
+
             lower.contains("int8") ||
                 lower.contains("qint8") ||
                 lower.contains("quint8") ||
@@ -75,21 +81,23 @@ object SdInpaintPackManager {
 
             lower.contains("fp16") ||
                 lower.contains("f16") ||
-                lower.contains("half") ||
-                lower.contains("v1-5-inpainting") ||
+                lower.contains("half") -> SdInpaintPackType.SD15_FP16
+
+            lower.contains("v1-5-inpainting") ||
                 lower.contains("v1.5-inpainting") ||
                 lower.contains("sd-1-5-inpaint") ||
-                lower.contains("sd15") -> SdInpaintPackType.SD15_FP16
+                lower.contains("sd15") -> SdInpaintPackType.SD15_FP32
 
             else -> SdInpaintPackType.CUSTOM_SD
         }
     }
 
     /**
-     * Returns all valid installed SD 1.5 Inpainting packs ordered by user priority:
-     * 1) `SD15_FP16` (Primary)
-     * 2) `REALVIS_INT8` (Second option)
+     * Returns all valid installed SD 1.5 Inpainting packs ordered by CPU speed & quality priority:
+     * 1) `SD15_FP32` (Primary CPU)
+     * 2) `REALVIS_INT8` (Fast Quantized CPU)
      * 3) `CUSTOM_SD`
+     * 4) `SD15_FP16` (Secondary fallback on CPU)
      */
     fun discoverInstalledPacks(context: Context): List<InstalledSdInpaintPack> {
         val root = getSdInpaintRootDir(context)
@@ -135,33 +143,38 @@ object SdInpaintPackManager {
         val installed = discoverInstalledPacks(context)
         if (installed.isEmpty()) return null
         return when (option) {
-            InpaintModelOption.SD15_FP16 ->
-                installed.firstOrNull { it.packType == SdInpaintPackType.SD15_FP16 }
+            InpaintModelOption.SD15_FP32 ->
+                installed.firstOrNull { it.packType == SdInpaintPackType.SD15_FP32 }
             InpaintModelOption.REALVIS_INT8 ->
                 installed.firstOrNull { it.packType == SdInpaintPackType.REALVIS_INT8 }
+            InpaintModelOption.SD15_FP16 ->
+                installed.firstOrNull { it.packType == SdInpaintPackType.SD15_FP16 }
             InpaintModelOption.AUTO ->
-                installed.firstOrNull() // Already sorted: FP16 (1) > INT8 (2) > Custom (3)
+                installed.firstOrNull() // Already sorted: FP32 (1) > INT8 (2) > Custom (3) > FP16 (4)
             InpaintModelOption.LAMA_ONNX, InpaintModelOption.CV_FALLBACK -> null
         }
     }
 
     /**
-     * Computes the default model option following user priority:
-     * Priority 1: SD 1.5 FP16 -> Priority 2: RealVis 5.1 INT8 -> LaMa -> Coming Soon / CV
+     * Computes the default model option prioritizing CPU speed & accuracy:
+     * Priority 1: SD 1.5 FP32 -> Priority 2: RealVis 5.1 INT8 -> Custom -> Secondary: SD 1.5 FP16 -> LaMa
      */
     fun determineDefaultModelOption(
         context: Context,
         lamaFile: File?
     ): InpaintModelOption {
         val installed = discoverInstalledPacks(context)
-        if (installed.any { it.packType == SdInpaintPackType.SD15_FP16 }) {
-            return InpaintModelOption.SD15_FP16
+        if (installed.any { it.packType == SdInpaintPackType.SD15_FP32 }) {
+            return InpaintModelOption.SD15_FP32
         }
         if (installed.any { it.packType == SdInpaintPackType.REALVIS_INT8 }) {
             return InpaintModelOption.REALVIS_INT8
         }
-        if (installed.isNotEmpty()) {
+        if (installed.any { it.packType == SdInpaintPackType.CUSTOM_SD }) {
             return InpaintModelOption.AUTO
+        }
+        if (installed.any { it.packType == SdInpaintPackType.SD15_FP16 }) {
+            return InpaintModelOption.SD15_FP16
         }
         if (lamaFile != null && lamaFile.exists() && lamaFile.length() > 1024L) {
             return InpaintModelOption.LAMA_ONNX
@@ -244,6 +257,12 @@ object SdInpaintPackManager {
         }
 
         when (packType) {
+            SdInpaintPackType.SD15_FP32 -> {
+                if (lower.contains("fp32") || lower.contains("f32")) score += 450
+                if (lower == "model.onnx") score += 400
+                if (lower.contains("fp16")) score -= 250
+                if (lower.contains("int8") || lower.contains("quant")) score -= 200
+            }
             SdInpaintPackType.SD15_FP16 -> {
                 if (lower.contains("fp16") || lower.contains("f16")) score += 450
                 if (lower == "model.onnx") score += 350

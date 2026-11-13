@@ -621,6 +621,8 @@ fun FaceSwapStudioApp(
                     onSelectInpaintModelOption = viewModel::selectInpaintModelOption,
                     onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
                     onInpaintPromptChanged = viewModel::setInpaintPrompt,
+                    onInpaintNegativePromptChanged = viewModel::setInpaintNegativePrompt,
+                    onResetInpaintNegativePrompt = viewModel::resetInpaintNegativePromptToDefault,
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,
                     onInpaintStrengthChanged = viewModel::setInpaintStrength,
                     onInpaintCfgScaleChanged = viewModel::setInpaintCfgScale,

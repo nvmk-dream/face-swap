@@ -488,20 +488,93 @@ object OnnxProtobufInspector {
     }
 
     /**
-     * Creates a memory-safe `OrtSession.SessionOptions` for Android mobile execution.
-     * Avoids XNNPACK weight duplication and disables persistent CPU arena hoarding so 200MB-550MB
-     * models do not trigger Android's Low Memory Killer (lmkd).
+     * Creates an optimized `OrtSession.SessionOptions` for Android mobile execution.
+     * Uses all available CPU cores, `ALL_OPT` graph fusion, XNNPACK (ARM NEON Conv/MatMul),
+     * and optional NNAPI while keeping memoryPattern & CPUArenaAllocator OFF to curb native heap growth.
      */
     fun createOptimizedSessionOptions(
         preferHardwareAcceleration: Boolean = false,
-        intraOpThreads: Int = 4
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2),
+        useXnnpack: Boolean = true,
+        useNnapi: Boolean = preferHardwareAcceleration,
+        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT
     ): OrtSession.SessionOptions {
+        val threads = intraOpThreads.coerceAtLeast(1)
         val opts = OrtSession.SessionOptions()
-        opts.setIntraOpNumThreads(intraOpThreads)
+        opts.setIntraOpNumThreads(threads)
         opts.setMemoryPatternOptimization(false)
         opts.setCPUArenaAllocator(false)
-        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT)
+        opts.setOptimizationLevel(optLevel)
+        if (useNnapi) {
+            runCatching { opts.addNnapi() }
+        }
+        if (useXnnpack) {
+            val xnnAdded = runCatching {
+                opts.addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+                true
+            }.getOrDefault(false)
+            if (xnnAdded) {
+                // Prevent ORT & XNNPACK threadpool spinning contention on mobile ARM cores
+                runCatching { opts.addConfigEntry("session.intra_op.allow_spinning", "0") }
+            }
+        }
         return opts
+    }
+
+    /**
+     * Creates an [OrtSession] trying NNAPI (if requested) -> XNNPACK -> CPU ALL_OPT -> CPU BASIC_OPT
+     * so mobile ONNX graphs accelerate maximally without crashing on unsupported ops or tight RAM.
+     */
+    fun createSessionWithFallback(
+        ortEnv: OrtEnvironment,
+        modelFile: File,
+        preferHardwareAcceleration: Boolean = false,
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+    ): Pair<OrtSession, String> {
+        val threads = intraOpThreads.coerceAtLeast(1)
+        data class Attempt(
+            val label: String,
+            val nnapi: Boolean,
+            val xnnpack: Boolean,
+            val optLevel: OrtSession.SessionOptions.OptLevel
+        )
+        val attempts = buildList {
+            if (preferHardwareAcceleration) {
+                add(Attempt("NNAPI+XNNPACK", nnapi = true, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+            }
+            add(Attempt("XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+            add(Attempt("CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+            add(Attempt("CPU(BASIC)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
+        }
+
+        var lastError: Throwable? = null
+        for (attempt in attempts) {
+            val res = runCatching {
+                createOptimizedSessionOptions(
+                    preferHardwareAcceleration = preferHardwareAcceleration,
+                    intraOpThreads = threads,
+                    useXnnpack = attempt.xnnpack,
+                    useNnapi = attempt.nnapi,
+                    optLevel = attempt.optLevel
+                ).use { opts ->
+                    ortEnv.createSession(modelFile.absolutePath, opts) to attempt.label
+                }
+            }
+            if (res.isSuccess) return res.getOrThrow()
+            lastError = res.exceptionOrNull()
+            if (lastError is OutOfMemoryError) {
+                System.gc()
+            }
+        }
+        return createOptimizedSessionOptions(
+            preferHardwareAcceleration = false,
+            intraOpThreads = threads,
+            useXnnpack = false,
+            useNnapi = false,
+            optLevel = OrtSession.SessionOptions.OptLevel.NO_OPT
+        ).use { opts ->
+            ortEnv.createSession(modelFile.absolutePath, opts) to "CPU(NO_OPT)"
+        }
     }
 
     private const val PREFS_NAME = "onnx_model_folder_prefs"

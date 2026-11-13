@@ -11,6 +11,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -41,12 +44,15 @@ import androidx.compose.material.icons.filled.Diamond
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -73,9 +79,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.R
 import com.example.onnx.AccessoryTarget
 import com.example.onnx.InpaintModelOption
+import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.components.DrawMaskEditorDialog
@@ -90,9 +99,32 @@ private val SAFE_FASHION_PRESETS = listOf(
     "spreading both legs"
 )
 
+private val POSITIVE_BOOSTER_TAGS = listOf(
+    "photorealistic",
+    "sharp focus",
+    "natural skin texture",
+    "high detail",
+    "clean lighting",
+    "sleeveless dress",
+    "red silk saree"
+)
+
+private val NEGATIVE_QUALITY_TAGS = listOf(
+    "blurry",
+    "low quality",
+    "deformed hands",
+    "extra fingers",
+    "bad anatomy",
+    "distorted face",
+    "mutated limbs",
+    "watermark",
+    "text",
+    "oversaturated"
+)
+
 /**
- * Offline Mage.space-style Inpaint Screen with SD 1.5 FP16 (Priority 1) &
- * RealVis 5.1 INT8 (Priority 2) support, Dreamy Bubbles + Frosted Glassmorphism UI.
+ * Offline Mage.space-style Inpaint Screen with FP32/INT8 CPU Priority + FP16 Secondary,
+ * Dynamic 512x768/768x512 aspect-locked resolution, and Dedicated Positive/Negative Prompt Screens.
  */
 @Composable
 fun InpaintPage(
@@ -103,6 +135,8 @@ fun InpaintPage(
     onImportModelFolder: () -> Unit,
     onMaskUpdated: (Bitmap?) -> Unit,
     onPromptChanged: (String) -> Unit,
+    onNegativePromptChanged: (String) -> Unit = {},
+    onResetNegativePrompt: () -> Unit = {},
     onFastModeChanged: (Boolean) -> Unit,
     onStrengthChanged: (Float) -> Unit = {},
     onCfgScaleChanged: (Float) -> Unit = {},
@@ -125,6 +159,8 @@ fun InpaintPage(
     var showModelDropdown by remember { mutableStateOf(false) }
     var showDrawMaskDialog by remember { mutableStateOf(false) }
     var showOriginalCompare by remember { mutableStateOf(false) }
+    var showPositivePromptScreen by remember { mutableStateOf(false) }
+    var showNegativePromptScreen by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -315,8 +351,9 @@ fun InpaintPage(
                             )
                         }
 
-                        val hasFp16 = SdInpaintPackType.SD15_FP16 in uiState.installedSdInpaintPacks
+                        val hasFp32 = SdInpaintPackType.SD15_FP32 in uiState.installedSdInpaintPacks
                         val hasInt8 = SdInpaintPackType.REALVIS_INT8 in uiState.installedSdInpaintPacks
+                        val hasFp16 = SdInpaintPackType.SD15_FP16 in uiState.installedSdInpaintPacks
                         val hasLama = uiState.isLamaInpaintReady
 
                         DropdownMenu(
@@ -324,8 +361,8 @@ fun InpaintPage(
                             onDismissRequest = { showModelDropdown = false }
                         ) {
                             ModelDropdownEntry(
-                                title = "Auto (FP16 > INT8)",
-                                statusBadge = if (hasFp16 || hasInt8) "Priority" else "Coming Soon",
+                                title = "Auto (FP32 / INT8 > FP16)",
+                                statusBadge = if (hasFp32 || hasInt8 || hasFp16) "Priority" else "Coming Soon",
                                 selected = uiState.inpaintModelOption == InpaintModelOption.AUTO,
                                 enabled = true,
                                 onClick = {
@@ -334,22 +371,32 @@ fun InpaintPage(
                                 }
                             )
                             ModelDropdownEntry(
-                                title = "SD 1.5 Inpaint (FP16)",
-                                statusBadge = if (hasFp16) "1st • Ready" else "Missing",
-                                selected = uiState.inpaintModelOption == InpaintModelOption.SD15_FP16,
-                                enabled = hasFp16,
+                                title = "SD 1.5 Inpaint (FP32 CPU)",
+                                statusBadge = if (hasFp32) "1st • Ready" else "Missing",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.SD15_FP32,
+                                enabled = hasFp32,
                                 onClick = {
-                                    onSelectModelOption(InpaintModelOption.SD15_FP16)
+                                    onSelectModelOption(InpaintModelOption.SD15_FP32)
                                     showModelDropdown = false
                                 }
                             )
                             ModelDropdownEntry(
-                                title = "RealVis 5.1 (INT8)",
-                                statusBadge = if (hasInt8) "2nd • Ready" else "Missing",
+                                title = "RealVis 5.1 (INT8 CPU)",
+                                statusBadge = if (hasInt8) "Fast • Ready" else "Missing",
                                 selected = uiState.inpaintModelOption == InpaintModelOption.REALVIS_INT8,
                                 enabled = hasInt8,
                                 onClick = {
                                     onSelectModelOption(InpaintModelOption.REALVIS_INT8)
+                                    showModelDropdown = false
+                                }
+                            )
+                            ModelDropdownEntry(
+                                title = "SD 1.5 Inpaint (FP16)",
+                                statusBadge = if (hasFp16) "Secondary" else "Missing",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.SD15_FP16,
+                                enabled = hasFp16,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.SD15_FP16)
                                     showModelDropdown = false
                                 }
                             )
@@ -552,38 +599,86 @@ fun InpaintPage(
                     }
                 }
 
-                // Frosted Prompt Text Input
+                // Dedicated Positive Prompt Card (tap to open full-screen Positive Prompt editor)
                 val promptShape = RoundedCornerShape(14.dp)
-                Box(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
                         .clip(promptShape)
                         .background(frostedCardBg)
                         .border(1.2.dp, frostedBorderColor, promptShape)
-                        .padding(horizontal = 14.dp),
-                    contentAlignment = Alignment.CenterStart
+                        .clickable { showPositivePromptScreen = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .testTag("inpaint_prompt_input"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    if (uiState.inpaintPrompt.isEmpty()) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
                         Text(
-                            text = "Modern dress",
-                            color = mutedSlate.copy(alpha = 0.75f),
-                            fontSize = 16.sp
+                            text = "Positive Prompt",
+                            color = Color(0xFF0284C7),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = uiState.inpaintPrompt.ifBlank { "Tap to open Positive Prompt screen (e.g. Modern dress)..." },
+                            color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.75f) else darkSlate,
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    BasicTextField(
-                        value = uiState.inpaintPrompt,
-                        onValueChange = onPromptChanged,
-                        singleLine = true,
-                        textStyle = TextStyle(
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Edit Positive Prompt",
+                        tint = Color(0xFF0284C7),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Dedicated Negative Prompt Card (tap to open full-screen Negative Prompt editor)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(promptShape)
+                        .background(Color(0xD9FFF7F7))
+                        .border(1.2.dp, Color(0xB3FECACA), promptShape)
+                        .clickable { showNegativePromptScreen = true }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .testTag("inpaint_negative_prompt_card"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Negative Prompt",
+                            color = Color(0xFFDC2626),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = uiState.inpaintNegativePrompt.ifBlank { SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT },
                             color = darkSlate,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Medium
-                        ),
-                        cursorBrush = SolidColor(Color(0xFF0284C7)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("inpaint_prompt_input")
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Edit Negative Prompt",
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
@@ -1005,6 +1100,277 @@ fun InpaintPage(
                 showDrawMaskDialog = false
             }
         )
+    }
+
+    if (showPositivePromptScreen) {
+        FullScreenPromptEditorDialog(
+            title = "Positive Prompt",
+            subtitle = "Describe clearly what you want generated inside the painted mask",
+            accentColor = Color(0xFF0284C7),
+            initialText = uiState.inpaintPrompt,
+            placeholderText = "e.g. modern dress, natural skin texture, sharp focus...",
+            quickTags = POSITIVE_BOOSTER_TAGS + SAFE_FASHION_PRESETS,
+            showResetDefault = false,
+            defaultText = "",
+            dialogTag = "positive_prompt_fullscreen_dialog",
+            inputTag = "positive_prompt_fullscreen_input",
+            applyTag = "positive_prompt_apply_btn",
+            onDismiss = { showPositivePromptScreen = false },
+            onApply = { updated ->
+                onPromptChanged(updated)
+                showPositivePromptScreen = false
+            }
+        )
+    }
+
+    if (showNegativePromptScreen) {
+        FullScreenPromptEditorDialog(
+            title = "Negative Prompt",
+            subtitle = "Things the AI should strictly avoid generating",
+            accentColor = Color(0xFFDC2626),
+            initialText = uiState.inpaintNegativePrompt,
+            placeholderText = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
+            quickTags = NEGATIVE_QUALITY_TAGS,
+            showResetDefault = true,
+            defaultText = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
+            dialogTag = "negative_prompt_fullscreen_dialog",
+            inputTag = "negative_prompt_fullscreen_input",
+            applyTag = "negative_prompt_apply_btn",
+            onDismiss = { showNegativePromptScreen = false },
+            onApply = { updated ->
+                if (updated.isBlank()) {
+                    onResetNegativePrompt()
+                } else {
+                    onNegativePromptChanged(updated)
+                }
+                showNegativePromptScreen = false
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FullScreenPromptEditorDialog(
+    title: String,
+    subtitle: String,
+    accentColor: Color,
+    initialText: String,
+    placeholderText: String,
+    quickTags: List<String>,
+    showResetDefault: Boolean,
+    defaultText: String,
+    dialogTag: String,
+    inputTag: String,
+    applyTag: String,
+    onDismiss: () -> Unit,
+    onApply: (String) -> Unit
+) {
+    var draftText by remember(initialText) { mutableStateOf(initialText) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false
+        )
+    ) {
+        BackHandler { onDismiss() }
+
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag(dialogTag),
+            color = Color(0xFFF8FAFC)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                                .border(1.dp, Color(0xFFE2E8F0), CircleShape)
+                                .clickable(onClick = onDismiss),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = Color(0xFF0F172A)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = title,
+                                color = Color(0xFF0F172A),
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 20.sp
+                            )
+                            Text(
+                                text = subtitle,
+                                color = Color(0xFF64748B),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = { onApply(draftText.trim()) },
+                        colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .height(44.dp)
+                            .testTag(applyTag)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Apply",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Apply", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(170.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White)
+                        .border(1.5.dp, accentColor.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                        .padding(14.dp)
+                ) {
+                    if (draftText.isEmpty()) {
+                        Text(
+                            text = placeholderText,
+                            color = Color(0xFF94A3B8),
+                            fontSize = 15.sp
+                        )
+                    }
+                    BasicTextField(
+                        value = draftText,
+                        onValueChange = { draftText = it },
+                        textStyle = TextStyle(
+                            color = Color(0xFF0F172A),
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            lineHeight = 22.sp
+                        ),
+                        cursorBrush = SolidColor(accentColor),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag(inputTag)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    val wordCount = draftText.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+                    Text(
+                        text = "$wordCount words (CLIP max ~75 tokens)",
+                        color = Color(0xFF64748B),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (showResetDefault) {
+                            OutlinedButton(
+                                onClick = { draftText = defaultText },
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.5f))
+                            ) {
+                                Text("Reset Default", color = accentColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { draftText = "" },
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Color(0xFFCBD5E1))
+                        ) {
+                            Text("Clear", color = Color(0xFF475569), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Tap to Add Quick Tags",
+                    color = Color(0xFF0F172A),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
+
+                FlowRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    quickTags.forEach { tag ->
+                        val isPresent = draftText.contains(tag, ignoreCase = true)
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (isPresent) accentColor else Color.White)
+                                .border(
+                                    1.dp,
+                                    if (isPresent) accentColor else Color(0xFFCBD5E1),
+                                    RoundedCornerShape(50)
+                                )
+                                .clickable {
+                                    draftText = if (isPresent) {
+                                        draftText
+                                            .split(",")
+                                            .map { it.trim() }
+                                            .filter { it.isNotEmpty() && !it.equals(tag, ignoreCase = true) }
+                                            .joinToString(", ")
+                                    } else {
+                                        val clean = draftText.trim().trimEnd(',')
+                                        if (clean.isEmpty()) tag else "$clean, $tag"
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isPresent) Icons.Default.Check else Icons.Default.Add,
+                                contentDescription = tag,
+                                tint = if (isPresent) Color.White else accentColor,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = tag,
+                                color = if (isPresent) Color.White else Color(0xFF0F172A),
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

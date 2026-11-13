@@ -32,6 +32,7 @@ import com.example.onnx.OnnxMemoryServiceState
 import com.example.onnx.OnnxModelInspection
 import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.OnnxRuntimeModelService
+import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
 import com.example.onnx.SkinToneSourceMode
@@ -146,6 +147,7 @@ data class FaceSwapUiState(
     val inpaintSourceBitmap: Bitmap? = null,
     val inpaintMaskBitmap: Bitmap? = null,
     val inpaintPrompt: String = "",
+    val inpaintNegativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
     val inpaintFastMode: Boolean = true,
     val inpaintStrength: Float = 0.70f,
     val inpaintCfgScale: Float = 7.0f,
@@ -1096,6 +1098,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
             try {
                 val execResult = withContext(Dispatchers.Default) {
+                    SdInpaintOnnxEngine.clearSessionCache()
                     when (state.studioMode) {
                         StudioMode.FACE_SWAP -> modelService.swapFaces(
                             sourceBitmap = srcBitmap,
@@ -1490,6 +1493,14 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(inpaintPrompt = prompt) }
     }
 
+    fun setInpaintNegativePrompt(prompt: String) {
+        _uiState.update { it.copy(inpaintNegativePrompt = prompt) }
+    }
+
+    fun resetInpaintNegativePromptToDefault() {
+        _uiState.update { it.copy(inpaintNegativePrompt = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT) }
+    }
+
     fun setInpaintFastMode(fastMode: Boolean) {
         _uiState.update { it.copy(inpaintFastMode = fastMode) }
     }
@@ -1563,12 +1574,16 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         if (!needsHeadParserAndSd) {
             return Triple(cur.inpaintModelOption, cur.inpaintModelLabel, false)
         }
+        val ctx = getApplication<Application>()
+        val installedPacks = cur.installedSdInpaintPacks.ifEmpty {
+            SdInpaintPackManager.discoverInstalledPacks(ctx).map { it.packType }
+        }
         val nextOption = when {
-            SdInpaintPackType.SD15_FP16 in cur.installedSdInpaintPacks -> InpaintModelOption.SD15_FP16
-            SdInpaintPackType.REALVIS_INT8 in cur.installedSdInpaintPacks -> InpaintModelOption.REALVIS_INT8
+            SdInpaintPackType.SD15_FP32 in installedPacks -> InpaintModelOption.SD15_FP32
+            SdInpaintPackType.REALVIS_INT8 in installedPacks -> InpaintModelOption.REALVIS_INT8
+            SdInpaintPackType.SD15_FP16 in installedPacks -> InpaintModelOption.SD15_FP16
             else -> cur.inpaintModelOption
         }
-        val ctx = getApplication<Application>()
         val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
         val nextLabel = if (nextOption != cur.inpaintModelOption) {
             SdInpaintPackManager.formatDropdownLabel(ctx, nextOption, if (lamaFile.exists()) lamaFile else null)
@@ -1906,6 +1921,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         sourceBitmap = srcBmp,
                         maskBitmap = maskBmp,
                         prompt = state.inpaintPrompt,
+                        negativePrompt = state.inpaintNegativePrompt,
                         fastMode = state.inpaintFastMode,
                         lamaModelFile = if (lamaFile.exists()) lamaFile else null,
                         preferHardwareAccel = state.preferHardwareAcceleration,

@@ -125,12 +125,23 @@ class InpaintAndHistoryRobolectricTest {
     }
 
     @Test
-    fun sdInpaintPackManager_prioritizesFp16FirstAndInt8Second_andSelectsLinkedOnnx() {
+    fun sdInpaintPackManager_prioritizesFp32AndInt8BeforeFp16_andSelectsLinkedOnnx() {
         val root = SdInpaintPackManager.getSdInpaintRootDir(context)
         root.deleteRecursively()
         root.mkdirs()
 
-        // Create INT8 pack (Second option) with 2 files in unet: model.onnx referencing model_int8.onnx.data + extra.onnx
+        // Create FP16 pack (Secondary option on CPU)
+        val fp16Dir = File(root, SdInpaintPackType.SD15_FP16.id)
+        listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
+            val compDir = File(fp16Dir, comp).apply { mkdirs() }
+            File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 4 })
+            File(compDir, "model.onnx.data").writeBytes(ByteArray(4096) { 5 })
+        }
+
+        // Only FP16 present -> falls back to SD15_FP16
+        assertEquals(InpaintModelOption.SD15_FP16, SdInpaintPackManager.determineDefaultModelOption(context, null))
+
+        // Add INT8 pack (Faster & higher priority on CPU than FP16) with 2 files in unet
         val int8Dir = File(root, SdInpaintPackType.REALVIS_INT8.id)
         listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
             val compDir = File(int8Dir, comp).apply { mkdirs() }
@@ -144,25 +155,25 @@ class InpaintAndHistoryRobolectricTest {
             }
         }
 
-        // Only INT8 present -> default option must pick REALVIS_INT8
-        assertEquals(InpaintModelOption.REALVIS_INT8, SdInpaintPackManager.determineDefaultModelOption(context, null))
         val unetSelected = SdInpaintPackManager.selectBestOnnxInComponentDir(File(int8Dir, "unet"), SdInpaintPackType.REALVIS_INT8)
         assertEquals("model.onnx", unetSelected?.name)
+        assertEquals(InpaintModelOption.REALVIS_INT8, SdInpaintPackManager.determineDefaultModelOption(context, null))
 
-        // Now add FP16 pack (Primary Priority 1)
-        val fp16Dir = File(root, SdInpaintPackType.SD15_FP16.id)
+        // Now add FP32 pack (Primary CPU Priority 1)
+        val fp32Dir = File(root, SdInpaintPackType.SD15_FP32.id)
         listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
-            val compDir = File(fp16Dir, comp).apply { mkdirs() }
-            File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 4 })
-            File(compDir, "model.onnx.data").writeBytes(ByteArray(4096) { 5 })
+            val compDir = File(fp32Dir, comp).apply { mkdirs() }
+            File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 6 })
+            File(compDir, "model.onnx.data").writeBytes(ByteArray(4096) { 7 })
         }
 
         val packs = SdInpaintPackManager.discoverInstalledPacks(context)
-        assertEquals(2, packs.size)
-        assertEquals(SdInpaintPackType.SD15_FP16, packs[0].packType)
+        assertEquals(3, packs.size)
+        assertEquals(SdInpaintPackType.SD15_FP32, packs[0].packType)
         assertEquals(SdInpaintPackType.REALVIS_INT8, packs[1].packType)
-        assertEquals(InpaintModelOption.SD15_FP16, SdInpaintPackManager.determineDefaultModelOption(context, null))
-        assertEquals(SdInpaintPackType.SD15_FP16, SdInpaintPackManager.resolvePackForOption(context, InpaintModelOption.AUTO)?.packType)
+        assertEquals(SdInpaintPackType.SD15_FP16, packs[2].packType)
+        assertEquals(InpaintModelOption.SD15_FP32, SdInpaintPackManager.determineDefaultModelOption(context, null))
+        assertEquals(SdInpaintPackType.SD15_FP32, SdInpaintPackManager.resolvePackForOption(context, InpaintModelOption.AUTO)?.packType)
     }
 
     @Test
@@ -204,8 +215,7 @@ class InpaintAndHistoryRobolectricTest {
             val back = SdInpaintOnnxEngine.halfBitsToFloat(h)
             assertTrue(abs(v - back) < 0.02f)
         }
-
- }
+    }
 
     @Test
     fun accessoryMaskLayers_combinesMultiSelectedTargetsAndPrompts() {
@@ -285,7 +295,21 @@ class InpaintAndHistoryRobolectricTest {
     }
 
     @Test
-    fun sdInpaintOnnxEngine_computesStrengthDenoisePlanAndDilatesMask() {
+    fun sdInpaintOnnxEngine_computesAspectTargetResolutionsAndDenoisePlan() {
+        val portraitDims = SdInpaintOnnxEngine.computeAspectMatchedTargetResolution(236, 472, supportsDynamicShapes = true)
+        assertEquals(512, portraitDims.width)
+        assertEquals(768, portraitDims.height)
+        assertEquals(64, portraitDims.latentW)
+        assertEquals(96, portraitDims.latentH)
+
+        val landscapeDims = SdInpaintOnnxEngine.computeAspectMatchedTargetResolution(800, 500, supportsDynamicShapes = true)
+        assertEquals(768, landscapeDims.width)
+        assertEquals(512, landscapeDims.height)
+
+        val staticDims = SdInpaintOnnxEngine.computeAspectMatchedTargetResolution(236, 472, supportsDynamicShapes = false)
+        assertEquals(512, staticDims.width)
+        assertEquals(512, staticDims.height)
+
         val fastDefault = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.70f)
         assertEquals(16, fastDefault.baseSteps)
         assertEquals(11, fastDefault.denoiseSteps)
@@ -309,7 +333,7 @@ class InpaintAndHistoryRobolectricTest {
     }
 
     @Test
-    fun faceSwapViewModel_autoSelectsSd15AndSegformerOnCapOrGlassesToggle_andUpdatesStrengthCfg() {
+    fun faceSwapViewModel_autoSelectsInt8OverFp16AndSegformer_andManagesNegativePrompt() {
         val root = SdInpaintPackManager.getSdInpaintRootDir(context)
         root.deleteRecursively()
         val fp16Dir = File(root, SdInpaintPackType.SD15_FP16.id)
@@ -317,10 +341,25 @@ class InpaintAndHistoryRobolectricTest {
             val compDir = File(fp16Dir, comp).apply { mkdirs() }
             File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 7 })
         }
+        val int8Dir = File(root, SdInpaintPackType.REALVIS_INT8.id)
+        listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
+            val compDir = File(int8Dir, comp).apply { mkdirs() }
+            File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 8 })
+        }
 
         val vm = FaceSwapViewModel(context.applicationContext as Application)
+        val deadline = System.currentTimeMillis() + 3000L
+        while (vm.uiState.value.isInspectingModels && System.currentTimeMillis() < deadline) {
+            Thread.sleep(25L)
+        }
         assertEquals(0.70f, vm.uiState.value.inpaintStrength, 0.001f)
         assertEquals(7.0f, vm.uiState.value.inpaintCfgScale, 0.001f)
+        assertEquals(SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT, vm.uiState.value.inpaintNegativePrompt)
+
+        vm.setInpaintNegativePrompt("blurry, extra fingers")
+        assertEquals("blurry, extra fingers", vm.uiState.value.inpaintNegativePrompt)
+        vm.resetInpaintNegativePromptToDefault()
+        assertEquals(SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT, vm.uiState.value.inpaintNegativePrompt)
 
         vm.setInpaintStrength(0.10f)
         vm.setInpaintCfgScale(8.5f)
@@ -332,6 +371,7 @@ class InpaintAndHistoryRobolectricTest {
 
         vm.updateAccessorySelectionAndExpand(setOf(AccessoryTarget.CAP), 6f)
         assertTrue(vm.uiState.value.segformerAutoSelectedForAccessory)
+        assertEquals(InpaintModelOption.REALVIS_INT8, vm.uiState.value.inpaintModelOption)
         assertTrue(AccessoryTarget.CAP in vm.uiState.value.selectedAccessoryTargets)
 
         vm.updateAccessorySelectionAndExpand(emptySet(), 6f)
