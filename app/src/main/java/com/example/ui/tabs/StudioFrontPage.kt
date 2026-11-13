@@ -190,6 +190,8 @@ fun StudioFrontPage(
     onImportAllFromFolder: () -> Unit = {},
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
+    onOpenInpaintPage: () -> Unit = {},
+    onViewResultFullScreen: (Bitmap) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -220,7 +222,8 @@ fun StudioFrontPage(
             FrontChooseModeSection(
                 selectedMode = uiState.studioMode,
                 onSelectMode = onSelectStudioMode,
-                onImportAllFromFolder = onImportAllFromFolder
+                onImportAllFromFolder = onImportAllFromFolder,
+                onOpenInpaintPage = onOpenInpaintPage
             )
 
             // 3. Main Workspace Card (1 Source Face, 2 Target Photo, Skin Tone & Face Reaction Selector, Swap Face CTA)
@@ -241,7 +244,8 @@ fun StudioFrontPage(
                 uiState = uiState,
                 onDownloadHd = onDownloadHd,
                 onSaveToGallery = onSaveToGallery,
-                onInspectResultDetails = onInspectResultDetails
+                onInspectResultDetails = onInspectResultDetails,
+                onViewResultFullScreen = onViewResultFullScreen
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -399,7 +403,8 @@ private fun FrontHeroStoryBanner() {
 private fun FrontChooseModeSection(
     selectedMode: StudioMode,
     onSelectMode: (StudioMode) -> Unit,
-    onImportAllFromFolder: () -> Unit
+    onImportAllFromFolder: () -> Unit,
+    onOpenInpaintPage: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -509,7 +514,7 @@ private fun FrontChooseModeSection(
                     subtitle = "Edit specific parts",
                     isSelected = false,
                     iconType = 3,
-                    onClick = {},
+                    onClick = onOpenInpaintPage,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("mode_tab_inpaint")
@@ -1169,7 +1174,8 @@ private fun FrontResultShowcaseCard(
     uiState: FaceSwapUiState,
     onDownloadHd: () -> Unit,
     onSaveToGallery: () -> Unit,
-    onInspectResultDetails: () -> Unit
+    onInspectResultDetails: () -> Unit,
+    onViewResultFullScreen: (Bitmap) -> Unit = {}
 ) {
     val result = uiState.swapResult
     val currentTimeText = remember(result) {
@@ -1317,13 +1323,20 @@ private fun FrontResultShowcaseCard(
 
                     Spacer(modifier = Modifier.width(2.dp))
 
-                    // Larger Output Result Portrait
+                    // Larger Output Result Portrait (tap to view full-screen with zoom)
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .height(94.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .border(1.2.dp, Color(0xFF00D4FF).copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                            .clickable {
+                                if (result != null) {
+                                    onViewResultFullScreen(result.outputBitmap)
+                                } else {
+                                    onInspectResultDetails()
+                                }
+                            }
                     ) {
                         if (result != null) {
                             Image(

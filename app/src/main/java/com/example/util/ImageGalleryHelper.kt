@@ -582,4 +582,95 @@ object ImageGalleryHelper {
             "Opened Android Share Sheet ($fileName)"
         }
     }
+
+    /**
+     * Saves a Bitmap as uncompressed 100% PNG directly to a user-selected folder/document URI
+     * obtained via `ActivityResultContracts.CreateDocument` (Storage Access Framework).
+     */
+    fun saveBitmapToUri(
+        context: Context,
+        uri: Uri,
+        bitmap: Bitmap
+    ): Result<String> {
+        return runCatching {
+            val resolver = context.contentResolver
+            val outputStream: OutputStream = resolver.openOutputStream(uri)
+                ?: error("Could not open selected destination file in mobile storage.")
+            outputStream.use { out ->
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    error("Failed to write PNG image data.")
+                }
+                out.flush()
+            }
+            val displayName = runCatching {
+                resolver.query(
+                    uri,
+                    arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                }
+            }.getOrNull() ?: uri.lastPathSegment ?: "Saved_Image.png"
+            "Saved to folder: $displayName (${bitmap.width}×${bitmap.height})"
+        }
+    }
+
+    /**
+     * Persists a high-quality JPEG copy of a Swap/Inpaint result into private app storage
+     * (`filesDir/history_results/`) so the last 3 History items can be viewed, zoomed, and saved.
+     */
+    fun saveBitmapToHistoryCache(context: Context, bitmap: Bitmap): String? {
+        return runCatching {
+            val dir = File(context.filesDir, "history_results")
+            if (!dir.exists()) dir.mkdirs()
+            val file = File(dir, "history_${System.currentTimeMillis()}.jpg")
+            val longest = max(bitmap.width, bitmap.height)
+            val maxCacheDim = 1440
+            val outBmp = if (longest > maxCacheDim) {
+                val scale = maxCacheDim.toFloat() / longest.toFloat()
+                Bitmap.createScaledBitmap(
+                    bitmap,
+                    (bitmap.width * scale).toInt().coerceAtLeast(64),
+                    (bitmap.height * scale).toInt().coerceAtLeast(64),
+                    true
+                )
+            } else {
+                bitmap
+            }
+            FileOutputStream(file).use { out ->
+                outBmp.compress(Bitmap.CompressFormat.JPEG, 94, out)
+                out.flush()
+            }
+            if (outBmp !== bitmap) {
+                outBmp.recycle()
+            }
+            file.absolutePath
+        }.getOrNull()
+    }
+
+    fun loadBitmapFromFile(path: String?): Bitmap? {
+        if (path.isNullOrBlank()) return null
+        return runCatching {
+            val f = File(path)
+            if (f.exists() && f.isFile && f.length() > 0L) {
+                BitmapFactory.decodeFile(f.absolutePath)
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    fun pruneOrphanHistoryFiles(context: Context, keepPaths: Set<String>) {
+        runCatching {
+            val dir = File(context.filesDir, "history_results")
+            if (!dir.exists()) return
+            dir.listFiles()?.forEach { file ->
+                if (file.isFile && file.absolutePath !in keepPaths) {
+                    file.delete()
+                }
+            }
+        }
+    }
 }

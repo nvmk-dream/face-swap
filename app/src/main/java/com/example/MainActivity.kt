@@ -64,10 +64,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.content.Intent
+import android.graphics.Bitmap
+import android.provider.MediaStore
 import com.example.onnx.ModelSlot
 import com.example.ui.AppTab
 import com.example.ui.FaceSwapViewModel
 import com.example.ui.StudioSubPage
+import com.example.ui.components.ZoomableImageViewerDialog
 import com.example.ui.tabs.HistoryAuditTab
 import com.example.ui.tabs.ModelsInspectorTab
 import com.example.ui.tabs.SafetyLicensesTab
@@ -101,6 +105,8 @@ fun FaceSwapStudioApp(
     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
 
     var pendingImportSlot by remember { mutableStateOf(ModelSlot.DETECTOR) }
+    var pendingSaveBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var zoomViewerState by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
 
     val sourcePhotoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -184,6 +190,37 @@ fun FaceSwapStudioApp(
             }
             viewModel.importAllModelsFromFolder(treeUri)
         }
+    }
+
+    // Mobile Memory -> Folder photo picker exclusively for Inpaint Source Image
+    val inpaintSourceFolderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            viewModel.onInpaintSourceImageSelected(uri)
+        }
+    }
+
+    // Mobile Memory -> Folder saver for Inpaint & History results
+    val folderSaveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("image/png")
+    ) { uri ->
+        val bmp = pendingSaveBitmap
+        pendingSaveBitmap = null
+        if (uri != null && bmp != null) {
+            viewModel.saveBitmapToFolderUri(uri, bmp)
+        }
+    }
+
+    val requestSaveToFolder: (Bitmap) -> Unit = { bmp ->
+        pendingSaveBitmap = bmp
+        folderSaveLauncher.launch("FaceSwapStudio_${System.currentTimeMillis()}.png")
     }
 
     if (uiState.currentTab != AppTab.STUDIO) {
@@ -556,7 +593,35 @@ fun FaceSwapStudioApp(
                     },
                     onRunVisualValidation = viewModel::runVisualValidationSuite,
                     onSaveValidationSheet = viewModel::saveVisualValidationSheetToGallery,
-                    onSelectStudioSubPage = viewModel::selectStudioSubPage
+                    onSelectStudioSubPage = viewModel::selectStudioSubPage,
+                    onPickInpaintSourceFromFolder = {
+                        inpaintSourceFolderPicker.launch(arrayOf("image/*"))
+                    },
+                    onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
+                    onInpaintPromptChanged = viewModel::setInpaintPrompt,
+                    onInpaintFastModeChanged = viewModel::setInpaintFastMode,
+                    onRunInpaint = viewModel::runInpaint,
+                    onReuseInpaintResult = viewModel::reuseInpaintResultAsSource,
+                    onSaveBitmapToFolder = requestSaveToFolder,
+                    onDownloadBitmapToGallery = { bmp ->
+                        viewModel.saveAnyBitmapToGallery(bmp, isHd = true, label = "Inpaint")
+                    },
+                    onOpenInpaintGallery = { bmp ->
+                        viewModel.saveAnyBitmapToGallery(bmp, isHd = true, label = "Inpaint")
+                        val launched = runCatching {
+                            val galleryIntent = Intent(
+                                Intent.ACTION_VIEW,
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                            )
+                            context.startActivity(galleryIntent)
+                        }.isSuccess
+                        if (!launched) {
+                            zoomViewerState = bmp to "Inpaint Result"
+                        }
+                    },
+                    onViewImageFullScreen = { bmp, title ->
+                        zoomViewerState = bmp to title
+                    }
                 )
 
                 AppTab.MODELS -> ModelsInspectorTab(
@@ -578,10 +643,26 @@ fun FaceSwapStudioApp(
                 AppTab.HISTORY -> HistoryAuditTab(
                     auditLogs = auditLogs,
                     onDeleteLog = viewModel::deleteAuditLog,
-                    onClearAll = viewModel::clearAllAuditLogs
+                    onClearAll = viewModel::clearAllAuditLogs,
+                    onViewImageFullScreen = { bmp, title ->
+                        zoomViewerState = bmp to title
+                    },
+                    onSaveImageToFolder = requestSaveToFolder
                 )
 
                 AppTab.ETHICS -> SafetyLicensesTab()
+            }
+
+            zoomViewerState?.let { (bmp, title) ->
+                ZoomableImageViewerDialog(
+                    bitmap = bmp,
+                    title = title,
+                    onDismiss = { zoomViewerState = null },
+                    onSaveToFolder = { requestSaveToFolder(bmp) },
+                    onSaveToGallery = {
+                        viewModel.saveAnyBitmapToGallery(bmp, isHd = true, label = title)
+                    }
+                )
             }
         }
     }

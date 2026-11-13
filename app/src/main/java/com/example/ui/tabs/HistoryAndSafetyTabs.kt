@@ -1,6 +1,10 @@
 package com.example.ui.tabs
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,10 +25,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -33,17 +39,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.SwapAuditLog
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.NeonEmerald
 import com.example.ui.theme.ObsidianBg
+import com.example.util.ImageGalleryHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -53,6 +67,8 @@ fun HistoryAuditTab(
     auditLogs: List<SwapAuditLog>,
     onDeleteLog: (Int) -> Unit,
     onClearAll: () -> Unit,
+    onViewImageFullScreen: (Bitmap, String) -> Unit = { _, _ -> },
+    onSaveImageToFolder: (Bitmap) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -72,15 +88,18 @@ fun HistoryAuditTab(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Local Swap Audit Log (Room SQLite)",
-                        style = MaterialTheme.typography.titleLarge
+                        text = "Recent History (Last 3 Results)",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Color(0xFF0F172A),
+                        fontWeight = FontWeight.ExtraBold
                     )
                     Text(
-                        text = "100% on-device performance & provenance telemetry",
+                        text = "Only the last 3 results are kept; older items auto-delete",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = Color(0xFF334155),
+                        fontWeight = FontWeight.Medium
                     )
                 }
                 if (auditLogs.isNotEmpty()) {
@@ -118,12 +137,14 @@ fun HistoryAuditTab(
                         )
                         Text(
                             text = "No offline swap executions recorded yet.",
-                            style = MaterialTheme.typography.titleMedium
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color(0xFF0F172A),
+                            fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Run a face swap in the Studio tab to log per-stage ONNX Runtime latency.",
+                            text = "Run a Face Swap or Inpaint in Studio to keep up to 3 recent results here.",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = Color(0xFF334155)
                         )
                     }
                 }
@@ -135,7 +156,11 @@ fun HistoryAuditTab(
                     items(auditLogs, key = { it.id }) { log ->
                         AuditLogItemCard(
                             log = log,
-                            onDelete = { onDeleteLog(log.id) }
+                            onDelete = { onDeleteLog(log.id) },
+                            onViewFullScreen = { bmp ->
+                                onViewImageFullScreen(bmp, "History #${log.id}")
+                            },
+                            onSaveToFolder = onSaveImageToFolder
                         )
                     }
                 }
@@ -147,17 +172,26 @@ fun HistoryAuditTab(
 @Composable
 private fun AuditLogItemCard(
     log: SwapAuditLog,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onViewFullScreen: (Bitmap) -> Unit,
+    onSaveToFolder: (Bitmap) -> Unit
 ) {
     val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+    val cachedBitmapState = produceState<Bitmap?>(initialValue = null, key1 = log.resultImagePath) {
+        value = withContext(Dispatchers.IO) {
+            ImageGalleryHelper.loadBitmapFromFile(log.resultImagePath)
+        }
+    }
+    val cachedBitmap = cachedBitmapState.value
+
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -165,9 +199,10 @@ private fun AuditLogItemCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Session #${log.id} • ${formatter.format(Date(log.timestampMillis))}",
+                    text = "Result #${log.id} • ${formatter.format(Date(log.timestampMillis))}",
                     style = MaterialTheme.typography.titleMedium,
-                    color = ElectricCyan
+                    color = ElectricCyan,
+                    modifier = Modifier.weight(1f)
                 )
                 IconButton(onClick = onDelete) {
                     Icon(
@@ -178,44 +213,125 @@ private fun AuditLogItemCard(
                 }
             }
 
-            Text(
-                text = "Pipeline: ${log.pipelineSummary}",
-                style = MaterialTheme.typography.labelMedium
-            )
-            Text(
-                text = "Source: ${log.sourceResolution} -> Target: ${log.targetResolution} (${log.swappedFacesCount} face(s))",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(ObsidianBg)
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Embed: ${log.embeddingMs}ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = ElectricCyan
-                )
-                Text(
-                    text = "Swap: ${log.inswapperMs}ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = NeonEmerald
-                )
-                Text(
-                    text = "Blend: ${log.blendingMs}ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AmberWarning
-                )
-                Text(
-                    text = "Total: ${log.totalMs}ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                if (cachedBitmap != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(88.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.5.dp, ElectricCyan, RoundedCornerShape(12.dp))
+                            .clickable { onViewFullScreen(cachedBitmap) }
+                            .testTag("history_thumbnail_${log.id}")
+                    ) {
+                        Image(
+                            bitmap = cachedBitmap.asImageBitmap(),
+                            contentDescription = "History result image",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(4.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xB30F172A))
+                                .padding(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ZoomIn,
+                                contentDescription = "View full screen",
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = log.pipelineSummary,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Resolution: ${log.sourceResolution} → ${log.targetResolution}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Time: ${log.totalMs} ms",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = NeonEmerald
+                    )
+                }
+            }
+
+            if (cachedBitmap != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF132042))
+                            .border(1.dp, ElectricCyan, RoundedCornerShape(10.dp))
+                            .clickable { onViewFullScreen(cachedBitmap) }
+                            .testTag("history_btn_view_${log.id}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ZoomIn,
+                            contentDescription = "View & Zoom",
+                            tint = ElectricCyan,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "View / Zoom",
+                            color = Color.White,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF0A2E26))
+                            .border(1.dp, NeonEmerald, RoundedCornerShape(10.dp))
+                            .clickable { onSaveToFolder(cachedBitmap) }
+                            .testTag("history_btn_save_${log.id}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = "Save to Folder",
+                            tint = NeonEmerald,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Save",
+                            color = Color.White,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
             }
 
             log.savedGalleryPath?.let { path ->

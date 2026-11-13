@@ -4,11 +4,13 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.example.util.ImageGalleryHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class SwapAuditLog(
     val id: Int = 0,
@@ -24,7 +26,8 @@ data class SwapAuditLog(
     val totalMs: Long,
     val colorTransferEnabled: Boolean,
     val watermarkEnabled: Boolean,
-    val savedGalleryPath: String? = null
+    val savedGalleryPath: String? = null,
+    val resultImagePath: String? = null
 )
 
 interface SwapAuditDao {
@@ -36,12 +39,14 @@ interface SwapAuditDao {
 }
 
 class SwapAuditDatabase private constructor(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "faceswap_studio_audit.db", null, 1),
+    SQLiteOpenHelper(context.applicationContext, "faceswap_studio_audit.db", null, 2),
     SwapAuditDao {
 
+    private val appContext: Context = context.applicationContext
     private val logsFlow = MutableStateFlow<List<SwapAuditLog>>(emptyList())
 
     init {
+        enforceMaxHistoryLimitSync()
         refreshLogsSync()
     }
 
@@ -62,15 +67,23 @@ class SwapAuditDatabase private constructor(context: Context) :
                 totalMs INTEGER NOT NULL,
                 colorTransferEnabled INTEGER NOT NULL,
                 watermarkEnabled INTEGER NOT NULL,
-                savedGalleryPath TEXT
+                savedGalleryPath TEXT,
+                resultImagePath TEXT
             )
             """.trimIndent()
         )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS swap_audit_logs")
-        onCreate(db)
+        if (oldVersion < 2) {
+            val altered = runCatching {
+                db.execSQL("ALTER TABLE swap_audit_logs ADD COLUMN resultImagePath TEXT")
+            }.isSuccess
+            if (!altered) {
+                db.execSQL("DROP TABLE IF EXISTS swap_audit_logs")
+                onCreate(db)
+            }
+        }
     }
 
     fun swapAuditDao(): SwapAuditDao = this
@@ -93,6 +106,7 @@ class SwapAuditDatabase private constructor(context: Context) :
             put("colorTransferEnabled", if (log.colorTransferEnabled) 1 else 0)
             put("watermarkEnabled", if (log.watermarkEnabled) 1 else 0)
             put("savedGalleryPath", log.savedGalleryPath)
+            put("resultImagePath", log.resultImagePath)
         }
         val rowId = writableDatabase.insertWithOnConflict(
             "swap_audit_logs",
@@ -100,6 +114,7 @@ class SwapAuditDatabase private constructor(context: Context) :
             values,
             SQLiteDatabase.CONFLICT_REPLACE
         )
+        enforceMaxHistoryLimitSync()
         refreshLogsSync()
         rowId
     }
@@ -113,13 +128,57 @@ class SwapAuditDatabase private constructor(context: Context) :
     }
 
     override suspend fun deleteById(id: Int) = withContext(Dispatchers.IO) {
+        runCatching {
+            readableDatabase.rawQuery(
+                "SELECT resultImagePath FROM swap_audit_logs WHERE id = ?",
+                arrayOf(id.toString())
+            ).use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                    val path = cursor.getString(0)
+                    if (!path.isNullOrBlank()) {
+                        runCatching { File(path).delete() }
+                    }
+                }
+            }
+        }
         writableDatabase.delete("swap_audit_logs", "id = ?", arrayOf(id.toString()))
         refreshLogsSync()
     }
 
     override suspend fun clearAll() = withContext(Dispatchers.IO) {
         writableDatabase.delete("swap_audit_logs", null, null)
+        ImageGalleryHelper.pruneOrphanHistoryFiles(appContext, emptySet())
         refreshLogsSync()
+    }
+
+    /**
+     * Strictly retains only the latest [MAX_HISTORY_RECORDS] (3) results and
+     * auto-deletes older records plus their cached thumbnail image files.
+     */
+    private fun enforceMaxHistoryLimitSync() {
+        runCatching {
+            writableDatabase.execSQL(
+                """
+                DELETE FROM swap_audit_logs
+                WHERE id NOT IN (
+                    SELECT id FROM swap_audit_logs
+                    ORDER BY timestampMillis DESC, id DESC
+                    LIMIT $MAX_HISTORY_RECORDS
+                )
+                """.trimIndent()
+            )
+            val keepPaths = HashSet<String>()
+            readableDatabase.rawQuery(
+                "SELECT resultImagePath FROM swap_audit_logs WHERE resultImagePath IS NOT NULL",
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val p = cursor.getString(0)
+                    if (!p.isNullOrBlank()) keepPaths.add(p)
+                }
+            }
+            ImageGalleryHelper.pruneOrphanHistoryFiles(appContext, keepPaths)
+        }
     }
 
     private fun refreshLogsSync() {
@@ -128,8 +187,8 @@ class SwapAuditDatabase private constructor(context: Context) :
             readableDatabase.rawQuery(
                 "SELECT id, timestampMillis, sourceResolution, targetResolution, swappedFacesCount, " +
                     "pipelineSummary, detectionMs, embeddingMs, inswapperMs, blendingMs, totalMs, " +
-                    "colorTransferEnabled, watermarkEnabled, savedGalleryPath " +
-                    "FROM swap_audit_logs ORDER BY timestampMillis DESC",
+                    "colorTransferEnabled, watermarkEnabled, savedGalleryPath, resultImagePath " +
+                    "FROM swap_audit_logs ORDER BY timestampMillis DESC, id DESC LIMIT $MAX_HISTORY_RECORDS",
                 null
             ).use { cursor ->
                 while (cursor.moveToNext()) {
@@ -148,7 +207,8 @@ class SwapAuditDatabase private constructor(context: Context) :
                             totalMs = cursor.getLong(10),
                             colorTransferEnabled = cursor.getInt(11) != 0,
                             watermarkEnabled = cursor.getInt(12) != 0,
-                            savedGalleryPath = if (cursor.isNull(13)) null else cursor.getString(13)
+                            savedGalleryPath = if (cursor.isNull(13)) null else cursor.getString(13),
+                            resultImagePath = if (cursor.isNull(14)) null else cursor.getString(14)
                         )
                     )
                 }
@@ -159,6 +219,8 @@ class SwapAuditDatabase private constructor(context: Context) :
     }
 
     companion object {
+        const val MAX_HISTORY_RECORDS = 3
+
         @Volatile
         private var INSTANCE: SwapAuditDatabase? = null
 
@@ -183,4 +245,3 @@ class SwapAuditRepository(private val dao: SwapAuditDao) {
 
     suspend fun clearAll() = dao.clearAll()
 }
-

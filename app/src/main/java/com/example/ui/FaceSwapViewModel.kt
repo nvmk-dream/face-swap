@@ -18,6 +18,7 @@ import com.example.onnx.FaceReactionSourceMode
 import com.example.onnx.FaceSwapAndRestorationService
 import com.example.onnx.FaceSwapExecutionResult
 import com.example.onnx.HeadSegmentationAndInpainting
+import com.example.onnx.InteractiveInpaintEngine
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxMemoryServiceState
 import com.example.onnx.OnnxModelInspection
@@ -47,7 +48,8 @@ enum class AppTab {
 enum class StudioSubPage {
     FRONT_HOME,
     SETTINGS_AND_DIAGNOSTICS,
-    ALIGNMENT_PREVIEW
+    ALIGNMENT_PREVIEW,
+    INPAINT_PAGE
 }
 
 enum class StudioMode(val title: String, val badge: String) {
@@ -131,6 +133,15 @@ data class FaceSwapUiState(
     val isRunningVisualValidation: Boolean = false,
     val lastAuditLogId: Int? = null,
     val showOriginalInComparison: Boolean = false,
+    val inpaintSourceBitmap: Bitmap? = null,
+    val inpaintMaskBitmap: Bitmap? = null,
+    val inpaintPrompt: String = "",
+    val inpaintFastMode: Boolean = true,
+    val isInpainting: Boolean = false,
+    val inpaintResultBitmap: Bitmap? = null,
+    val inpaintElapsedSec: Float? = null,
+    val inpaintEngineLabel: String? = null,
+    val inpaintModelLabel: String = "Coming Soon",
     val statusBannerMessage: String? = null,
     val errorBannerMessage: String? = null
 ) {
@@ -1038,6 +1049,13 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
 
+                val historyImgPath = withContext(Dispatchers.IO) {
+                    ImageGalleryHelper.saveBitmapToHistoryCache(
+                        getApplication(),
+                        execResult.outputBitmap
+                    )
+                }
+
                 val logId = auditRepository.insert(
                     SwapAuditLog(
                         sourceResolution = "${srcBitmap.width}x${srcBitmap.height}",
@@ -1050,7 +1068,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         blendingMs = execResult.blendingMs,
                         totalMs = execResult.totalMs,
                         colorTransferEnabled = state.enableColorTransfer,
-                        watermarkEnabled = state.enableProvenanceWatermark
+                        watermarkEnabled = state.enableProvenanceWatermark,
+                        resultImagePath = historyImgPath
                     )
                 )
 
@@ -1249,6 +1268,200 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             it.copy(
                 swapResult = currentResult.copy(outputBitmap = cropped),
                 statusBannerMessage = "Cropped output image to $aspectW:$aspectH (${cropped.width}×${cropped.height})."
+            )
+        }
+    }
+
+    fun onInpaintSourceImageSelected(uri: Uri) {
+        viewModelScope.launch {
+            val maxDim = _uiState.value.qualityLevel.maxDecodeDimensionPx
+            _uiState.update {
+                it.copy(errorBannerMessage = null, statusBannerMessage = null)
+            }
+            val decoded = withContext(Dispatchers.IO) {
+                ImageGalleryHelper.decodeUriToBitmap(getApplication(), uri, maxDim)
+            }
+            decoded.fold(
+                onSuccess = { bitmap ->
+                    _uiState.update {
+                        it.copy(
+                            inpaintSourceBitmap = bitmap,
+                            inpaintMaskBitmap = null,
+                            inpaintResultBitmap = null,
+                            inpaintElapsedSec = null,
+                            statusBannerMessage = "Loaded Inpaint Source (${bitmap.width}×${bitmap.height}) from folder."
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(errorBannerMessage = "Could not open image from folder: ${err.message}")
+                    }
+                }
+            )
+        }
+    }
+
+    fun setInpaintMaskBitmap(mask: Bitmap?) {
+        _uiState.update {
+            it.copy(
+                inpaintMaskBitmap = mask,
+                errorBannerMessage = null,
+                statusBannerMessage = if (mask != null) "Mask applied. Tap Create to run Inpaint." else null
+            )
+        }
+    }
+
+    fun setInpaintPrompt(prompt: String) {
+        _uiState.update { it.copy(inpaintPrompt = prompt) }
+    }
+
+    fun setInpaintFastMode(fastMode: Boolean) {
+        _uiState.update { it.copy(inpaintFastMode = fastMode) }
+    }
+
+    fun reuseInpaintResultAsSource() {
+        val resultBmp = _uiState.value.inpaintResultBitmap ?: return
+        _uiState.update {
+            it.copy(
+                inpaintSourceBitmap = resultBmp,
+                inpaintMaskBitmap = null,
+                inpaintResultBitmap = null,
+                inpaintElapsedSec = null,
+                statusBannerMessage = "Result loaded as Source Image. Draw a new mask to edit further."
+            )
+        }
+    }
+
+    fun runInpaint() {
+        val state = _uiState.value
+        val srcBmp = state.inpaintSourceBitmap
+        val maskBmp = state.inpaintMaskBitmap
+        if (srcBmp == null) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Please select a Source Image from device folder first.")
+            }
+            return
+        }
+        if (maskBmp == null) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Please tap 'Draw Mask' and paint the region to inpaint first.")
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isInpainting = true,
+                    errorBannerMessage = null,
+                    statusBannerMessage = null
+                )
+            }
+            try {
+                val res = withContext(Dispatchers.Default) {
+                    val lamaFile = OnnxProtobufInspector.resolveModelFile(
+                        getApplication(),
+                        ModelSlot.INPAINTING
+                    )
+                    InteractiveInpaintEngine.inpaint(
+                        ortEnv = ortEnv,
+                        sourceBitmap = srcBmp,
+                        maskBitmap = maskBmp,
+                        prompt = state.inpaintPrompt,
+                        fastMode = state.inpaintFastMode,
+                        lamaModelFile = if (lamaFile.exists()) lamaFile else null,
+                        preferHardwareAccel = state.preferHardwareAcceleration
+                    )
+                }
+
+                val historyPath = withContext(Dispatchers.IO) {
+                    ImageGalleryHelper.saveBitmapToHistoryCache(getApplication(), res.outputBitmap)
+                }
+
+                auditRepository.insert(
+                    SwapAuditLog(
+                        sourceResolution = "${srcBmp.width}x${srcBmp.height}",
+                        targetResolution = "${res.outputBitmap.width}x${res.outputBitmap.height}",
+                        swappedFacesCount = 1,
+                        pipelineSummary = "[INPAINT • ${res.engineUsed}]" +
+                            if (state.inpaintPrompt.isNotBlank()) " Prompt: ${state.inpaintPrompt}" else "",
+                        detectionMs = 0L,
+                        embeddingMs = 0L,
+                        inswapperMs = res.elapsedMs,
+                        blendingMs = 0L,
+                        totalMs = res.elapsedMs,
+                        colorTransferEnabled = false,
+                        watermarkEnabled = false,
+                        resultImagePath = historyPath
+                    )
+                )
+
+                val sec = res.elapsedMs / 1000f
+                _uiState.update {
+                    it.copy(
+                        isInpainting = false,
+                        inpaintResultBitmap = res.outputBitmap,
+                        inpaintElapsedSec = sec,
+                        inpaintEngineLabel = res.engineUsed,
+                        statusBannerMessage = "Inpaint finished in ${"%.2f".format(sec)}s (${res.engineUsed})."
+                    )
+                }
+            } catch (t: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        isInpainting = false,
+                        errorBannerMessage = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun saveBitmapToFolderUri(uri: Uri, bitmap: Bitmap) {
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                ImageGalleryHelper.saveBitmapToUri(getApplication(), uri, bitmap)
+            }
+            saved.fold(
+                onSuccess = { msg ->
+                    _uiState.update {
+                        it.copy(statusBannerMessage = msg, errorBannerMessage = null)
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(errorBannerMessage = "Folder save failed: ${err.message}")
+                    }
+                }
+            )
+        }
+    }
+
+    fun saveAnyBitmapToGallery(bitmap: Bitmap, isHd: Boolean = true, label: String = "Image") {
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                ImageGalleryHelper.saveBitmapToGallery(
+                    context = getApplication(),
+                    bitmap = bitmap,
+                    isHd = isHd,
+                    targetMaxDimension = 0
+                )
+            }
+            saved.fold(
+                onSuccess = { path ->
+                    _uiState.update {
+                        it.copy(
+                            statusBannerMessage = "Saved $label to Gallery: $path",
+                            errorBannerMessage = null
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(errorBannerMessage = "Could not save $label: ${err.message}")
+                    }
+                }
             )
         }
     }

@@ -144,6 +144,16 @@ fun StudioTab(
     onRunVisualValidation: () -> Unit = {},
     onSaveValidationSheet: (Boolean) -> Unit = {},
     onSelectStudioSubPage: (StudioSubPage) -> Unit = {},
+    onPickInpaintSourceFromFolder: () -> Unit = {},
+    onInpaintMaskUpdated: (android.graphics.Bitmap?) -> Unit = {},
+    onInpaintPromptChanged: (String) -> Unit = {},
+    onInpaintFastModeChanged: (Boolean) -> Unit = {},
+    onRunInpaint: () -> Unit = {},
+    onReuseInpaintResult: () -> Unit = {},
+    onSaveBitmapToFolder: (android.graphics.Bitmap) -> Unit = {},
+    onDownloadBitmapToGallery: (android.graphics.Bitmap) -> Unit = {},
+    onOpenInpaintGallery: (android.graphics.Bitmap) -> Unit = {},
+    onViewImageFullScreen: (android.graphics.Bitmap, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     // Front Page: Clean, focused UI matching the user's reference design
@@ -172,6 +182,33 @@ fun StudioTab(
             onImportAllFromFolder = onImportAllFromFolder,
             onSkinToneModeChanged = onSkinToneModeChanged,
             onFaceReactionModeChanged = onFaceReactionModeChanged,
+            onOpenInpaintPage = {
+                onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
+            },
+            onViewResultFullScreen = { bmp ->
+                onViewImageFullScreen(bmp, "Swap Result")
+            },
+            modifier = modifier
+        )
+        return
+    }
+
+    if (uiState.studioSubPage == StudioSubPage.INPAINT_PAGE) {
+        InpaintPage(
+            uiState = uiState,
+            onBack = { onSelectStudioSubPage(StudioSubPage.FRONT_HOME) },
+            onPickSourceFromFolder = onPickInpaintSourceFromFolder,
+            onMaskUpdated = onInpaintMaskUpdated,
+            onPromptChanged = onInpaintPromptChanged,
+            onFastModeChanged = onInpaintFastModeChanged,
+            onCreateInpaint = onRunInpaint,
+            onSaveToFolder = onSaveBitmapToFolder,
+            onDownloadToGallery = onDownloadBitmapToGallery,
+            onReuseResult = onReuseInpaintResult,
+            onOpenGalleryView = onOpenInpaintGallery,
+            onViewResultFullScreen = { bmp ->
+                onViewImageFullScreen(bmp, "Inpaint Result")
+            },
             modifier = modifier
         )
         return
