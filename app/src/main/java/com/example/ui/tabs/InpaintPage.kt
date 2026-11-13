@@ -75,11 +75,11 @@ import com.example.ui.FaceSwapUiState
 import com.example.ui.components.DrawMaskEditorDialog
 
 private val SAFE_FASHION_PRESETS = listOf(
-    "Knee-length sleeveless dress",
-    "Full-sleeve modest jacket",
-    "Layered inner top with cardigan",
-    "Traditional silk kurti with lining",
-    "Remove object cleanly"
+    "hand on hip-arched back",
+    "over shoulder-direct gaze",
+    "lips parted-hair tuck",
+    "one leg extended-lean forward",
+    "spreading both legs"
 )
 
 /**
