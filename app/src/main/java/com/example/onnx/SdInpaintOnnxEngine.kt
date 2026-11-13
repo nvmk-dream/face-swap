@@ -10,11 +10,13 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
 import java.nio.LongBuffer
+import java.util.Locale
 import java.util.Random
 import kotlin.math.cos
 import kotlin.math.ln
@@ -36,13 +38,39 @@ import kotlin.math.sqrt
  */
 object SdInpaintOnnxEngine {
 
+    private const val TAG = "INPAINT"
     private const val SD_RES = 512
     private const val LATENT_RES = 64
     private const val LATENT_CHANNELS = 4
     private const val VAE_SCALE_FACTOR = 0.18215f
-    private const val GUIDANCE_SCALE = 7.5f
+    const val DEFAULT_STRENGTH = 0.85f
+    const val DEFAULT_GUIDANCE_SCALE = 7.0f
     private const val DEFAULT_NEGATIVE_PROMPT =
         "lowres, bad anatomy, blurry, distorted, deformed, watermark, text"
+
+    internal data class DenoisePlan(
+        val baseSteps: Int,
+        val denoiseSteps: Int,
+        val startStepIndex: Int,
+        val strength: Float
+    )
+
+    internal fun computeDenoisePlan(fastMode: Boolean, strength: Float): DenoisePlan {
+        val baseSteps = if (fastMode) 16 else 24
+        val clampedStrength = strength.coerceIn(0.15f, 1.0f)
+        val denoiseSteps = (baseSteps * clampedStrength).roundToInt().coerceIn(2, baseSteps)
+        val startStepIndex = (baseSteps - denoiseSteps).coerceIn(0, baseSteps - 1)
+        return DenoisePlan(
+            baseSteps = baseSteps,
+            denoiseSteps = denoiseSteps,
+            startStepIndex = startStepIndex,
+            strength = clampedStrength
+        )
+    }
+
+    private fun logDebug(message: String) {
+        runCatching { Log.d(TAG, message) }
+    }
 
     fun inpaint(
         ortEnv: OrtEnvironment,
@@ -52,6 +80,9 @@ object SdInpaintOnnxEngine {
         prompt: String,
         fastMode: Boolean,
         preferHardwareAccel: Boolean = false,
+        strength: Float = DEFAULT_STRENGTH,
+        guidanceScale: Float = DEFAULT_GUIDANCE_SCALE,
+        skipCompositeDebug: Boolean = false,
         seed: Long = System.currentTimeMillis(),
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
@@ -59,6 +90,8 @@ object SdInpaintOnnxEngine {
         val t0 = System.currentTimeMillis()
         val origW = sourceBitmap.width
         val origH = sourceBitmap.height
+        val plan = computeDenoisePlan(fastMode = fastMode, strength = strength)
+        val clampedCfg = guidanceScale.coerceIn(1.0f, 15.0f)
 
         // Align mask to source resolution
         val alignedMask = if (maskBitmap.width == origW && maskBitmap.height == origH) {
@@ -98,6 +131,11 @@ object SdInpaintOnnxEngine {
                 }
             }
         }
+        logDebug(
+            "source=${origW}x${origH} mask=${maskBitmap.width}x${maskBitmap.height} " +
+                "nonZero=$paintedCount bounds=[$minX,$minY..$maxX,$maxY] " +
+                "strength=${plan.strength} cfg=$clampedCfg steps=${plan.denoiseSteps}/${plan.baseSteps}"
+        )
         require(paintedCount >= 8) {
             "Please paint a mask area first using 'Draw Mask'."
         }
@@ -106,9 +144,12 @@ object SdInpaintOnnxEngine {
         OnnxProtobufInspector.clearCachedSessions()
         System.gc()
 
-        // 1. Compute context-aware square ROI aligned around the painted mask
+        // 1. Compute context-aware square ROI aligned around the painted mask + dilate 512px mask by 5px
         val roi = computeSquareRoi(origW, origH, minX, minY, maxX, maxY)
-        val (cropBmp512, mask512) = extract512CropAndMask(sourceBitmap, fullMaskAlpha, origW, origH, roi)
+        val (cropBmp512, rawMask512) = extract512CropAndMask(sourceBitmap, fullMaskAlpha, origW, origH, roi)
+        val mask512 = dilateBinaryMask(rawMask512, SD_RES, SD_RES, radiusPx = 5)
+        val rawMaskMean = rawMask512.sum() / rawMask512.size.toFloat()
+        val dilatedMaskMean = mask512.sum() / mask512.size.toFloat()
 
         val effectivePrompt = prompt.trim().ifEmpty { "clean natural texture, high quality photo" }
         onProgress("1/4 Encoding prompt (${pack.packType.displayLabel})...")
@@ -117,6 +158,10 @@ object SdInpaintOnnxEngine {
         val tokenizer = ClipBpeTokenizer.loadFromDirectory(pack.tokenizerDir)
         val condIds = tokenizer.tokenizeTo77(effectivePrompt)
         val uncondIds = tokenizer.tokenizeTo77(DEFAULT_NEGATIVE_PROMPT)
+        logDebug(
+            "tokenizerLoaded=${tokenizer.isLoaded()} vocabSize=${tokenizer.vocabSize} " +
+                "tokDir=${pack.tokenizerDir?.absolutePath} condIds=${condIds.take(10).joinToString()}"
+        )
         val (uncondEmbed, condEmbed) = runTextEncoder(
             ortEnv = ortEnv,
             textEncoderFile = pack.textEncoderOnnx,
@@ -147,11 +192,15 @@ object SdInpaintOnnxEngine {
         cropBmp512.recycle()
         System.gc()
 
-        // Downsample 512x512 mask -> 64x64 latent mask
+        // Downsample dilated 512x512 mask -> 64x64 latent mask
         val mask64 = downsampleMask512To64(mask512)
+        val latentMaskMean = mask64.sum() / mask64.size.toFloat()
+        logDebug(
+            "mask mean full=$rawMaskMean dilated512=$dilatedMaskMean latent=$latentMaskMean " +
+                "roi=[${roi.left},${roi.top},size=${roi.size}]"
+        )
 
         // 4. UNet Denoising Loop (Euler Discrete Scheduler)
-        val numSteps = if (fastMode) 8 else 16
         val denoisedLatent = runUnetDenoisingLoop(
             ortEnv = ortEnv,
             unetFile = pack.unetOnnx,
@@ -160,8 +209,8 @@ object SdInpaintOnnxEngine {
             maskedLatent = maskedLatent,
             initLatent = initLatent,
             mask64 = mask64,
-            numSteps = numSteps,
-            guidanceScale = GUIDANCE_SCALE,
+            plan = plan,
+            guidanceScale = clampedCfg,
             seed = seed,
             preferHardwareAccel = preferHardwareAccel,
             onStep = { step, total ->
@@ -181,20 +230,34 @@ object SdInpaintOnnxEngine {
         System.gc()
 
         // 6. Composite strictly inside masked region back onto full-resolution sourceBitmap
-        val resultBitmap = compositeCropIntoSource(
-            sourceBitmap = sourceBitmap,
-            fullMaskAlpha = fullMaskAlpha,
-            crop512 = decodedCrop512,
-            roi = roi,
-            featherRadius = if (fastMode) 4 else 6
-        )
+        val resultBitmap = if (skipCompositeDebug) {
+            pasteCropDirectDebug(sourceBitmap = sourceBitmap, crop512 = decodedCrop512, roi = roi)
+        } else {
+            compositeCropIntoSource(
+                sourceBitmap = sourceBitmap,
+                fullMaskAlpha = fullMaskAlpha,
+                crop512 = decodedCrop512,
+                roi = roi,
+                featherRadius = if (fastMode) 4 else 6
+            )
+        }
         decodedCrop512.recycle()
 
         val elapsed = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
+        val badgeStr = String.format(
+            Locale.US,
+            "%s (%d/%d steps • Str %.2f • CFG %.1f)",
+            pack.packType.displayLabel,
+            plan.denoiseSteps,
+            plan.baseSteps,
+            plan.strength,
+            clampedCfg
+        )
+        logDebug("completed in ${elapsed}ms -> $badgeStr")
         return InpaintExecutionResult(
             outputBitmap = resultBitmap,
             elapsedMs = elapsed,
-            engineUsed = "${pack.packType.displayLabel} ($numSteps steps)"
+            engineUsed = badgeStr
         )
     }
 
@@ -268,22 +331,71 @@ object SdInpaintOnnxEngine {
         }
 
         val mask512 = FloatArray(SD_RES * SD_RES)
+        val stepScale = roi.size / SD_RES.toFloat()
         for (y in 0 until SD_RES) {
-            val origY = roi.top + ((y + 0.5f) * roi.size / SD_RES.toFloat()).toInt()
-            if (origY !in 0 until origH) continue
-            val srcRow = origY * origW
+            val origY0 = roi.top + (y * stepScale).toInt()
+            val origY1 = max(origY0, roi.top + ((y + 1) * stepScale).toInt() - 1)
+            val clampedY0 = origY0.coerceIn(0, origH - 1)
+            val clampedY1 = origY1.coerceIn(0, origH - 1)
+            if (origY1 < 0 || origY0 >= origH) continue
             val dstRow = y * SD_RES
             for (x in 0 until SD_RES) {
-                val origX = roi.left + ((x + 0.5f) * roi.size / SD_RES.toFloat()).toInt()
-                if (origX in 0 until origW) {
-                    mask512[dstRow + x] = if (fullMaskAlpha[srcRow + origX] >= 0.35f) 1.0f else 0.0f
+                val origX0 = roi.left + (x * stepScale).toInt()
+                val origX1 = max(origX0, roi.left + ((x + 1) * stepScale).toInt() - 1)
+                if (origX1 < 0 || origX0 >= origW) continue
+                val clampedX0 = origX0.coerceIn(0, origW - 1)
+                val clampedX1 = origX1.coerceIn(0, origW - 1)
+                var maxVal = 0f
+                for (oy in clampedY0..clampedY1) {
+                    val srcRow = oy * origW
+                    for (ox in clampedX0..clampedX1) {
+                        val v = fullMaskAlpha[srcRow + ox]
+                        if (v > maxVal) maxVal = v
+                    }
                 }
+                mask512[dstRow + x] = if (maxVal >= 0.20f) 1.0f else 0.0f
             }
         }
         return crop512 to mask512
     }
 
-    private fun downsampleMask512To64(mask512: FloatArray): FloatArray {
+    internal fun dilateBinaryMask(
+        mask: FloatArray,
+        width: Int,
+        height: Int,
+        radiusPx: Int
+    ): FloatArray {
+        if (radiusPx <= 0 || mask.isEmpty()) return mask.copyOf()
+        val horiz = FloatArray(width * height)
+        for (y in 0 until height) {
+            val rowOff = y * width
+            for (x in 0 until width) {
+                if (mask[rowOff + x] >= 0.5f) {
+                    val x0 = max(0, x - radiusPx)
+                    val x1 = min(width - 1, x + radiusPx)
+                    for (nx in x0..x1) {
+                        horiz[rowOff + nx] = 1.0f
+                    }
+                }
+            }
+        }
+        val out = FloatArray(width * height)
+        for (y in 0 until height) {
+            val rowOff = y * width
+            for (x in 0 until width) {
+                if (horiz[rowOff + x] >= 0.5f) {
+                    val y0 = max(0, y - radiusPx)
+                    val y1 = min(height - 1, y + radiusPx)
+                    for (ny in y0..y1) {
+                        out[ny * width + x] = 1.0f
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    internal fun downsampleMask512To64(mask512: FloatArray): FloatArray {
         val out = FloatArray(LATENT_RES * LATENT_RES)
         val block = SD_RES / LATENT_RES // 8
         for (ly in 0 until LATENT_RES) {
@@ -297,7 +409,7 @@ object SdInpaintOnnxEngine {
                         sum += mask512[row + dx]
                     }
                 }
-                out[ly * LATENT_RES + lx] = if ((sum / (block * block)) >= 0.25f) 1.0f else 0.0f
+                out[ly * LATENT_RES + lx] = if ((sum / (block * block)) >= 0.12f) 1.0f else 0.0f
             }
         }
         return out
@@ -385,7 +497,7 @@ object SdInpaintOnnxEngine {
         maskedLatent: FloatArray,
         initLatent: FloatArray,
         mask64: FloatArray,
-        numSteps: Int,
+        plan: DenoisePlan,
         guidanceScale: Float,
         seed: Long,
         preferHardwareAccel: Boolean,
@@ -395,10 +507,13 @@ object SdInpaintOnnxEngine {
         val hw64 = LATENT_RES * LATENT_RES
 
         // Build SD 1.5 scaled_linear Euler Discrete schedule
-        val schedule = buildEulerSchedule(numSteps)
+        val schedule = buildEulerSchedule(plan.baseSteps)
         val rng = Random(seed)
-        val latents = FloatArray(latentSize) {
-            (sampleGaussian(rng) * schedule.sigmas[0])
+        val startSigma = schedule.sigmas[plan.startStepIndex]
+        val latents = if (plan.startStepIndex == 0) {
+            FloatArray(latentSize) { sampleGaussian(rng) * startSigma }
+        } else {
+            FloatArray(latentSize) { i -> initLatent[i] + sampleGaussian(rng) * startSigma }
         }
 
         OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel).use { opts ->
@@ -418,59 +533,50 @@ object SdInpaintOnnxEngine {
                 val timestepType = timestepInfo?.type ?: OnnxJavaType.FLOAT
                 val encoderType = encoderInfo?.type ?: OnnxJavaType.FLOAT
                 val sampleChannels = sampleInfo?.shape?.getOrNull(1)?.toInt()?.takeIf { it > 0 } ?: 9
-                val timestepShape = resolveTimestepShape(timestepInfo?.shape, batchSize = 1)
+                val forcedBatch2 = sampleInfo?.shape?.getOrNull(0) == 2L || encoderInfo?.shape?.getOrNull(0) == 2L
+                val batchSize = if (forcedBatch2) 2 else 1
+                val timestepShape = resolveTimestepShape(timestepInfo?.shape, batchSize = batchSize)
                 val embedTokenCount = (uncondEmbed.size / 768).coerceAtLeast(1).toLong()
-                val encoderShape = longArrayOf(1L, embedTokenCount, 768L)
-                val sampleShape = longArrayOf(1L, sampleChannels.toLong(), LATENT_RES.toLong(), LATENT_RES.toLong())
+                logDebug(
+                    "UNet channels=$sampleChannels batchSize=$batchSize " +
+                        "startIdx=${plan.startStepIndex}/${plan.baseSteps} denoiseSteps=${plan.denoiseSteps} " +
+                        "sampleType=$sampleType timestepType=$timestepType encoderType=$encoderType"
+                )
 
-                // Pre-allocate text embedding tensors once for the denoising loop
-                createFloatOrHalfTensor(ortEnv, uncondEmbed, encoderShape, encoderType).use { uncondTensor ->
-                    createFloatOrHalfTensor(ortEnv, condEmbed, encoderShape, encoderType).use { condTensor ->
-                        val sampleInput = FloatArray(sampleChannels * hw64)
+                val sampleStride = sampleChannels * hw64
+                if (batchSize == 2) {
+                    val bothEmbeds = FloatArray(uncondEmbed.size + condEmbed.size)
+                    System.arraycopy(uncondEmbed, 0, bothEmbeds, 0, uncondEmbed.size)
+                    System.arraycopy(condEmbed, 0, bothEmbeds, uncondEmbed.size, condEmbed.size)
+                    val encoderShape2 = longArrayOf(2L, embedTokenCount, 768L)
+                    val sampleShape2 = longArrayOf(2L, sampleChannels.toLong(), LATENT_RES.toLong(), LATENT_RES.toLong())
+                    val sampleInput2 = FloatArray(2 * sampleStride)
 
-                        for (stepIdx in 0 until numSteps) {
-                            onStep(stepIdx + 1, numSteps)
+                    createFloatOrHalfTensor(ortEnv, bothEmbeds, encoderShape2, encoderType).use { bothEncTensor ->
+                        for ((localStep, stepIdx) in (plan.startStepIndex until plan.baseSteps).withIndex()) {
+                            onStep(localStep + 1, plan.denoiseSteps)
                             val sigma = schedule.sigmas[stepIdx]
                             val nextSigma = schedule.sigmas[stepIdx + 1]
                             val timestep = schedule.timesteps[stepIdx]
                             val invScale = 1.0f / sqrt(sigma * sigma + 1.0f)
 
                             if (sampleChannels >= 9) {
-                                // Standard 9-channel SD 1.5 Inpainting UNet: [scaled_latent(4), mask(1), masked_latent(4)]
-                                for (i in 0 until latentSize) {
-                                    sampleInput[i] = latents[i] * invScale
-                                }
-                                for (i in 0 until hw64) {
-                                    sampleInput[latentSize + i] = mask64[i]
-                                }
+                                for (i in 0 until latentSize) sampleInput2[i] = latents[i] * invScale
+                                for (i in 0 until hw64) sampleInput2[latentSize + i] = mask64[i]
                                 val offset = latentSize + hw64
-                                for (i in 0 until latentSize) {
-                                    sampleInput[offset + i] = maskedLatent[i]
-                                }
+                                for (i in 0 until latentSize) sampleInput2[offset + i] = maskedLatent[i]
                             } else {
-                                // 4-channel UNet fallback (Blended Latent Diffusion)
-                                for (i in 0 until latentSize) {
-                                    sampleInput[i] = latents[i] * invScale
-                                }
+                                for (i in 0 until latentSize) sampleInput2[i] = latents[i] * invScale
                             }
+                            System.arraycopy(sampleInput2, 0, sampleInput2, sampleStride, sampleStride)
 
-                            createFloatOrHalfTensor(ortEnv, sampleInput, sampleShape, sampleType).use { sTensor ->
+                            createFloatOrHalfTensor(ortEnv, sampleInput2, sampleShape2, sampleType).use { sTensor ->
                                 createTimestepTensor(ortEnv, timestep, timestepShape, timestepType).use { tTensor ->
-                                    val uncondPred = session.run(
+                                    val bothPred = session.run(
                                         mapOf(
                                             sampleName to sTensor,
                                             timestepName to tTensor,
-                                            encoderName to uncondTensor
-                                        )
-                                    ).use { res ->
-                                        readTensorAsFloats(res[0] as OnnxTensor)
-                                    }
-
-                                    val condPred = session.run(
-                                        mapOf(
-                                            sampleName to sTensor,
-                                            timestepName to tTensor,
-                                            encoderName to condTensor
+                                            encoderName to bothEncTensor
                                         )
                                     ).use { res ->
                                         readTensorAsFloats(res[0] as OnnxTensor)
@@ -478,19 +584,109 @@ object SdInpaintOnnxEngine {
 
                                     val dt = nextSigma - sigma
                                     for (i in 0 until latentSize) {
-                                        val noisePred = uncondPred[i] + guidanceScale * (condPred[i] - uncondPred[i])
-                                        latents[i] = latents[i] + noisePred * dt
+                                        val u = bothPred[i]
+                                        val c = bothPred[latentSize + i]
+                                        val noisePred = if (u.isFinite() && c.isFinite()) {
+                                            u + guidanceScale * (c - u)
+                                        } else {
+                                            0f
+                                        }
+                                        val updated = latents[i] + noisePred * dt
+                                        latents[i] = if (updated.isFinite()) updated.coerceIn(-25f, 25f) else latents[i]
                                     }
 
-                                    // If 4-channel fallback UNet, preserve unmasked background latents
                                     if (sampleChannels < 9) {
                                         for (c in 0 until LATENT_CHANNELS) {
                                             val cOff = c * hw64
                                             for (p in 0 until hw64) {
-                                                val m = mask64[p]
-                                                if (m < 0.5f) {
-                                                    val noisyInit = initLatent[cOff + p] + sampleGaussian(rng) * nextSigma
-                                                    latents[cOff + p] = noisyInit
+                                                if (mask64[p] < 0.5f) {
+                                                    latents[cOff + p] = initLatent[cOff + p] + sampleGaussian(rng) * nextSigma
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    val encoderShape = longArrayOf(1L, embedTokenCount, 768L)
+                    val sampleShape = longArrayOf(1L, sampleChannels.toLong(), LATENT_RES.toLong(), LATENT_RES.toLong())
+                    val sampleInput = FloatArray(sampleStride)
+
+                    createFloatOrHalfTensor(ortEnv, uncondEmbed, encoderShape, encoderType).use { uncondTensor ->
+                        createFloatOrHalfTensor(ortEnv, condEmbed, encoderShape, encoderType).use { condTensor ->
+                            for ((localStep, stepIdx) in (plan.startStepIndex until plan.baseSteps).withIndex()) {
+                                onStep(localStep + 1, plan.denoiseSteps)
+                                val sigma = schedule.sigmas[stepIdx]
+                                val nextSigma = schedule.sigmas[stepIdx + 1]
+                                val timestep = schedule.timesteps[stepIdx]
+                                val invScale = 1.0f / sqrt(sigma * sigma + 1.0f)
+
+                                if (sampleChannels >= 9) {
+                                    // Standard 9-channel SD 1.5 Inpainting UNet: [scaled_latent(4), mask(1), masked_latent(4)]
+                                    for (i in 0 until latentSize) {
+                                        sampleInput[i] = latents[i] * invScale
+                                    }
+                                    for (i in 0 until hw64) {
+                                        sampleInput[latentSize + i] = mask64[i]
+                                    }
+                                    val offset = latentSize + hw64
+                                    for (i in 0 until latentSize) {
+                                        sampleInput[offset + i] = maskedLatent[i]
+                                    }
+                                } else {
+                                    // 4-channel UNet fallback (Blended Latent Diffusion)
+                                    for (i in 0 until latentSize) {
+                                        sampleInput[i] = latents[i] * invScale
+                                    }
+                                }
+
+                                createFloatOrHalfTensor(ortEnv, sampleInput, sampleShape, sampleType).use { sTensor ->
+                                    createTimestepTensor(ortEnv, timestep, timestepShape, timestepType).use { tTensor ->
+                                        val uncondPred = session.run(
+                                            mapOf(
+                                                sampleName to sTensor,
+                                                timestepName to tTensor,
+                                                encoderName to uncondTensor
+                                            )
+                                        ).use { res ->
+                                            readTensorAsFloats(res[0] as OnnxTensor)
+                                        }
+
+                                        val condPred = session.run(
+                                            mapOf(
+                                                sampleName to sTensor,
+                                                timestepName to tTensor,
+                                                encoderName to condTensor
+                                            )
+                                        ).use { res ->
+                                            readTensorAsFloats(res[0] as OnnxTensor)
+                                        }
+
+                                        val dt = nextSigma - sigma
+                                        for (i in 0 until latentSize) {
+                                            val u = uncondPred[i]
+                                            val c = condPred[i]
+                                            val noisePred = if (u.isFinite() && c.isFinite()) {
+                                                u + guidanceScale * (c - u)
+                                            } else {
+                                                0f
+                                            }
+                                            val updated = latents[i] + noisePred * dt
+                                            latents[i] = if (updated.isFinite()) updated.coerceIn(-25f, 25f) else latents[i]
+                                        }
+
+                                        // If 4-channel fallback UNet, preserve unmasked background latents
+                                        if (sampleChannels < 9) {
+                                            for (c in 0 until LATENT_CHANNELS) {
+                                                val cOff = c * hw64
+                                                for (p in 0 until hw64) {
+                                                    val m = mask64[p]
+                                                    if (m < 0.5f) {
+                                                        val noisyInit = initLatent[cOff + p] + sampleGaussian(rng) * nextSigma
+                                                        latents[cOff + p] = noisyInit
+                                                    }
                                                 }
                                             }
                                         }
@@ -536,6 +732,38 @@ object SdInpaintOnnxEngine {
                 }
             }
         }
+    }
+
+    private fun pasteCropDirectDebug(
+        sourceBitmap: Bitmap,
+        crop512: Bitmap,
+        roi: SquareRoi
+    ): Bitmap {
+        val origW = sourceBitmap.width
+        val origH = sourceBitmap.height
+        val cropFull = if (roi.size == SD_RES) {
+            crop512
+        } else {
+            Bitmap.createScaledBitmap(crop512, roi.size, roi.size, true)
+        }
+        val out = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(out)
+        val intersectLeft = max(0, roi.left)
+        val intersectTop = max(0, roi.top)
+        val intersectRight = min(origW, roi.left + roi.size)
+        val intersectBottom = min(origH, roi.top + roi.size)
+        if (intersectRight > intersectLeft && intersectBottom > intersectTop) {
+            val srcRect = Rect(
+                intersectLeft - roi.left,
+                intersectTop - roi.top,
+                intersectRight - roi.left,
+                intersectBottom - roi.top
+            )
+            val dstRect = Rect(intersectLeft, intersectTop, intersectRight, intersectBottom)
+            canvas.drawBitmap(cropFull, srcRect, dstRect, Paint(Paint.FILTER_BITMAP_FLAG))
+        }
+        if (cropFull !== crop512) cropFull.recycle()
+        return out
     }
 
     private fun compositeCropIntoSource(
@@ -734,12 +962,18 @@ object SdInpaintOnnxEngine {
                 val shortBuf = tensor.shortBuffer
                 val shorts = ShortArray(shortBuf.remaining())
                 shortBuf.get(shorts)
-                FloatArray(shorts.size) { i -> halfBitsToFloat(shorts[i]) }
+                FloatArray(shorts.size) { i ->
+                    val v = halfBitsToFloat(shorts[i])
+                    if (v.isFinite()) v else 0f
+                }
             }
             else -> {
                 val fb = tensor.floatBuffer
                 val floats = FloatArray(fb.remaining())
                 fb.get(floats)
+                for (i in floats.indices) {
+                    if (!floats[i].isFinite()) floats[i] = 0f
+                }
                 floats
             }
         }

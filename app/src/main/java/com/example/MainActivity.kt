@@ -622,6 +622,8 @@ fun FaceSwapStudioApp(
                     onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
                     onInpaintPromptChanged = viewModel::setInpaintPrompt,
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,
+                    onInpaintStrengthChanged = viewModel::setInpaintStrength,
+                    onInpaintCfgScaleChanged = viewModel::setInpaintCfgScale,
                     onInpaintDepthGuardChanged = viewModel::setInpaintDepthGuardEnabled,
                     onComputeInpaintDepth = viewModel::computeInpaintDepthMap,
                     onToggleQuickAccessoryRemoval = viewModel::toggleQuickAccessoryRemoval,
@@ -661,6 +663,7 @@ fun FaceSwapStudioApp(
                     inspections = uiState.modelInspections,
                     isInspecting = uiState.isInspectingModels,
                     memoryServiceState = uiState.memoryServiceState,
+                    segformerAutoSelectedForAccessory = uiState.segformerAutoSelectedForAccessory,
                     onImportModelForSlot = { slot ->
                         pendingImportSlot = slot
                         onnxDocumentPicker.launch(arrayOf("*/*"))

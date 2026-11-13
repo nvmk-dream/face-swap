@@ -5,6 +5,7 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.util.Log
 import java.io.File
 import java.nio.FloatBuffer
 import kotlin.math.max
@@ -77,6 +78,7 @@ object InteractiveInpaintEngine {
 
         val protectThreshold = (cutoff + 0.04f).coerceIn(0.25f, 0.90f)
         val outPx = px.copyOf()
+        var originalMaskCount = 0
         var keptCount = 0
         val invW = if (w > 1) 1f / (w - 1f) else 0f
         val invH = if (h > 1) 1f / (h - 1f) else 0f
@@ -88,6 +90,7 @@ object InteractiveInpaintEngine {
                 val c = outPx[idx]
                 val s = max((c ushr 24) and 0xFF, max((c ushr 16) and 0xFF, max((c ushr 8) and 0xFF, c and 0xFF)))
                 if (s > 32) {
+                    originalMaskCount++
                     val near = depthMap.sampleBilinear(x * invW, ny)
                     if (near >= protectThreshold) {
                         outPx[idx] = Color.TRANSPARENT
@@ -97,7 +100,13 @@ object InteractiveInpaintEngine {
                 }
             }
         }
-        if (keptCount < 8) return maskBitmap
+        runCatching {
+            Log.d("INPAINT", "depthGuard before=$originalMaskCount after=$keptCount cutoff=$protectThreshold")
+        }
+        // Prevent Depth Guard from over-erasing user-painted sleeves / foreground edits (>35% loss)
+        if (keptCount < 8 || keptCount < (originalMaskCount * 0.65f).toInt()) {
+            return maskBitmap
+        }
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
             setPixels(outPx, 0, w, 0, 0, w, h)
         }
@@ -116,6 +125,8 @@ object InteractiveInpaintEngine {
         secondarySdPack: InstalledSdInpaintPack? = null,
         depthMap: DepthMapResult? = null,
         enableDepthGuard: Boolean = false,
+        strength: Float = SdInpaintOnnxEngine.DEFAULT_STRENGTH,
+        guidanceScale: Float = SdInpaintOnnxEngine.DEFAULT_GUIDANCE_SCALE,
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
         val guardedMaskBitmap = if (enableDepthGuard && depthMap != null) {
@@ -123,7 +134,15 @@ object InteractiveInpaintEngine {
         } else {
             maskBitmap
         }
-       
+
+        val requiresExplicitSdPack = selectedOption == InpaintModelOption.SD15_FP16 ||
+            selectedOption == InpaintModelOption.REALVIS_INT8
+        if (requiresExplicitSdPack && primarySdPack == null) {
+            throw IllegalStateException(
+                "${selectedOption.displayName} pack is not installed or incomplete. Import the model folder in Inpaint or Models tab."
+            )
+        }
+
         // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority 1: FP16, Priority 2: INT8)
         if (ortEnv != null &&
             selectedOption != InpaintModelOption.LAMA_ONNX &&
@@ -140,6 +159,8 @@ object InteractiveInpaintEngine {
                             prompt = prompt,
                             fastMode = fastMode,
                             preferHardwareAccel = preferHardwareAccel,
+                            strength = strength,
+                            guidanceScale = guidanceScale,
                             onProgress = onProgress
                         )
                     }
@@ -153,6 +174,8 @@ object InteractiveInpaintEngine {
                         prompt = prompt,
                         fastMode = fastMode,
                         preferHardwareAccel = preferHardwareAccel,
+                        strength = strength,
+                        guidanceScale = guidanceScale,
                         onProgress = onProgress
                     )
                 } else {
@@ -164,6 +187,8 @@ object InteractiveInpaintEngine {
                         prompt = prompt,
                         fastMode = fastMode,
                         preferHardwareAccel = preferHardwareAccel,
+                        strength = strength,
+                        guidanceScale = guidanceScale,
                         onProgress = onProgress
                     )
                 }

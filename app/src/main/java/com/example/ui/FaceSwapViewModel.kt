@@ -147,12 +147,15 @@ data class FaceSwapUiState(
     val inpaintMaskBitmap: Bitmap? = null,
     val inpaintPrompt: String = "",
     val inpaintFastMode: Boolean = true,
+    val inpaintStrength: Float = 0.85f,
+    val inpaintCfgScale: Float = 7.0f,
     val inpaintDepthGuardEnabled: Boolean = false,
     val inpaintDepthMap: DepthMapResult? = null,
     val isComputingInpaintDepth: Boolean = false,
     val inpaintAccessoryLayers: AccessoryMaskLayers? = null,
     val isComputingAccessoryMask: Boolean = false,
     val selectedAccessoryTargets: Set<AccessoryTarget> = emptySet(),
+    val segformerAutoSelectedForAccessory: Boolean = false,
     val inpaintAccessoryExpandPx: Float = 6f,
     val accessoryMaskNotice: String? = null,
     val isInpainting: Boolean = false,
@@ -1456,6 +1459,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             inpaintDepthMap = null,
                             inpaintAccessoryLayers = null,
                             selectedAccessoryTargets = emptySet(),
+                            segformerAutoSelectedForAccessory = false,
                             accessoryMaskNotice = null,
                             inpaintResultBitmap = null,
                             inpaintElapsedSec = null,
@@ -1488,6 +1492,14 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun setInpaintFastMode(fastMode: Boolean) {
         _uiState.update { it.copy(inpaintFastMode = fastMode) }
+    }
+
+    fun setInpaintStrength(strength: Float) {
+        _uiState.update { it.copy(inpaintStrength = strength.coerceIn(0.30f, 1.00f)) }
+    }
+
+    fun setInpaintCfgScale(cfgScale: Float) {
+        _uiState.update { it.copy(inpaintCfgScale = cfgScale.coerceIn(1.0f, 15.0f)) }
     }
 
     fun setInpaintDepthGuardEnabled(enabled: Boolean) {
@@ -1543,13 +1555,59 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private fun resolveAutoModelAndSegformerForAccessories(
+        cur: FaceSwapUiState,
+        targets: Set<AccessoryTarget>
+    ): Triple<InpaintModelOption, String, Boolean> {
+        val needsHeadParserAndSd = AccessoryTarget.CAP in targets || AccessoryTarget.GLASSES in targets
+        if (!needsHeadParserAndSd) {
+            return Triple(cur.inpaintModelOption, cur.inpaintModelLabel, false)
+        }
+        val nextOption = when {
+            SdInpaintPackType.SD15_FP16 in cur.installedSdInpaintPacks -> InpaintModelOption.SD15_FP16
+            SdInpaintPackType.REALVIS_INT8 in cur.installedSdInpaintPacks -> InpaintModelOption.REALVIS_INT8
+            else -> cur.inpaintModelOption
+        }
+        val ctx = getApplication<Application>()
+        val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+        val nextLabel = if (nextOption != cur.inpaintModelOption) {
+            SdInpaintPackManager.formatDropdownLabel(ctx, nextOption, if (lamaFile.exists()) lamaFile else null)
+        } else {
+            cur.inpaintModelLabel
+        }
+        return Triple(nextOption, nextLabel, true)
+    }
+
+    private fun ensureSegformerLoadedIfNeeded() {
+        val state = _uiState.value
+        if (!state.isSegmentationOnnxReady || state.memoryServiceState.segformerLoaded) return
+        viewModelScope.launch {
+            val memState = withContext(Dispatchers.IO) {
+                modelService.loadModelSlotIntoMemory(
+                    slot = ModelSlot.SEGMENTATION,
+                    preferHardwareAccel = _uiState.value.preferHardwareAcceleration
+                )
+                modelService.getMemoryState()
+            }
+            _uiState.update { it.copy(memoryServiceState = memState) }
+        }
+    }
+
     fun updateAccessorySelectionAndExpand(targets: Set<AccessoryTarget>, expandPx: Float) {
         val clamped = expandPx.coerceIn(0f, 18f)
+        val cur = _uiState.value
+        val (autoOpt, autoLabel, autoSegformer) = resolveAutoModelAndSegformerForAccessories(cur, targets)
         _uiState.update {
             it.copy(
                 selectedAccessoryTargets = targets,
-                inpaintAccessoryExpandPx = clamped
+                inpaintAccessoryExpandPx = clamped,
+                inpaintModelOption = autoOpt,
+                inpaintModelLabel = autoLabel,
+                segformerAutoSelectedForAccessory = autoSegformer
             )
+        }
+        if (autoSegformer) {
+            ensureSegformerLoadedIfNeeded()
         }
     }
 
@@ -1658,6 +1716,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         } else {
             ""
         }
+        val (autoOpt, autoLabel, autoSegformer) = resolveAutoModelAndSegformerForAccessories(cur, nextTargets)
         val cachedLayers = cur.inpaintAccessoryLayers
         if (cachedLayers != null) {
             val maskBmp = if (nextTargets.isNotEmpty() && cachedLayers.detectedFacesCount > 0) {
@@ -1670,14 +1729,18 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     selectedAccessoryTargets = nextTargets,
                     inpaintMaskBitmap = maskBmp,
                     inpaintPrompt = if (nextTargets.isNotEmpty()) autoPrompt else it.inpaintPrompt,
+                    inpaintModelOption = autoOpt,
+                    inpaintModelLabel = autoLabel,
+                    segformerAutoSelectedForAccessory = autoSegformer,
                     errorBannerMessage = if (nextTargets.isNotEmpty() && cachedLayers.detectedFacesCount <= 0) {
                         "No face detected in photo for 1-Tap accessory mask. Tap Draw Mask to paint manually."
                     } else null,
                     statusBannerMessage = if (maskBmp != null) {
-                        "Auto-mask ready for ${nextTargets.joinToString(" + ") { it.shortLabel }}. Tap Draw Mask to inspect or Create to remove."
+                        "Auto-mask ready (${nextTargets.joinToString(" + ") { t -> t.shortLabel }} • ${autoLabel}). Tap Create to remove."
                     } else null
                 )
             }
+            if (autoSegformer) ensureSegformerLoadedIfNeeded()
             return
         }
 
@@ -1685,6 +1748,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             it.copy(
                 selectedAccessoryTargets = nextTargets,
                 inpaintPrompt = if (nextTargets.isNotEmpty()) autoPrompt else it.inpaintPrompt,
+                inpaintModelOption = autoOpt,
+                inpaintModelLabel = autoLabel,
+                segformerAutoSelectedForAccessory = autoSegformer,
                 isComputingAccessoryMask = nextTargets.isNotEmpty(),
                 errorBannerMessage = null,
                 statusBannerMessage = if (nextTargets.isNotEmpty()) {
@@ -1692,6 +1758,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 } else null
             )
         }
+        if (autoSegformer) ensureSegformerLoadedIfNeeded()
         if (nextTargets.isEmpty()) {
             _uiState.update { it.copy(inpaintMaskBitmap = null) }
             return
@@ -1760,6 +1827,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 inpaintDepthMap = null,
                 inpaintAccessoryLayers = null,
                 selectedAccessoryTargets = emptySet(),
+                segformerAutoSelectedForAccessory = false,
                 accessoryMaskNotice = null,
                 inpaintResultBitmap = null,
                 inpaintElapsedSec = null,
@@ -1846,6 +1914,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         secondarySdPack = secondaryPack,
                         depthMap = activeDepthMap,
                         enableDepthGuard = state.inpaintDepthGuardEnabled,
+                        strength = state.inpaintStrength,
+                        guidanceScale = state.inpaintCfgScale,
                         onProgress = { progressMsg ->
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
                             BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }

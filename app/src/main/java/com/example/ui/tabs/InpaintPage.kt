@@ -46,6 +46,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -77,6 +79,8 @@ import com.example.onnx.InpaintModelOption
 import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.components.DrawMaskEditorDialog
+import java.util.Locale
+import kotlin.math.abs
 
 private val SAFE_FASHION_PRESETS = listOf(
     "hand on hip-arched back",
@@ -100,6 +104,8 @@ fun InpaintPage(
     onMaskUpdated: (Bitmap?) -> Unit,
     onPromptChanged: (String) -> Unit,
     onFastModeChanged: (Boolean) -> Unit,
+    onStrengthChanged: (Float) -> Unit = {},
+    onCfgScaleChanged: (Float) -> Unit = {},
     onDepthGuardChanged: (Boolean) -> Unit = {},
     onComputeInpaintDepth: () -> Unit = {},
     onToggleQuickAccessoryRemoval: (AccessoryTarget) -> Unit = {},
@@ -464,6 +470,114 @@ fun InpaintPage(
                         )
                     }
                 }
+            }
+
+            // Diffusion Tuning Card (Strength & CFG Scale) directly above Prompt
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(frostedCardBg)
+                    .border(1.2.dp, frostedBorderColor, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("inpaint_tuning_card"),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Strength Slider + 0.70 / 0.85 / 1.00 Presets
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Strength: ${String.format(Locale.US, "%.2f", uiState.inpaintStrength)}",
+                        color = darkSlate,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(
+                            0.70f to "inpaint_strength_chip_070",
+                            0.85f to "inpaint_strength_chip_085",
+                            1.00f to "inpaint_strength_chip_100"
+                        ).forEach { (preset, tag) ->
+                            val isSelected = abs(uiState.inpaintStrength - preset) < 0.02f
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (isSelected) Color(0xFF0284C7) else Color(0xFFE2E8F0))
+                                    .clickable { onStrengthChanged(preset) }
+                                    .padding(horizontal = 9.dp, vertical = 3.dp)
+                                    .testTag(tag)
+                            ) {
+                                Text(
+                                    text = String.format(Locale.US, "%.2f", preset),
+                                    color = if (isSelected) Color.White else darkSlate,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+                Slider(
+                    value = uiState.inpaintStrength,
+                    onValueChange = onStrengthChanged,
+                    valueRange = 0.30f..1.00f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF0284C7),
+                        activeTrackColor = Color(0xFF0284C7),
+                        inactiveTrackColor = Color(0xFFCBD5E1)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                        .testTag("inpaint_strength_slider")
+                )
+
+                // CFG Scale Slider + Default 7.0 chip
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "CFG: ${String.format(Locale.US, "%.1f", uiState.inpaintCfgScale)}",
+                        color = darkSlate,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    val isDefaultCfg = abs(uiState.inpaintCfgScale - 7.0f) < 0.15f
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (isDefaultCfg) Color(0xFF0284C7) else Color(0xFFE2E8F0))
+                            .clickable { onCfgScaleChanged(7.0f) }
+                            .padding(horizontal = 10.dp, vertical = 3.dp)
+                            .testTag("inpaint_cfg_default_chip")
+                    ) {
+                        Text(
+                            text = "Default 7.0",
+                            color = if (isDefaultCfg) Color.White else darkSlate,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Slider(
+                    value = uiState.inpaintCfgScale,
+                    onValueChange = onCfgScaleChanged,
+                    valueRange = 1.0f..15.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF0284C7),
+                        activeTrackColor = Color(0xFF0284C7),
+                        inactiveTrackColor = Color(0xFFCBD5E1)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                        .testTag("inpaint_cfg_slider")
+                )
             }
 
             // Prompt Header Row: "Prompt" left | "Fast Mode" + Switch right
@@ -838,7 +952,7 @@ fun InpaintPage(
                     }
                 }
 
-                // Bottom-Right Dimensions & Time Info
+                // Bottom Row: Engine/Steps Badge (Left) + Dimensions & Time Info (Right)
                 val dimsText = if (resultBmp != null) {
                     "${resultBmp.width} x ${resultBmp.height}"
                 } else if (uiState.inpaintSourceBitmap != null) {
@@ -847,13 +961,42 @@ fun InpaintPage(
                     "0 x 0"
                 }
                 val secText = "%.2f".format(uiState.inpaintElapsedSec ?: 0.0f)
-                Text(
-                    text = "$dimsText, ${secText}s",
-                    color = darkSlate,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
-                    modifier = Modifier.align(Alignment.BottomEnd)
-                )
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!uiState.inpaintEngineLabel.isNullOrBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .padding(end = 8.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xD90F172A))
+                                .padding(horizontal = 9.dp, vertical = 3.dp)
+                                .testTag("inpaint_result_engine_badge")
+                        ) {
+                            Text(
+                                text = uiState.inpaintEngineLabel,
+                                color = Color(0xFF67E8F9),
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.width(1.dp))
+                    }
+                    Text(
+                        text = "$dimsText, ${secText}s",
+                        color = darkSlate,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
+                    )
+                }
             }
 
             // Bottom 4 Action Buttons: Save | Download | Reuse | Gallery
@@ -906,6 +1049,7 @@ fun InpaintPage(
     if (showDrawMaskDialog && uiState.inpaintSourceBitmap != null) {
         DrawMaskEditorDialog(
             sourceBitmap = uiState.inpaintSourceBitmap,
+            existingMaskBitmap = uiState.inpaintMaskBitmap,
             depthMap = uiState.inpaintDepthMap,
             isDepthModelReady = uiState.isDepthModelReady,
             isComputingDepth = uiState.isComputingInpaintDepth,

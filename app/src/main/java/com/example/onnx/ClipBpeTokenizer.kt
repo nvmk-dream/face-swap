@@ -24,6 +24,9 @@ class ClipBpeTokenizer private constructor(
 
     val bosTokenId: Int = encoder[BOS_TOKEN] ?: DEFAULT_BOS_TOKEN_ID
     val eosTokenId: Int = encoder[EOS_TOKEN] ?: DEFAULT_EOS_TOKEN_ID
+    val vocabSize: Int get() = encoder.size
+
+    fun isLoaded(): Boolean = encoder.size > 16 && bpeRanks.isNotEmpty()
 
     fun tokenizeTo77(prompt: String): LongArray {
         val out = LongArray(MAX_LENGTH) { eosTokenId.toLong() }
@@ -177,21 +180,42 @@ class ClipBpeTokenizer private constructor(
             val root = JSONObject(tokenizerJsonText)
             val model = root.getJSONObject("model")
             val vocabObj = model.getJSONObject("vocab")
-            val vocabMap = HashMap<String, Int>(vocabObj.length())
+            val vocabMap = HashMap<String, Int>(vocabObj.length() + 16)
             val keys = vocabObj.keys()
             while (keys.hasNext()) {
                 val k = keys.next()
                 vocabMap[k] = vocabObj.getInt(k)
             }
 
+            val addedArr = root.optJSONArray("added_tokens")
+            if (addedArr != null) {
+                for (i in 0 until addedArr.length()) {
+                    val obj = addedArr.optJSONObject(i) ?: continue
+                    val content = obj.optString("content", "")
+                    val id = obj.optInt("id", -1)
+                    if (content.isNotEmpty() && id >= 0) {
+                        vocabMap[content] = id
+                    }
+                }
+            }
+
             val rankMap = HashMap<Pair<String, String>, Int>(50_000)
             val mergesArr = model.optJSONArray("merges")
             if (mergesArr != null) {
                 for (i in 0 until mergesArr.length()) {
-                    val item = mergesArr.getString(i).trim()
-                    val spaceIdx = item.indexOf(' ')
-                    if (spaceIdx > 0 && spaceIdx < item.length - 1) {
-                        rankMap[item.substring(0, spaceIdx) to item.substring(spaceIdx + 1)] = i
+                    val pairArr = mergesArr.optJSONArray(i)
+                    if (pairArr != null && pairArr.length() >= 2) {
+                        val p1 = pairArr.optString(0, "")
+                        val p2 = pairArr.optString(1, "")
+                        if (p1.isNotEmpty() && p2.isNotEmpty()) {
+                            rankMap[p1 to p2] = i
+                        }
+                    } else {
+                        val item = mergesArr.optString(i, "").trim()
+                        val spaceIdx = item.indexOf(' ')
+                        if (spaceIdx > 0 && spaceIdx < item.length - 1) {
+                            rankMap[item.substring(0, spaceIdx) to item.substring(spaceIdx + 1)] = i
+                        }
                     }
                 }
             }

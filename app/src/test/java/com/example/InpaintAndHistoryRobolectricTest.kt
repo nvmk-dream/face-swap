@@ -12,9 +12,11 @@ import com.example.onnx.AccessoryTarget
 import com.example.onnx.ClipBpeTokenizer
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.InteractiveInpaintEngine
+import android.app.Application
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
+import com.example.ui.FaceSwapViewModel
 import com.example.util.ImageGalleryHelper
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -244,5 +246,88 @@ class InpaintAndHistoryRobolectricTest {
         assertTrue(Color.alpha(rendered.getPixel(32, 8)) > 128)
         assertTrue(Color.alpha(rendered.getPixel(32, 24)) > 128)
         assertEquals(0, Color.alpha(rendered.getPixel(32, 52)))
+    }
+
+    @Test
+    fun clipBpeTokenizer_parsesTokenizerJsonWithArrayMergesAndAddedTokens() {
+        val tokJson = """
+            {
+              "added_tokens": [
+                {"id": 49406, "content": "<|startoftext|>"},
+                {"id": 49407, "content": "<|endoftext|>"}
+              ],
+              "model": {
+                "vocab": {
+                  "s": 10,
+                  "l": 11,
+                  "e": 12,
+                  "v": 13,
+                  "less</w>": 14,
+                  "sle": 15,
+                  "eve": 16,
+                  "sleeveless</w>": 777
+                },
+                "merges": [
+                  ["s", "l"],
+                  ["sl", "e"],
+                  "e v",
+                  ["sle", "eve"],
+                  ["sleev", "eless</w>"]
+                ]
+              }
+            }
+        """.trimIndent()
+        val tok = ClipBpeTokenizer.fromTokenizerJson(tokJson)
+        assertEquals(10, tok.vocabSize)
+        val ids = tok.tokenizeTo77("sleeveless")
+        assertEquals(49406L, ids[0])
+        assertEquals(49407L, ids[ids.indexOfFirst { it == 49407L }])
+    }
+
+    @Test
+    fun sdInpaintOnnxEngine_computesStrengthDenoisePlanAndDilatesMask() {
+        val fastDefault = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.85f)
+        assertEquals(16, fastDefault.baseSteps)
+        assertEquals(14, fastDefault.denoiseSteps)
+        assertEquals(2, fastDefault.startStepIndex)
+
+        val hdTuned = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = false, strength = 0.70f)
+        assertEquals(24, hdTuned.baseSteps)
+        assertEquals(17, hdTuned.denoiseSteps)
+        assertEquals(7, hdTuned.startStepIndex)
+
+        val mask = FloatArray(32 * 32)
+        mask[16 * 32 + 16] = 1.0f
+        val dilated = SdInpaintOnnxEngine.dilateBinaryMask(mask, 32, 32, radiusPx = 5)
+        assertEquals(1.0f, dilated[11 * 32 + 11], 0.001f)
+        assertEquals(1.0f, dilated[21 * 32 + 21], 0.001f)
+        assertEquals(0.0f, dilated[5 * 32 + 5], 0.001f)
+    }
+
+    @Test
+    fun faceSwapViewModel_autoSelectsSd15AndSegformerOnCapOrGlassesToggle_andUpdatesStrengthCfg() {
+        val root = SdInpaintPackManager.getSdInpaintRootDir(context)
+        root.deleteRecursively()
+        val fp16Dir = File(root, SdInpaintPackType.SD15_FP16.id)
+        listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
+            val compDir = File(fp16Dir, comp).apply { mkdirs() }
+            File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 7 })
+        }
+
+        val vm = FaceSwapViewModel(context.applicationContext as Application)
+        assertEquals(0.85f, vm.uiState.value.inpaintStrength, 0.001f)
+        assertEquals(7.0f, vm.uiState.value.inpaintCfgScale, 0.001f)
+
+        vm.setInpaintStrength(0.70f)
+        vm.setInpaintCfgScale(8.5f)
+        assertEquals(0.70f, vm.uiState.value.inpaintStrength, 0.001f)
+        assertEquals(8.5f, vm.uiState.value.inpaintCfgScale, 0.001f)
+
+        vm.updateAccessorySelectionAndExpand(setOf(AccessoryTarget.CAP), 6f)
+        assertTrue(vm.uiState.value.segformerAutoSelectedForAccessory)
+        assertTrue(AccessoryTarget.CAP in vm.uiState.value.selectedAccessoryTargets)
+
+        vm.updateAccessorySelectionAndExpand(emptySet(), 6f)
+        assertFalse(vm.uiState.value.segformerAutoSelectedForAccessory)
     }
 }

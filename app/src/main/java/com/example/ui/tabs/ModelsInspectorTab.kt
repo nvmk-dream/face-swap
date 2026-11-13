@@ -58,6 +58,7 @@ fun ModelsInspectorTab(
     inspections: List<OnnxModelInspection>,
     isInspecting: Boolean,
     memoryServiceState: OnnxMemoryServiceState = OnnxMemoryServiceState(),
+    segformerAutoSelectedForAccessory: Boolean = false,
     onImportModelForSlot: (ModelSlot) -> Unit,
     onRefreshModels: () -> Unit,
     onImportAllFromFolder: () -> Unit = {},
@@ -130,9 +131,14 @@ fun ModelsInspectorTab(
                             note = memoryServiceState.loadedSessions[ModelSlot.ENHANCEMENT]?.statusNote
                         )
                         MemorySlotRow(
-                            label = "3. segformer_B5_ce.onnx (Head/Hair Parser)",
+                            label = if (segformerAutoSelectedForAccessory) {
+                                "3. segformer_B5_ce.onnx (Auto-Selected: Cap/Glasses)"
+                            } else {
+                                "3. segformer_B5_ce.onnx (Head/Hair Parser)"
+                            },
                             tamilPurpose = ModelSlot.SEGMENTATION.tamilTitle + " — " + ModelSlot.SEGMENTATION.tamilRoleSummary,
                             isLoaded = memoryServiceState.segformerLoaded,
+                            isHighlighted = segformerAutoSelectedForAccessory,
                             note = memoryServiceState.loadedSessions[ModelSlot.SEGMENTATION]?.statusNote
                         )
                         MemorySlotRow(
@@ -316,10 +322,12 @@ fun ModelsInspectorTab(
             ModelSlot.entries.forEach { slot ->
                 val inspection = inspections.firstOrNull { it.slot == slot }
                 val isLoadedInRam = memoryServiceState.loadedSessions[slot]?.isLoadedInMemory == true
+                val isAutoSelected = slot == ModelSlot.SEGMENTATION && segformerAutoSelectedForAccessory
                 ModelInspectionCard(
                     slot = slot,
                     inspection = inspection,
                     isLoadedInRam = isLoadedInRam,
+                    isAutoSelected = isAutoSelected,
                     onImportModel = { onImportModelForSlot(slot) }
                 )
             }
@@ -345,6 +353,7 @@ private fun ModelInspectionCard(
     slot: ModelSlot,
     inspection: OnnxModelInspection?,
     isLoadedInRam: Boolean,
+    isAutoSelected: Boolean = false,
     onImportModel: () -> Unit
 ) {
     val isReady = inspection?.isValidOnnx == true
@@ -357,8 +366,11 @@ private fun ModelInspectionCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.2.dp, Color(0x6638BDF8)),
-        colors = CardDefaults.cardColors(containerColor = Color(0xE6FFFFFF))
+        border = BorderStroke(
+            width = if (isAutoSelected) 2.dp else 1.2.dp,
+            color = if (isAutoSelected) Color(0xFF0284C7) else Color(0x6638BDF8)
+        ),
+        colors = CardDefaults.cardColors(containerColor = if (isAutoSelected) Color(0xF2EFF6FF) else Color(0xE6FFFFFF))
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -405,24 +417,41 @@ private fun ModelInspectionCard(
                     }
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (slot.requirementLevel == ModelRequirementLevel.OPTIONAL_HEAD_SWAP) {
-                        RoyalViolet.copy(alpha = 0.22f)
-                    } else {
-                        AmberWarning.copy(alpha = 0.20f)
-                    }
-                ) {
-                    Text(
-                        text = slot.requirementLevel.label,
-                        style = MaterialTheme.typography.labelMedium,
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
                         color = if (slot.requirementLevel == ModelRequirementLevel.OPTIONAL_HEAD_SWAP) {
-                            ElectricCyan
+                            RoyalViolet.copy(alpha = 0.22f)
                         } else {
-                            AmberWarning
-                        },
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+                            AmberWarning.copy(alpha = 0.20f)
+                        }
+                    ) {
+                        Text(
+                            text = slot.requirementLevel.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (slot.requirementLevel == ModelRequirementLevel.OPTIONAL_HEAD_SWAP) {
+                                ElectricCyan
+                            } else {
+                                AmberWarning
+                            },
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                    if (isAutoSelected) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color(0xFF0284C7),
+                            modifier = Modifier.testTag("segformer_auto_selected_badge")
+                        ) {
+                            Text(
+                                text = "Auto-Selected (Cap/Glasses)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -599,13 +628,19 @@ private fun MemorySlotRow(
     label: String,
     tamilPurpose: String,
     isLoaded: Boolean,
-    note: String?
+    note: String?,
+    isHighlighted: Boolean = false
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .background(
+                if (isHighlighted) Color(0xFF0C2340) else MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)
+            )
+            .then(
+                if (isHighlighted) Modifier.border(1.2.dp, Color(0xFF38BDF8), RoundedCornerShape(8.dp)) else Modifier
+            )
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {

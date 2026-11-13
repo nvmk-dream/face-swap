@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -114,6 +115,7 @@ private data class NormalizedMaskStroke(
 @Composable
 fun DrawMaskEditorDialog(
     sourceBitmap: Bitmap,
+    existingMaskBitmap: Bitmap? = null,
     depthMap: DepthMapResult? = null,
     isDepthModelReady: Boolean = false,
     isComputingDepth: Boolean = false,
@@ -136,6 +138,7 @@ fun DrawMaskEditorDialog(
     var isInverted by remember { mutableStateOf(false) }
     var zoomLevel by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
+    var keepExistingMask by remember(existingMaskBitmap) { mutableStateOf(existingMaskBitmap != null) }
 
     var autoDepthMode by remember { mutableStateOf(AutoDepthMaskMode.NONE) }
     var pendingAutoMode by remember { mutableStateOf<AutoDepthMaskMode?>(null) }
@@ -164,8 +167,10 @@ fun DrawMaskEditorDialog(
     LaunchedEffect(accessoryLayers) {
         val pending = pendingAccessoryTarget
         if (accessoryLayers != null && pending != null) {
-            selectedAccessories = selectedAccessories + pending
+            val next = selectedAccessories + pending
+            selectedAccessories = next
             pendingAccessoryTarget = null
+            onAccessorySelectionChanged(next, accessoryExpandPx)
             inlineHintMessage = if (accessoryLayers.detectedFacesCount <= 0) {
                 "No face detected in photo. Use Brush or Auto BG/Subject."
             } else null
@@ -288,9 +293,18 @@ fun DrawMaskEditorDialog(
                             val hasAcc = accessoryLayers != null &&
                                 accessoryLayers.detectedFacesCount > 0 &&
                                 selectedAccessories.isNotEmpty()
-                            val autoBase = if (hasDepth || hasAcc) {
+                            val preservedBase = if (keepExistingMask && existingMaskBitmap != null) existingMaskBitmap else null
+                            val autoBase = if (hasDepth || hasAcc || preservedBase != null) {
                                 val base = Bitmap.createBitmap(sourceBitmap.width, sourceBitmap.height, Bitmap.Config.ARGB_8888)
                                 val baseCanvas = AndroidCanvas(base)
+                                if (preservedBase != null && !hasAcc) {
+                                    baseCanvas.drawBitmap(
+                                        preservedBase,
+                                        null,
+                                        Rect(0, 0, sourceBitmap.width, sourceBitmap.height),
+                                        null
+                                    )
+                                }
                                 if (hasDepth) {
                                     val maskBg = if (isInverted) {
                                         autoDepthMode != AutoDepthMaskMode.BACKGROUND
@@ -437,15 +451,20 @@ fun DrawMaskEditorDialog(
             // 1-Click Smart Auto-Mask Row: Auto BG | Auto Subject | Cap | Glasses | Jewels (Multi-Select)
             fun toggleAccessoryChip(target: AccessoryTarget) {
                 if (target in selectedAccessories) {
-                    selectedAccessories = selectedAccessories - target
+                    val next = selectedAccessories - target
+                    selectedAccessories = next
+                    onAccessorySelectionChanged(next, accessoryExpandPx)
                     inlineHintMessage = null
                 } else if (accessoryLayers != null) {
-                    selectedAccessories = selectedAccessories + target
+                    val next = selectedAccessories + target
+                    selectedAccessories = next
+                    onAccessorySelectionChanged(next, accessoryExpandPx)
                     inlineHintMessage = if (accessoryLayers.detectedFacesCount <= 0) {
                         "No face detected in photo. Use Brush or Auto BG."
                     } else null
                 } else {
                     pendingAccessoryTarget = target
+                    onAccessorySelectionChanged(selectedAccessories + target, accessoryExpandPx)
                     inlineHintMessage = null
                     onRequestAccessoryLayers()
                 }
@@ -581,10 +600,14 @@ fun DrawMaskEditorDialog(
                 contentAlignment = Alignment.Center
             ) {
                 val aspectRatio = sourceBitmap.width.toFloat() / sourceBitmap.height.coerceAtLeast(1).toFloat()
+                val availRatio = if (maxHeight.value > 0f) maxWidth.value / maxHeight.value else aspectRatio
+                val fittedModifier = if (availRatio > aspectRatio) {
+                    Modifier.fillMaxHeight().aspectRatio(aspectRatio)
+                } else {
+                    Modifier.fillMaxWidth().aspectRatio(aspectRatio)
+                }
                 Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(aspectRatio)
+                    modifier = fittedModifier
                         .graphicsLayer {
                             scaleX = zoomLevel
                             scaleY = zoomLevel
@@ -679,6 +702,13 @@ fun DrawMaskEditorDialog(
                         val minSide = minOf(size.width, size.height)
                         val maskColor = Color(0xFF00E5FF).copy(alpha = 0.58f)
 
+                        if (keepExistingMask && existingMaskBitmap != null && selectedAccessories.isEmpty()) {
+                            drawImage(
+                                image = existingMaskBitmap.asImageBitmap(),
+                                dstSize = IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1)),
+                                alpha = 0.58f
+                            )
+                        }
                         if (previewAutoMaskBitmap != null) {
                             drawImage(
                                 image = previewAutoMaskBitmap.asImageBitmap(),
@@ -885,16 +915,19 @@ fun DrawMaskEditorDialog(
                             .background(Color(0xFF3F1D2B))
                             .clickable(
                                 enabled = strokes.isNotEmpty() ||
+                                    keepExistingMask ||
                                     isInverted ||
                                     autoDepthMode != AutoDepthMaskMode.NONE ||
                                     selectedAccessories.isNotEmpty()
                             ) {
                                 strokes.clear()
+                                keepExistingMask = false
                                 isInverted = false
                                 autoDepthMode = AutoDepthMaskMode.NONE
                                 pendingAutoMode = null
                                 selectedAccessories = emptySet()
                                 pendingAccessoryTarget = null
+                                onAccessorySelectionChanged(emptySet(), accessoryExpandPx)
                                 inlineHintMessage = null
                             },
                         verticalAlignment = Alignment.CenterVertically,

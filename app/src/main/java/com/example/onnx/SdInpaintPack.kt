@@ -103,7 +103,12 @@ object SdInpaintPackManager {
             val unet = selectBestOnnxInComponentDir(File(dir, "unet"), packType) ?: continue
             val vaeEnc = selectBestOnnxInComponentDir(File(dir, "vae_encoder"), packType) ?: continue
             val vaeDec = selectBestOnnxInComponentDir(File(dir, "vae_decoder"), packType) ?: continue
-            val tokDir = File(dir, "tokenizer").takeIf { it.exists() && it.isDirectory }
+            val tokSub = File(dir, "tokenizer")
+            val tokDir = when {
+                tokSub.exists() && tokSub.isDirectory && hasTokenizerFiles(tokSub) -> tokSub
+                hasTokenizerFiles(dir) -> dir
+                else -> tokSub.takeIf { it.exists() && it.isDirectory }
+            }
             val totalBytes = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
             val candidate = InstalledSdInpaintPack(
@@ -355,19 +360,35 @@ object SdInpaintPackManager {
         data class PackBucketKey(val packFolderPath: String, val packFolderName: String)
         val packBuckets = mutableMapOf<PackBucketKey, MutableList<Pair<String, TreeNodeFile>>>()
 
+        val rootTokenizerFiles = mutableMapOf<String, MutableList<TreeNodeFile>>()
+
         for (file in collectedFiles) {
             val segs = file.parentSegments
             val compIdx = segs.indexOfLast {
                 val l = it.lowercase()
                 l in COMPONENT_DIRS || l == "tokenizer"
             }
-            if (compIdx < 0) continue
-            val compName = segs[compIdx].lowercase()
-            val packSegs = segs.take(compIdx)
-            val packFolderPath = if (packSegs.isEmpty()) "__root__" else packSegs.joinToString("/")
-            val packFolderName = packSegs.lastOrNull() ?: rootDocName.ifBlank { "sd_inpaint" }
-            val key = PackBucketKey(packFolderPath, packFolderName)
-            packBuckets.getOrPut(key) { mutableListOf() }.add(compName to file)
+            if (compIdx >= 0) {
+                val compName = segs[compIdx].lowercase()
+                val packSegs = segs.take(compIdx)
+                val packFolderPath = if (packSegs.isEmpty()) "__root__" else packSegs.joinToString("/")
+                val packFolderName = packSegs.lastOrNull() ?: rootDocName.ifBlank { "sd_inpaint" }
+                val key = PackBucketKey(packFolderPath, packFolderName)
+                packBuckets.getOrPut(key) { mutableListOf() }.add(compName to file)
+            } else if (file.displayName.lowercase() in TOKENIZER_FILES) {
+                val packFolderPath = if (segs.isEmpty()) "__root__" else segs.joinToString("/")
+                rootTokenizerFiles.getOrPut(packFolderPath) { mutableListOf() }.add(file)
+            }
+        }
+
+        // Attach root-level tokenizer files (vocab.json / merges.txt / tokenizer.json placed at pack root)
+        for ((key, list) in packBuckets) {
+            val hasTokAlready = list.any { it.first == "tokenizer" }
+            if (!hasTokAlready) {
+                rootTokenizerFiles[key.packFolderPath]?.forEach { node ->
+                    list.add("tokenizer" to node)
+                }
+            }
         }
 
         if (packBuckets.isEmpty()) return emptyList()
@@ -472,6 +493,12 @@ object SdInpaintPackManager {
             }
         }
         return result
+    }
+
+    private fun hasTokenizerFiles(dir: File): Boolean {
+        if (!dir.exists() || !dir.isDirectory) return false
+        return File(dir, "tokenizer.json").exists() ||
+            (File(dir, "vocab.json").exists() && File(dir, "merges.txt").exists())
     }
 
     private fun queryDocDisplayName(context: Context, treeUri: Uri, docId: String): String? {
