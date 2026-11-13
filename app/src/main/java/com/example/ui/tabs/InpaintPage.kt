@@ -44,10 +44,10 @@ import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -80,7 +80,7 @@ import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.components.DrawMaskEditorDialog
 import java.util.Locale
-import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val SAFE_FASHION_PRESETS = listOf(
     "hand on hip-arched back",
@@ -472,111 +472,45 @@ fun InpaintPage(
                 }
             }
 
-            // Diffusion Tuning Card (Strength & CFG Scale) directly above Prompt
+            // Diffusion Tuning Card (Strength 1..10 & CFG 1..15) directly above Prompt
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
                     .background(frostedCardBg)
                     .border(1.2.dp, frostedBorderColor, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
                     .testTag("inpaint_tuning_card"),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Strength Slider + 0.70 / 0.85 / 1.00 Presets
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Strength: ${String.format(Locale.US, "%.2f", uiState.inpaintStrength)}",
-                        color = darkSlate,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(
-                            0.70f to "inpaint_strength_chip_070",
-                            0.85f to "inpaint_strength_chip_085",
-                            1.00f to "inpaint_strength_chip_100"
-                        ).forEach { (preset, tag) ->
-                            val isSelected = abs(uiState.inpaintStrength - preset) < 0.02f
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50))
-                                    .background(if (isSelected) Color(0xFF0284C7) else Color(0xFFE2E8F0))
-                                    .clickable { onStrengthChanged(preset) }
-                                    .padding(horizontal = 9.dp, vertical = 3.dp)
-                                    .testTag(tag)
-                            ) {
-                                Text(
-                                    text = String.format(Locale.US, "%.2f", preset),
-                                    color = if (isSelected) Color.White else darkSlate,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                }
-                Slider(
-                    value = uiState.inpaintStrength,
-                    onValueChange = onStrengthChanged,
-                    valueRange = 0.30f..1.00f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color(0xFF0284C7),
-                        activeTrackColor = Color(0xFF0284C7),
-                        inactiveTrackColor = Color(0xFFCBD5E1)
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(28.dp)
-                        .testTag("inpaint_strength_slider")
+                val strengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
+                CleanTuningSliderRow(
+                    label = "Strength",
+                    value = strengthDisplay,
+                    valueRange = 1.0f..10.0f,
+                    steps = 17,
+                    onValueChange = { sliderVal ->
+                        val snapped = (sliderVal * 2f).roundToInt() / 2f
+                        onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
+                    },
+                    onResetDefault = { onStrengthChanged(0.70f) },
+                    sliderTag = "inpaint_strength_slider",
+                    valueTag = "inpaint_strength_value",
+                    labelColor = darkSlate
                 )
-
-                // CFG Scale Slider + Default 7.0 chip
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "CFG: ${String.format(Locale.US, "%.1f", uiState.inpaintCfgScale)}",
-                        color = darkSlate,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                    val isDefaultCfg = abs(uiState.inpaintCfgScale - 7.0f) < 0.15f
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(if (isDefaultCfg) Color(0xFF0284C7) else Color(0xFFE2E8F0))
-                            .clickable { onCfgScaleChanged(7.0f) }
-                            .padding(horizontal = 10.dp, vertical = 3.dp)
-                            .testTag("inpaint_cfg_default_chip")
-                    ) {
-                        Text(
-                            text = "Default 7.0",
-                            color = if (isDefaultCfg) Color.White else darkSlate,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-                Slider(
-                    value = uiState.inpaintCfgScale,
-                    onValueChange = onCfgScaleChanged,
+                CleanTuningSliderRow(
+                    label = "CFG",
+                    value = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f),
                     valueRange = 1.0f..15.0f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color(0xFF0284C7),
-                        activeTrackColor = Color(0xFF0284C7),
-                        inactiveTrackColor = Color(0xFFCBD5E1)
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(28.dp)
-                        .testTag("inpaint_cfg_slider")
+                    steps = 27,
+                    onValueChange = { sliderVal ->
+                        val snapped = (sliderVal * 2f).roundToInt() / 2f
+                        onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
+                    },
+                    onResetDefault = { onCfgScaleChanged(7.0f) },
+                    sliderTag = "inpaint_cfg_slider",
+                    valueTag = "inpaint_cfg_value",
+                    labelColor = darkSlate
                 )
             }
 
@@ -1159,3 +1093,80 @@ private fun InpaintBottomActionButton(
         )
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CleanTuningSliderRow(
+    label: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValueChange: (Float) -> Unit,
+    onResetDefault: () -> Unit,
+    sliderTag: String,
+    valueTag: String,
+    labelColor: Color
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = label,
+            color = labelColor,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 13.sp,
+            modifier = Modifier.width(60.dp)
+        )
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            steps = steps,
+            modifier = Modifier
+                .weight(1f)
+                .height(34.dp)
+                .testTag(sliderTag),
+            thumb = {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF93C5FD))
+                )
+            },
+            track = { sliderState ->
+                val span = (sliderState.valueRange.endInclusive - sliderState.valueRange.start).coerceAtLeast(0.001f)
+                val fraction = ((sliderState.value - sliderState.valueRange.start) / span).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFE2E8F0))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction)
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF026AA7))
+                    )
+                }
+            }
+        )
+        Text(
+            text = "(${String.format(Locale.US, "%.1f", value)})",
+            color = Color(0xFF475569),
+            fontWeight = FontWeight.Medium,
+            fontSize = 14.sp,
+            textAlign = TextAlign.End,
+            modifier = Modifier
+                .width(48.dp)
+                .clickable(onClick = onResetDefault)
+                .testTag(valueTag)
+        )
+    }
+}
+

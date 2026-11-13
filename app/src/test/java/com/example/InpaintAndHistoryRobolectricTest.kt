@@ -286,15 +286,19 @@ class InpaintAndHistoryRobolectricTest {
 
     @Test
     fun sdInpaintOnnxEngine_computesStrengthDenoisePlanAndDilatesMask() {
-        val fastDefault = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.85f)
+        val fastDefault = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.70f)
         assertEquals(16, fastDefault.baseSteps)
-        assertEquals(14, fastDefault.denoiseSteps)
-        assertEquals(2, fastDefault.startStepIndex)
+        assertEquals(11, fastDefault.denoiseSteps)
+        assertEquals(5, fastDefault.startStepIndex)
 
-        val hdTuned = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = false, strength = 0.70f)
-        assertEquals(24, hdTuned.baseSteps)
-        assertEquals(17, hdTuned.denoiseSteps)
-        assertEquals(7, hdTuned.startStepIndex)
+        val hdMax = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = false, strength = 1.00f)
+        assertEquals(24, hdMax.baseSteps)
+        assertEquals(24, hdMax.denoiseSteps)
+        assertEquals(0, hdMax.startStepIndex)
+
+        val fastMin = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.10f)
+        assertEquals(16, fastMin.baseSteps)
+        assertEquals(2, fastMin.denoiseSteps)
 
         val mask = FloatArray(32 * 32)
         mask[16 * 32 + 16] = 1.0f
@@ -315,13 +319,16 @@ class InpaintAndHistoryRobolectricTest {
         }
 
         val vm = FaceSwapViewModel(context.applicationContext as Application)
-        assertEquals(0.85f, vm.uiState.value.inpaintStrength, 0.001f)
+        assertEquals(0.70f, vm.uiState.value.inpaintStrength, 0.001f)
         assertEquals(7.0f, vm.uiState.value.inpaintCfgScale, 0.001f)
 
-        vm.setInpaintStrength(0.70f)
+        vm.setInpaintStrength(0.10f)
         vm.setInpaintCfgScale(8.5f)
-        assertEquals(0.70f, vm.uiState.value.inpaintStrength, 0.001f)
+        assertEquals(0.10f, vm.uiState.value.inpaintStrength, 0.001f)
         assertEquals(8.5f, vm.uiState.value.inpaintCfgScale, 0.001f)
+
+        vm.setInpaintStrength(1.20f)
+        assertEquals(1.00f, vm.uiState.value.inpaintStrength, 0.001f)
 
         vm.updateAccessorySelectionAndExpand(setOf(AccessoryTarget.CAP), 6f)
         assertTrue(vm.uiState.value.segformerAutoSelectedForAccessory)

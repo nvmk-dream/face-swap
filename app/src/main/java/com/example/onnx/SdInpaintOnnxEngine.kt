@@ -43,7 +43,7 @@ object SdInpaintOnnxEngine {
     private const val LATENT_RES = 64
     private const val LATENT_CHANNELS = 4
     private const val VAE_SCALE_FACTOR = 0.18215f
-    const val DEFAULT_STRENGTH = 0.85f
+    const val DEFAULT_STRENGTH = 0.70f
     const val DEFAULT_GUIDANCE_SCALE = 7.0f
     private const val DEFAULT_NEGATIVE_PROMPT =
         "lowres, bad anatomy, blurry, distorted, deformed, watermark, text"
@@ -57,7 +57,7 @@ object SdInpaintOnnxEngine {
 
     internal fun computeDenoisePlan(fastMode: Boolean, strength: Float): DenoisePlan {
         val baseSteps = if (fastMode) 16 else 24
-        val clampedStrength = strength.coerceIn(0.15f, 1.0f)
+        val clampedStrength = strength.coerceIn(0.10f, 1.0f)
         val denoiseSteps = (baseSteps * clampedStrength).roundToInt().coerceIn(2, baseSteps)
         val startStepIndex = (baseSteps - denoiseSteps).coerceIn(0, baseSteps - 1)
         return DenoisePlan(
@@ -246,11 +246,11 @@ object SdInpaintOnnxEngine {
         val elapsed = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
         val badgeStr = String.format(
             Locale.US,
-            "%s (%d/%d steps • Str %.2f • CFG %.1f)",
+            "%s (%d/%d steps • Str %.1f • CFG %.1f)",
             pack.packType.displayLabel,
             plan.denoiseSteps,
             plan.baseSteps,
-            plan.strength,
+            plan.strength * 10f,
             clampedCfg
         )
         logDebug("completed in ${elapsed}ms -> $badgeStr")

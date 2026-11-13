@@ -147,7 +147,7 @@ data class FaceSwapUiState(
     val inpaintMaskBitmap: Bitmap? = null,
     val inpaintPrompt: String = "",
     val inpaintFastMode: Boolean = true,
-    val inpaintStrength: Float = 0.85f,
+    val inpaintStrength: Float = 0.70f,
     val inpaintCfgScale: Float = 7.0f,
     val inpaintDepthGuardEnabled: Boolean = false,
     val inpaintDepthMap: DepthMapResult? = null,
@@ -1495,7 +1495,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setInpaintStrength(strength: Float) {
-        _uiState.update { it.copy(inpaintStrength = strength.coerceIn(0.30f, 1.00f)) }
+        _uiState.update { it.copy(inpaintStrength = strength.coerceIn(0.10f, 1.00f)) }
     }
 
     fun setInpaintCfgScale(cfgScale: Float) {
