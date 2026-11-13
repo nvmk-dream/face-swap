@@ -225,10 +225,20 @@ class SwapAuditDatabase private constructor(context: Context) :
         private var INSTANCE: SwapAuditDatabase? = null
 
         fun getInstance(context: Context): SwapAuditDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = SwapAuditDatabase(context)
-                INSTANCE = instance
-                instance
+            val appCtx = context.applicationContext
+            val existing = INSTANCE
+            if (existing != null && existing.appContext === appCtx) {
+                return existing
+            }
+            return synchronized(this) {
+                val current = INSTANCE
+                if (current != null && current.appContext === appCtx) {
+                    current
+                } else {
+                    val instance = SwapAuditDatabase(appCtx)
+                    INSTANCE = instance
+                    instance
+                }
             }
         }
     }
