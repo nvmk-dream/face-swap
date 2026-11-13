@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceReactionSourceMode
+import com.example.onnx.AccessoryTarget
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.ModelSlot
 import com.example.onnx.SkinToneSourceMode
@@ -152,6 +153,10 @@ fun StudioTab(
     onInpaintFastModeChanged: (Boolean) -> Unit = {},
     onInpaintDepthGuardChanged: (Boolean) -> Unit = {},
     onComputeInpaintDepth: () -> Unit = {},
+    onToggleQuickAccessoryRemoval: (AccessoryTarget) -> Unit = {},
+    onComputeAccessoryLayers: () -> Unit = {},
+    onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
+    onInpaintMaskAndPromptUpdated: (android.graphics.Bitmap?, String?) -> Unit = { bmp, _ -> onInpaintMaskUpdated(bmp) },
     onRunInpaint: () -> Unit = {},
     onReuseInpaintResult: () -> Unit = {},
     onSaveBitmapToFolder: (android.graphics.Bitmap) -> Unit = {},
@@ -209,6 +214,10 @@ fun StudioTab(
             onFastModeChanged = onInpaintFastModeChanged,
             onDepthGuardChanged = onInpaintDepthGuardChanged,
             onComputeInpaintDepth = onComputeInpaintDepth,
+            onToggleQuickAccessoryRemoval = onToggleQuickAccessoryRemoval,
+            onComputeAccessoryLayers = onComputeAccessoryLayers,
+            onApplyAccessorySelectionAndExpand = onApplyAccessorySelectionAndExpand,
+            onMaskAndPromptUpdated = onInpaintMaskAndPromptUpdated,
             onCreateInpaint = onRunInpaint,
             onSaveToFolder = onSaveBitmapToFolder,
             onDownloadToGallery = onDownloadBitmapToGallery,

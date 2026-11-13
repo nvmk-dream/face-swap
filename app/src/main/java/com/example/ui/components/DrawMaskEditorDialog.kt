@@ -13,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -41,6 +43,9 @@ import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Diamond
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.CircularProgressIndicator
@@ -79,6 +84,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.onnx.AccessoryMaskEngine
+import com.example.onnx.AccessoryMaskLayers
+import com.example.onnx.AccessoryTarget
 import com.example.onnx.DepthMapResult
 
 private enum class MaskToolMode {
@@ -110,8 +118,16 @@ fun DrawMaskEditorDialog(
     isDepthModelReady: Boolean = false,
     isComputingDepth: Boolean = false,
     onRequestDepthMap: () -> Unit = {},
+    accessoryLayers: AccessoryMaskLayers? = null,
+    initialAccessoryTargets: Set<AccessoryTarget> = emptySet(),
+    initialAccessoryExpandPx: Float = 6f,
+    isComputingAccessoryMask: Boolean = false,
+    accessoryNotice: String? = null,
+    onRequestAccessoryLayers: () -> Unit = {},
+    onAccessorySelectionChanged: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onDismiss: () -> Unit,
-    onApplyMask: (Bitmap) -> Unit
+    onApplyMask: (Bitmap) -> Unit = {},
+    onApplyMaskWithPrompt: ((Bitmap, String?) -> Unit)? = null
 ) {
     val strokes = remember { mutableStateListOf<NormalizedMaskStroke>() }
     var activePoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
@@ -127,33 +143,84 @@ fun DrawMaskEditorDialog(
         mutableFloatStateOf(depthMap?.suggestForegroundCutoff() ?: 0.48f)
     }
 
+    var selectedAccessories by remember(initialAccessoryTargets) {
+        mutableStateOf(initialAccessoryTargets)
+    }
+    var pendingAccessoryTarget by remember { mutableStateOf<AccessoryTarget?>(null) }
+    var accessoryExpandPx by remember(initialAccessoryExpandPx) {
+        mutableFloatStateOf(initialAccessoryExpandPx)
+    }
+    var inlineHintMessage by remember { mutableStateOf<String?>(null) }
+
     LaunchedEffect(depthMap) {
         if (depthMap != null && pendingAutoMode != null) {
             autoDepthMode = pendingAutoMode!!
             pendingAutoMode = null
             isInverted = false
+            inlineHintMessage = null
         }
     }
 
-    val previewAutoMaskBitmap = remember(depthMap, autoDepthMode, depthCutoff, isInverted) {
-        if (depthMap == null || autoDepthMode == AutoDepthMaskMode.NONE) {
+    LaunchedEffect(accessoryLayers) {
+        val pending = pendingAccessoryTarget
+        if (accessoryLayers != null && pending != null) {
+            selectedAccessories = selectedAccessories + pending
+            pendingAccessoryTarget = null
+            inlineHintMessage = if (accessoryLayers.detectedFacesCount <= 0) {
+                "No face detected in photo. Use Brush or Auto BG/Subject."
+            } else null
+        }
+    }
+
+    val previewAutoMaskBitmap = remember(
+        depthMap,
+        autoDepthMode,
+        depthCutoff,
+        isInverted,
+        accessoryLayers,
+        selectedAccessories,
+        accessoryExpandPx
+    ) {
+        val hasDepth = depthMap != null && autoDepthMode != AutoDepthMaskMode.NONE
+        val hasAcc = accessoryLayers != null &&
+            accessoryLayers.detectedFacesCount > 0 &&
+            selectedAccessories.isNotEmpty()
+        if (!hasDepth && !hasAcc) {
             null
         } else {
-            val maskBg = if (isInverted) {
-                autoDepthMode != AutoDepthMaskMode.BACKGROUND
-            } else {
-                autoDepthMode == AutoDepthMaskMode.BACKGROUND
-            }
             val maxDim = maxOf(sourceBitmap.width, sourceBitmap.height).coerceAtLeast(1)
             val scale = (384f / maxDim.toFloat()).coerceAtMost(1f)
             val pw = (sourceBitmap.width * scale).toInt().coerceAtLeast(32)
             val ph = (sourceBitmap.height * scale).toInt().coerceAtLeast(32)
-            depthMap.renderAutoMaskBitmap(
-                targetWidth = pw,
-                targetHeight = ph,
-                cutoff = depthCutoff,
-                maskBackground = maskBg
-            )
+            val combined = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888)
+            val canvas = AndroidCanvas(combined)
+
+            if (hasDepth) {
+                val maskBg = if (isInverted) {
+                    autoDepthMode != AutoDepthMaskMode.BACKGROUND
+                } else {
+                    autoDepthMode == AutoDepthMaskMode.BACKGROUND
+                }
+                val dBmp = depthMap!!.renderAutoMaskBitmap(
+                    targetWidth = pw,
+                    targetHeight = ph,
+                    cutoff = depthCutoff,
+                    maskBackground = maskBg
+                )
+                canvas.drawBitmap(dBmp, 0f, 0f, null)
+                dBmp.recycle()
+            }
+            if (hasAcc) {
+                val aBmp = accessoryLayers!!.renderMaskBitmap(
+                    targetWidth = pw,
+                    targetHeight = ph,
+                    selectedTargets = selectedAccessories,
+                    expandPx = accessoryExpandPx
+                )
+                canvas.drawBitmap(aBmp, 0f, 0f, null)
+                aBmp.recycle()
+            }
+            combined
         }
     }
 
@@ -217,18 +284,39 @@ fun DrawMaskEditorDialog(
                         .clip(RoundedCornerShape(50))
                         .background(Color(0xFF0284C7))
                         .clickable {
-                            val autoBase = if (depthMap != null && autoDepthMode != AutoDepthMaskMode.NONE) {
-                                val maskBg = if (isInverted) {
-                                    autoDepthMode != AutoDepthMaskMode.BACKGROUND
-                                } else {
-                                    autoDepthMode == AutoDepthMaskMode.BACKGROUND
+                            val hasDepth = depthMap != null && autoDepthMode != AutoDepthMaskMode.NONE
+                            val hasAcc = accessoryLayers != null &&
+                                accessoryLayers.detectedFacesCount > 0 &&
+                                selectedAccessories.isNotEmpty()
+                            val autoBase = if (hasDepth || hasAcc) {
+                                val base = Bitmap.createBitmap(sourceBitmap.width, sourceBitmap.height, Bitmap.Config.ARGB_8888)
+                                val baseCanvas = AndroidCanvas(base)
+                                if (hasDepth) {
+                                    val maskBg = if (isInverted) {
+                                        autoDepthMode != AutoDepthMaskMode.BACKGROUND
+                                    } else {
+                                        autoDepthMode == AutoDepthMaskMode.BACKGROUND
+                                    }
+                                    val dBmp = depthMap!!.renderAutoMaskBitmap(
+                                        targetWidth = sourceBitmap.width,
+                                        targetHeight = sourceBitmap.height,
+                                        cutoff = depthCutoff,
+                                        maskBackground = maskBg
+                                    )
+                                    baseCanvas.drawBitmap(dBmp, 0f, 0f, null)
+                                    dBmp.recycle()
                                 }
-                                depthMap.renderAutoMaskBitmap(
-                                    targetWidth = sourceBitmap.width,
-                                    targetHeight = sourceBitmap.height,
-                                    cutoff = depthCutoff,
-                                    maskBackground = maskBg
-                                )
+                                if (hasAcc) {
+                                    val aBmp = accessoryLayers!!.renderMaskBitmap(
+                                        targetWidth = sourceBitmap.width,
+                                        targetHeight = sourceBitmap.height,
+                                        selectedTargets = selectedAccessories,
+                                        expandPx = accessoryExpandPx
+                                    )
+                                    baseCanvas.drawBitmap(aBmp, 0f, 0f, null)
+                                    aBmp.recycle()
+                                }
+                                base
                             } else null
                             val maskBmp = renderMaskBitmap(
                                 width = sourceBitmap.width,
@@ -238,7 +326,15 @@ fun DrawMaskEditorDialog(
                                 baseMask = autoBase
                             )
                             autoBase?.recycle()
-                            onApplyMask(maskBmp)
+                            onAccessorySelectionChanged(selectedAccessories, accessoryExpandPx)
+                            val suggestedPrompt = if (selectedAccessories.isNotEmpty()) {
+                                AccessoryMaskEngine.buildCombinedRemovalPrompt(selectedAccessories)
+                            } else null
+                            if (onApplyMaskWithPrompt != null) {
+                                onApplyMaskWithPrompt(maskBmp, suggestedPrompt)
+                            } else {
+                                onApplyMask(maskBmp)
+                            }
                         }
                         .padding(horizontal = 14.dp, vertical = 10.dp)
                         .testTag("draw_mask_apply_btn"),
@@ -338,10 +434,28 @@ fun DrawMaskEditorDialog(
                 }
             }
 
-            // 1-Click Depth Auto-Mask Row (Auto BG | Auto Subject)
+            // 1-Click Smart Auto-Mask Row: Auto BG | Auto Subject | Cap | Glasses | Jewels (Multi-Select)
+            fun toggleAccessoryChip(target: AccessoryTarget) {
+                if (target in selectedAccessories) {
+                    selectedAccessories = selectedAccessories - target
+                    inlineHintMessage = null
+                } else if (accessoryLayers != null) {
+                    selectedAccessories = selectedAccessories + target
+                    inlineHintMessage = if (accessoryLayers.detectedFacesCount <= 0) {
+                        "No face detected in photo. Use Brush or Auto BG."
+                    } else null
+                } else {
+                    pendingAccessoryTarget = target
+                    inlineHintMessage = null
+                    onRequestAccessoryLayers()
+                }
+            }
+
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 MaskModeChip(
@@ -359,15 +473,18 @@ fun DrawMaskEditorDialog(
                         } else if (depthMap != null) {
                             autoDepthMode = AutoDepthMaskMode.BACKGROUND
                             isInverted = false
+                            inlineHintMessage = null
                         } else if (isDepthModelReady) {
                             pendingAutoMode = AutoDepthMaskMode.BACKGROUND
+                            inlineHintMessage = null
                             onRequestDepthMap()
                         } else {
+                            inlineHintMessage = "Install Depth Anything V2 / sentis-MiDaS in Models tab first."
                             onRequestDepthMap()
                         }
                     },
                     modifier = Modifier
-                        .weight(1f)
+                        .padding(horizontal = 2.dp)
                         .testTag("mask_tool_auto_bg")
                 )
                 MaskModeChip(
@@ -385,24 +502,74 @@ fun DrawMaskEditorDialog(
                         } else if (depthMap != null) {
                             autoDepthMode = AutoDepthMaskMode.SUBJECT
                             isInverted = false
+                            inlineHintMessage = null
                         } else if (isDepthModelReady) {
                             pendingAutoMode = AutoDepthMaskMode.SUBJECT
+                            inlineHintMessage = null
                             onRequestDepthMap()
                         } else {
+                            inlineHintMessage = "Install Depth Anything V2 / sentis-MiDaS in Models tab first."
                             onRequestDepthMap()
                         }
                     },
                     modifier = Modifier
-                        .weight(1f)
+                        .padding(horizontal = 2.dp)
                         .testTag("mask_tool_auto_subject")
                 )
-                if (isComputingDepth) {
+                MaskModeChip(
+                    icon = Icons.Default.Face,
+                    label = if (isComputingAccessoryMask && pendingAccessoryTarget == AccessoryTarget.CAP) {
+                        "Scanning..."
+                    } else {
+                        "Cap"
+                    },
+                    selected = AccessoryTarget.CAP in selectedAccessories,
+                    onClick = { toggleAccessoryChip(AccessoryTarget.CAP) },
+                    modifier = Modifier.testTag("mask_tool_auto_cap")
+                )
+                MaskModeChip(
+                    icon = Icons.Default.Visibility,
+                    label = if (isComputingAccessoryMask && pendingAccessoryTarget == AccessoryTarget.GLASSES) {
+                        "Scanning..."
+                    } else {
+                        "Glasses"
+                    },
+                    selected = AccessoryTarget.GLASSES in selectedAccessories,
+                    onClick = { toggleAccessoryChip(AccessoryTarget.GLASSES) },
+                    modifier = Modifier.testTag("mask_tool_auto_glasses")
+                )
+                MaskModeChip(
+                    icon = Icons.Default.Diamond,
+                    label = if (isComputingAccessoryMask && pendingAccessoryTarget == AccessoryTarget.JEWELS) {
+                        "Scanning..."
+                    } else {
+                        "Jewels"
+                    },
+                    selected = AccessoryTarget.JEWELS in selectedAccessories,
+                    onClick = { toggleAccessoryChip(AccessoryTarget.JEWELS) },
+                    modifier = Modifier.testTag("mask_tool_auto_jewels")
+                )
+                if (isComputingDepth || isComputingAccessoryMask) {
                     CircularProgressIndicator(
                         color = Color(0xFF38BDF8),
                         strokeWidth = 2.dp,
                         modifier = Modifier.size(20.dp)
                     )
                 }
+            }
+
+            val shownHint = inlineHintMessage ?: if (selectedAccessories.isNotEmpty()) accessoryNotice else null
+            if (!shownHint.isNullOrBlank()) {
+                Text(
+                    text = shownHint,
+                    color = Color(0xFF7DD3FC),
+                    fontSize = 11.5.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF15203B))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                )
             }
 
             // Drawing Canvas centered with Source Image aspect ratio
@@ -618,6 +785,38 @@ fun DrawMaskEditorDialog(
                         )
                     }
                 }
+                if (selectedAccessories.isNotEmpty() && accessoryLayers != null && accessoryLayers.detectedFacesCount > 0) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "Mask Expand",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Expand",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Slider(
+                            value = accessoryExpandPx,
+                            onValueChange = { accessoryExpandPx = it },
+                            valueRange = 0f..16f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color(0xFF38BDF8),
+                                activeTrackColor = Color(0xFF0284C7)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("mask_accessory_expand_slider")
+                        )
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -684,11 +883,19 @@ fun DrawMaskEditorDialog(
                             .height(44.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF3F1D2B))
-                            .clickable(enabled = strokes.isNotEmpty() || isInverted || autoDepthMode != AutoDepthMaskMode.NONE) {
+                            .clickable(
+                                enabled = strokes.isNotEmpty() ||
+                                    isInverted ||
+                                    autoDepthMode != AutoDepthMaskMode.NONE ||
+                                    selectedAccessories.isNotEmpty()
+                            ) {
                                 strokes.clear()
                                 isInverted = false
                                 autoDepthMode = AutoDepthMaskMode.NONE
                                 pendingAutoMode = null
+                                selectedAccessories = emptySet()
+                                pendingAccessoryTarget = null
+                                inlineHintMessage = null
                             },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
@@ -732,7 +939,7 @@ private fun MaskModeChip(
                 shape = RoundedCornerShape(10.dp)
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 6.dp),
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {

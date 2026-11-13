@@ -37,6 +37,9 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Diamond
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -69,6 +72,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.onnx.AccessoryTarget
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
@@ -98,6 +102,10 @@ fun InpaintPage(
     onFastModeChanged: (Boolean) -> Unit,
     onDepthGuardChanged: (Boolean) -> Unit = {},
     onComputeInpaintDepth: () -> Unit = {},
+    onToggleQuickAccessoryRemoval: (AccessoryTarget) -> Unit = {},
+    onComputeAccessoryLayers: () -> Unit = {},
+    onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
+    onMaskAndPromptUpdated: (Bitmap?, String?) -> Unit = { bmp, _ -> onMaskUpdated(bmp) },
     onCreateInpaint: () -> Unit,
     onSaveToFolder: (Bitmap) -> Unit,
     onDownloadToGallery: (Bitmap) -> Unit,
@@ -576,6 +584,92 @@ fun InpaintPage(
                     }
                 }
 
+                // 1-Tap Accessory Removal Chips (Multi-select: Cap, Cooling Glass, Jewels -> Auto Mask + Auto Prompt)
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "1-Tap Auto Remove (Mask + Prompt)",
+                            color = darkSlate,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (uiState.isComputingAccessoryMask) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 1.8.dp,
+                                    color = Color(0xFF0284C7)
+                                )
+                                Text(
+                                    text = "Scanning...",
+                                    color = Color(0xFF0284C7),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
+                            Text(
+                                text = "Mask Ready ✓",
+                                color = Color(0xFF059669),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            Triple(AccessoryTarget.CAP, Icons.Default.Face, "inpaint_quick_remove_cap"),
+                            Triple(AccessoryTarget.GLASSES, Icons.Default.Visibility, "inpaint_quick_remove_glasses"),
+                            Triple(AccessoryTarget.JEWELS, Icons.Default.Diamond, "inpaint_quick_remove_jewels")
+                        ).forEach { (target, iconVec, tag) ->
+                            val isSelected = target in uiState.selectedAccessoryTargets
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (isSelected) Color(0xFF0284C7) else Color(0xD9FFFFFF))
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
+                                        RoundedCornerShape(50)
+                                    )
+                                    .clickable(enabled = !uiState.isComputingAccessoryMask && !uiState.isInpainting) {
+                                        onToggleQuickAccessoryRemoval(target)
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                                    .testTag(tag),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = iconVec,
+                                    contentDescription = target.removalButtonLabel,
+                                    tint = if (isSelected) Color.White else Color(0xFF0284C7),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = target.removalButtonLabel,
+                                    color = if (isSelected) Color.White else darkSlate,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Safe Fashion Design Quick Preset Chips
                 Row(
                     modifier = Modifier
@@ -816,9 +910,20 @@ fun InpaintPage(
             isDepthModelReady = uiState.isDepthModelReady,
             isComputingDepth = uiState.isComputingInpaintDepth,
             onRequestDepthMap = onComputeInpaintDepth,
+            accessoryLayers = uiState.inpaintAccessoryLayers,
+            initialAccessoryTargets = uiState.selectedAccessoryTargets,
+            initialAccessoryExpandPx = uiState.inpaintAccessoryExpandPx,
+            isComputingAccessoryMask = uiState.isComputingAccessoryMask,
+            accessoryNotice = uiState.accessoryMaskNotice,
+            onRequestAccessoryLayers = onComputeAccessoryLayers,
+            onAccessorySelectionChanged = onApplyAccessorySelectionAndExpand,
             onDismiss = { showDrawMaskDialog = false },
             onApplyMask = { generatedMask ->
                 onMaskUpdated(generatedMask)
+                showDrawMaskDialog = false
+            },
+            onApplyMaskWithPrompt = { generatedMask, suggestedPrompt ->
+                onMaskAndPromptUpdated(generatedMask, suggestedPrompt)
                 showDrawMaskDialog = false
             }
         )

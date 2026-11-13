@@ -6,6 +6,9 @@ import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.SwapAuditDatabase
 import com.example.data.SwapAuditLog
+import com.example.onnx.AccessoryMaskEngine
+import com.example.onnx.AccessoryMaskLayers
+import com.example.onnx.AccessoryTarget
 import com.example.onnx.ClipBpeTokenizer
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.InteractiveInpaintEngine
@@ -201,4 +204,45 @@ class InpaintAndHistoryRobolectricTest {
         }
 
  }
+
+    @Test
+    fun accessoryMaskLayers_combinesMultiSelectedTargetsAndPrompts() {
+        val prompt = AccessoryMaskEngine.buildCombinedRemovalPrompt(
+            setOf(AccessoryTarget.CAP, AccessoryTarget.GLASSES, AccessoryTarget.JEWELS)
+        )
+        assertTrue(prompt.contains("no cap", ignoreCase = true))
+        assertTrue(prompt.contains("no sunglasses", ignoreCase = true))
+        assertTrue(prompt.contains("no jewelry", ignoreCase = true))
+
+        val w = 32
+        val h = 32
+        val cap = FloatArray(w * h)
+        val glasses = FloatArray(w * h)
+        val jewels = FloatArray(w * h)
+        cap[4 * w + 16] = 1.0f
+        glasses[12 * w + 16] = 1.0f
+        jewels[26 * w + 16] = 1.0f
+
+        val layers = AccessoryMaskLayers(
+            width = w,
+            height = h,
+            capBaseMask = cap,
+            glassesBaseMask = glasses,
+            jewelsBaseMask = jewels,
+            detectedFacesCount = 1,
+            usedNeuralParser = false,
+            engineLabel = "test"
+        )
+        val rendered = layers.renderMaskBitmap(
+            targetWidth = 64,
+            targetHeight = 64,
+            selectedTargets = setOf(AccessoryTarget.CAP, AccessoryTarget.GLASSES),
+            expandPx = 1f
+        )
+        assertEquals(64, rendered.width)
+        assertEquals(64, rendered.height)
+        assertTrue(Color.alpha(rendered.getPixel(32, 8)) > 128)
+        assertTrue(Color.alpha(rendered.getPixel(32, 24)) > 128)
+        assertEquals(0, Color.alpha(rendered.getPixel(32, 52)))
+    }
 }

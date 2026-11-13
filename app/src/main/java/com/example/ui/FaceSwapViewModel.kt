@@ -20,7 +20,12 @@ import com.example.onnx.FaceSwapExecutionResult
 import com.example.onnx.HeadSegmentationAndInpainting
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.DepthEstimationEngine
+import com.example.onnx.AccessoryMaskEngine
+import com.example.onnx.AccessoryMaskLayers
+import com.example.onnx.AccessoryTarget
 import com.example.onnx.DepthMapResult
+import com.example.service.BackgroundProcessingCoordinator
+import com.example.service.ProcessingForegroundService
 import com.example.onnx.InteractiveInpaintEngine
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxMemoryServiceState
@@ -145,6 +150,11 @@ data class FaceSwapUiState(
     val inpaintDepthGuardEnabled: Boolean = false,
     val inpaintDepthMap: DepthMapResult? = null,
     val isComputingInpaintDepth: Boolean = false,
+    val inpaintAccessoryLayers: AccessoryMaskLayers? = null,
+    val isComputingAccessoryMask: Boolean = false,
+    val selectedAccessoryTargets: Set<AccessoryTarget> = emptySet(),
+    val inpaintAccessoryExpandPx: Float = 6f,
+    val accessoryMaskNotice: String? = null,
     val isInpainting: Boolean = false,
     val inpaintProgressText: String? = null,
     val inpaintResultBitmap: Bitmap? = null,
@@ -209,6 +219,45 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     init {
         refreshModelInspections()
+        viewModelScope.launch {
+            BackgroundProcessingCoordinator.inpaintSync.collect { sync ->
+                if (sync.isRunning || sync.resultBitmap != null || sync.errorMessage != null) {
+                    _uiState.update { cur ->
+                        cur.copy(
+                            isInpainting = sync.isRunning,
+                            inpaintProgressText = sync.progressText,
+                            inpaintResultBitmap = sync.resultBitmap ?: cur.inpaintResultBitmap,
+                            inpaintElapsedSec = sync.elapsedSec ?: cur.inpaintElapsedSec,
+                            inpaintEngineLabel = sync.engineLabel ?: cur.inpaintEngineLabel,
+                            errorBannerMessage = sync.errorMessage ?: cur.errorBannerMessage,
+                            statusBannerMessage = sync.statusMessage ?: cur.statusBannerMessage
+                        )
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            BackgroundProcessingCoordinator.swapSync.collect { sync ->
+                if (sync.isRunning || sync.result != null || sync.errorMessage != null) {
+                    _uiState.update { cur ->
+                        cur.copy(
+                            isSwapping = sync.isRunning,
+                            swapProgress = if (sync.isRunning && sync.stageTitle != null) {
+                                (cur.swapProgress ?: SwapStageProgress(1, 5, sync.stageTitle, sync.detailMessage ?: "", 0.2f))
+                            } else if (!sync.isRunning) {
+                                null
+                            } else {
+                                cur.swapProgress
+                            },
+                            swapResult = sync.result ?: cur.swapResult,
+                            lastAuditLogId = sync.auditLogId ?: cur.lastAuditLogId,
+                            errorBannerMessage = sync.errorMessage ?: cur.errorBannerMessage,
+                            statusBannerMessage = sync.statusMessage ?: cur.statusBannerMessage
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun loadSourceAndTargetBitmaps(
@@ -1014,7 +1063,18 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             )
         }
 
-        viewModelScope.launch {
+        if (state.isSwapping) return
+        val appCtx = getApplication<Application>()
+        ProcessingForegroundService.startOrUpdate(
+            context = appCtx,
+            title = "${state.studioMode.title} Running",
+            detail = "Preparing offline ONNX Runtime...",
+            progressPercent = 5
+        )
+        BackgroundProcessingCoordinator.updateSwap {
+            it.copy(isRunning = true, stageTitle = "Stage 1: Detection", detailMessage = "Preparing ONNX...", errorMessage = null, statusMessage = null)
+        }
+        BackgroundProcessingCoordinator.scope.launch {
             _uiState.update {
                 it.copy(
                     isSwapping = true,
@@ -1055,6 +1115,12 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             identityPreservationMode = false,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
+                                ProcessingForegroundService.startOrUpdate(
+                                    context = appCtx,
+                                    title = "${state.studioMode.title} • ${progress.stageTitle}",
+                                    detail = progress.detailMessage,
+                                    progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                )
                             }
                         )
 
@@ -1079,6 +1145,12 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             identityPreservationMode = true,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
+                                ProcessingForegroundService.startOrUpdate(
+                                    context = appCtx,
+                                    title = "${state.studioMode.title} • ${progress.stageTitle}",
+                                    detail = progress.detailMessage,
+                                    progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                )
                             }
                         )
 
@@ -1102,6 +1174,12 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             scaleAdjust = state.faceScaleAdjust,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
+                                ProcessingForegroundService.startOrUpdate(
+                                    context = appCtx,
+                                    title = "${state.studioMode.title} • ${progress.stageTitle}",
+                                    detail = progress.detailMessage,
+                                    progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                )
                             }
                         )
                     }
@@ -1131,6 +1209,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     )
                 )
 
+                val doneMsg = "${state.studioMode.title} completed in ${execResult.totalMs} ms (${execResult.swappedFacesCount} target(s) replaced)."
+                BackgroundProcessingCoordinator.updateSwap {
+                    it.copy(isRunning = false, result = execResult, auditLogId = logId, statusMessage = doneMsg, errorMessage = null)
+                }
                 _uiState.update {
                     it.copy(
                         isSwapping = false,
@@ -1138,12 +1220,22 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         swapResult = execResult,
                         lastAuditLogId = logId,
                         memoryServiceState = modelService.getMemoryState(),
-                        statusBannerMessage = "${state.studioMode.title} completed in ${execResult.totalMs} ms (${execResult.swappedFacesCount} target(s) replaced)."
+                        statusBannerMessage = doneMsg
                     )
                 }
+                ProcessingForegroundService.finishAndNotify(
+                    context = appCtx,
+                    showCompletionNotification = true,
+                    completedTitle = "${state.studioMode.title} Ready",
+                    completedBody = doneMsg
+                )
             } catch (oom: OutOfMemoryError) {
                 modelService.releaseAllSessions()
                 System.gc()
+                val errMsg = "Insufficient RAM detected. Switched automatically to FAST / Low-Memory Tiled Mode — please tap Process again."
+                BackgroundProcessingCoordinator.updateSwap {
+                    it.copy(isRunning = false, errorMessage = errMsg)
+                }
                 _uiState.update {
                     it.copy(
                         isSwapping = false,
@@ -1151,17 +1243,33 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         lowMemoryMode = true,
                         qualityLevel = ProcessingQualityLevel.FAST,
                         memoryServiceState = modelService.getMemoryState(),
-                        errorBannerMessage = "Insufficient RAM detected. Switched automatically to FAST / Low-Memory Tiled Mode — please tap Process again."
+                        errorBannerMessage = errMsg
                     )
                 }
+                ProcessingForegroundService.finishAndNotify(
+                    context = appCtx,
+                    showCompletionNotification = true,
+                    completedTitle = "${state.studioMode.title} Paused (Low RAM)",
+                    completedBody = errMsg
+                )
             } catch (t: Throwable) {
+                val errMsg = t.message ?: "Processing failure: ${t.javaClass.simpleName}"
+                BackgroundProcessingCoordinator.updateSwap {
+                    it.copy(isRunning = false, errorMessage = errMsg)
+                }
                 _uiState.update {
                     it.copy(
                         isSwapping = false,
                         swapProgress = null,
-                        errorBannerMessage = t.message ?: "Processing failure: ${t.javaClass.simpleName}"
+                        errorBannerMessage = errMsg
                     )
                 }
+                ProcessingForegroundService.finishAndNotify(
+                    context = appCtx,
+                    showCompletionNotification = true,
+                    completedTitle = "${state.studioMode.title} Failed",
+                    completedBody = errMsg
+                )
             }
         }
     }
@@ -1346,6 +1454,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             inpaintSourceBitmap = bitmap,
                             inpaintMaskBitmap = null,
                             inpaintDepthMap = null,
+                            inpaintAccessoryLayers = null,
+                            selectedAccessoryTargets = emptySet(),
+                            accessoryMaskNotice = null,
                             inpaintResultBitmap = null,
                             inpaintElapsedSec = null,
                             statusBannerMessage = "Loaded Inpaint Source (${bitmap.width}×${bitmap.height}) from folder."
@@ -1432,6 +1543,197 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun updateAccessorySelectionAndExpand(targets: Set<AccessoryTarget>, expandPx: Float) {
+        val clamped = expandPx.coerceIn(0f, 18f)
+        _uiState.update {
+            it.copy(
+                selectedAccessoryTargets = targets,
+                inpaintAccessoryExpandPx = clamped
+            )
+        }
+    }
+
+    fun setInpaintAccessoryExpandPx(expandPx: Float) {
+        val clamped = expandPx.coerceIn(0f, 18f)
+        val cur = _uiState.value
+        val layers = cur.inpaintAccessoryLayers
+        val srcBmp = cur.inpaintSourceBitmap
+        val targets = cur.selectedAccessoryTargets
+        val updatedMask = if (layers != null && srcBmp != null && targets.isNotEmpty()) {
+            layers.renderMaskBitmap(srcBmp.width, srcBmp.height, targets, clamped)
+        } else {
+            cur.inpaintMaskBitmap
+        }
+        _uiState.update {
+            it.copy(
+                inpaintAccessoryExpandPx = clamped,
+                inpaintMaskBitmap = updatedMask
+            )
+        }
+    }
+
+    fun applyMaskWithOptionalPrompt(mask: Bitmap?, suggestedPrompt: String?) {
+        _uiState.update { cur ->
+            val nextPrompt = if (!suggestedPrompt.isNullOrBlank()) suggestedPrompt else cur.inpaintPrompt
+            cur.copy(
+                inpaintMaskBitmap = mask,
+                inpaintPrompt = nextPrompt,
+                errorBannerMessage = null,
+                statusBannerMessage = if (mask != null) {
+                    if (!suggestedPrompt.isNullOrBlank()) {
+                        "Auto-mask & removal prompt ready. Tap Create to inpaint."
+                    } else {
+                        "Mask applied. Tap Create to run Inpaint."
+                    }
+                } else {
+                    null
+                }
+            )
+        }
+    }
+
+    fun computeInpaintAccessoryLayers() {
+        val state = _uiState.value
+        val srcBmp = state.inpaintSourceBitmap ?: return
+        if (state.isComputingAccessoryMask) return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isComputingAccessoryMask = true,
+                    accessoryMaskNotice = "Detecting Cap / Glasses / Jewels...",
+                    errorBannerMessage = null
+                )
+            }
+            val layers = withContext(Dispatchers.Default) {
+                AccessoryMaskEngine.extractAccessoryLayers(
+                    context = getApplication(),
+                    ortEnv = ortEnv,
+                    sourceBitmap = srcBmp,
+                    depthMap = state.inpaintDepthMap,
+                    preferHardwareAccel = state.preferHardwareAcceleration
+                )
+            }
+            _uiState.update { cur ->
+                val notice = if (layers.detectedFacesCount <= 0) {
+                    "No face detected in photo. Draw mask manually or use Auto BG."
+                } else {
+                    "Ready (${layers.engineLabel})"
+                }
+                val newMask = if (layers.detectedFacesCount > 0 && cur.selectedAccessoryTargets.isNotEmpty()) {
+                    layers.renderMaskBitmap(
+                        srcBmp.width,
+                        srcBmp.height,
+                        cur.selectedAccessoryTargets,
+                        cur.inpaintAccessoryExpandPx
+                    )
+                } else {
+                    cur.inpaintMaskBitmap
+                }
+                cur.copy(
+                    isComputingAccessoryMask = false,
+                    inpaintAccessoryLayers = layers,
+                    inpaintMaskBitmap = newMask,
+                    accessoryMaskNotice = notice
+                )
+            }
+        }
+    }
+
+    fun toggleQuickAccessoryRemoval(target: AccessoryTarget) {
+        val cur = _uiState.value
+        val srcBmp = cur.inpaintSourceBitmap
+        if (srcBmp == null) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Please select a Source Image from device folder first.")
+            }
+            return
+        }
+        val nextTargets = if (target in cur.selectedAccessoryTargets) {
+            cur.selectedAccessoryTargets - target
+        } else {
+            cur.selectedAccessoryTargets + target
+        }
+        val autoPrompt = if (nextTargets.isNotEmpty()) {
+            AccessoryMaskEngine.buildCombinedRemovalPrompt(nextTargets)
+        } else {
+            ""
+        }
+        val cachedLayers = cur.inpaintAccessoryLayers
+        if (cachedLayers != null) {
+            val maskBmp = if (nextTargets.isNotEmpty() && cachedLayers.detectedFacesCount > 0) {
+                cachedLayers.renderMaskBitmap(srcBmp.width, srcBmp.height, nextTargets, cur.inpaintAccessoryExpandPx)
+            } else {
+                null
+            }
+            _uiState.update {
+                it.copy(
+                    selectedAccessoryTargets = nextTargets,
+                    inpaintMaskBitmap = maskBmp,
+                    inpaintPrompt = if (nextTargets.isNotEmpty()) autoPrompt else it.inpaintPrompt,
+                    errorBannerMessage = if (nextTargets.isNotEmpty() && cachedLayers.detectedFacesCount <= 0) {
+                        "No face detected in photo for 1-Tap accessory mask. Tap Draw Mask to paint manually."
+                    } else null,
+                    statusBannerMessage = if (maskBmp != null) {
+                        "Auto-mask ready for ${nextTargets.joinToString(" + ") { it.shortLabel }}. Tap Draw Mask to inspect or Create to remove."
+                    } else null
+                )
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                selectedAccessoryTargets = nextTargets,
+                inpaintPrompt = if (nextTargets.isNotEmpty()) autoPrompt else it.inpaintPrompt,
+                isComputingAccessoryMask = nextTargets.isNotEmpty(),
+                errorBannerMessage = null,
+                statusBannerMessage = if (nextTargets.isNotEmpty()) {
+                    "Detecting ${nextTargets.joinToString(" + ") { it.shortLabel }} on Source photo..."
+                } else null
+            )
+        }
+        if (nextTargets.isEmpty()) {
+            _uiState.update { it.copy(inpaintMaskBitmap = null) }
+            return
+        }
+
+        viewModelScope.launch {
+            val layers = withContext(Dispatchers.Default) {
+                AccessoryMaskEngine.extractAccessoryLayers(
+                    context = getApplication(),
+                    ortEnv = ortEnv,
+                    sourceBitmap = srcBmp,
+                    depthMap = _uiState.value.inpaintDepthMap,
+                    preferHardwareAccel = _uiState.value.preferHardwareAcceleration
+                )
+            }
+            _uiState.update { latest ->
+                val activeTargets = latest.selectedAccessoryTargets
+                val maskBmp = if (activeTargets.isNotEmpty() && layers.detectedFacesCount > 0) {
+                    layers.renderMaskBitmap(srcBmp.width, srcBmp.height, activeTargets, latest.inpaintAccessoryExpandPx)
+                } else {
+                    null
+                }
+                latest.copy(
+                    isComputingAccessoryMask = false,
+                    inpaintAccessoryLayers = layers,
+                    inpaintMaskBitmap = maskBmp,
+                    accessoryMaskNotice = if (layers.detectedFacesCount <= 0) {
+                        "No face detected in photo. Use Draw Mask."
+                    } else {
+                        "Ready (${layers.engineLabel})"
+                    },
+                    errorBannerMessage = if (activeTargets.isNotEmpty() && layers.detectedFacesCount <= 0) {
+                        "No face detected in photo for 1-Tap accessory mask. Tap Draw Mask to paint manually."
+                    } else null,
+                    statusBannerMessage = if (maskBmp != null) {
+                        "Auto-mask ready (${layers.engineLabel}). Tap Draw Mask to refine or Create to remove!"
+                    } else null
+                )
+            }
+        }
+    }
+
     fun selectInpaintModelOption(option: InpaintModelOption) {
         val ctx = getApplication<Application>()
         val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
@@ -1456,6 +1758,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 inpaintSourceBitmap = resultBmp,
                 inpaintMaskBitmap = null,
                 inpaintDepthMap = null,
+                inpaintAccessoryLayers = null,
+                selectedAccessoryTargets = emptySet(),
+                accessoryMaskNotice = null,
                 inpaintResultBitmap = null,
                 inpaintElapsedSec = null,
                 statusBannerMessage = "Result loaded as Source Image. Draw a new mask to edit further."
@@ -1480,7 +1785,18 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        viewModelScope.launch {
+        if (state.isInpainting) return
+        val appCtx = getApplication<Application>()
+        ProcessingForegroundService.startOrUpdate(
+            context = appCtx,
+            title = "Inpaint Image Generating",
+            detail = "Running offline AI inpainting (safe during screen lock & app switch)...",
+            progressPercent = 5
+        )
+        BackgroundProcessingCoordinator.updateInpaint {
+            it.copy(isRunning = true, progressText = "Preparing offline inpainting engine...", errorMessage = null, statusMessage = null)
+        }
+        BackgroundProcessingCoordinator.scope.launch {
             _uiState.update {
                 it.copy(
                     isInpainting = true,
@@ -1532,6 +1848,19 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         enableDepthGuard = state.inpaintDepthGuardEnabled,
                         onProgress = { progressMsg ->
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
+                            BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }
+                            val stepMatch = Regex("Step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
+                            val pct = if (stepMatch != null) {
+                                val curS = stepMatch.groupValues[1].toIntOrNull() ?: 1
+                                val totS = stepMatch.groupValues[2].toIntOrNull()?.coerceAtLeast(1) ?: 8
+                                (15 + (curS * 78) / totS).coerceIn(15, 95)
+                            } else -1
+                            ProcessingForegroundService.startOrUpdate(
+                                context = appCtx,
+                                title = "Inpaint Generating (Background Active)",
+                                detail = progressMsg,
+                                progressPercent = pct
+                            )
                         }
                     )
                 }
@@ -1559,6 +1888,18 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 )
 
                 val sec = res.elapsedMs / 1000f
+                val doneMsg = "Inpaint finished in ${"%.2f".format(sec)}s (${res.engineUsed})."
+                BackgroundProcessingCoordinator.updateInpaint {
+                    it.copy(
+                        isRunning = false,
+                        progressText = null,
+                        resultBitmap = res.outputBitmap,
+                        elapsedSec = sec,
+                        engineLabel = res.engineUsed,
+                        statusMessage = doneMsg,
+                        errorMessage = null
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         isInpainting = false,
@@ -1567,17 +1908,33 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         inpaintElapsedSec = sec,
                         inpaintEngineLabel = res.engineUsed,
                         memoryServiceState = modelService.getMemoryState(),
-                        statusBannerMessage = "Inpaint finished in ${"%.2f".format(sec)}s (${res.engineUsed})."
+                        statusBannerMessage = doneMsg
                     )
                 }
+                ProcessingForegroundService.finishAndNotify(
+                    context = appCtx,
+                    showCompletionNotification = true,
+                    completedTitle = "Inpaint Complete! Tap to View",
+                    completedBody = doneMsg
+                )
             } catch (t: Throwable) {
+                val errMsg = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
+                BackgroundProcessingCoordinator.updateInpaint {
+                    it.copy(isRunning = false, progressText = null, errorMessage = errMsg)
+                }
                 _uiState.update {
                     it.copy(
                         isInpainting = false,
                         inpaintProgressText = null,
-                        errorBannerMessage = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
+                        errorBannerMessage = errMsg
                     )
                 }
+                ProcessingForegroundService.finishAndNotify(
+                    context = appCtx,
+                    showCompletionNotification = true,
+                    completedTitle = "Inpaint Failed",
+                    completedBody = errMsg
+                )
             }
         }
     }
@@ -1644,7 +2001,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
-        runCatching { modelService.close() }
+        if (!BackgroundProcessingCoordinator.isAnyJobRunning()) {
+            runCatching { modelService.close() }
+        }
     }
 
     private fun formatBytes(bytes: Long): String {

@@ -108,6 +108,24 @@ fun FaceSwapStudioApp(
     var pendingSaveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var zoomViewerState by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    fun ensureNotificationPermissionPromptOnce() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                runCatching {
+                    notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        }
+    }
+
     val sourcePhotoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -567,7 +585,10 @@ fun FaceSwapStudioApp(
                     onTwoModelFallbackChanged = viewModel::setAllowTwoModelFallback,
                     onHardwareAccelChanged = viewModel::setPreferHardwareAcceleration,
                     onLowMemoryChanged = viewModel::setLowMemoryMode,
-                    onRunSwap = viewModel::runActiveModePipeline,
+                    onRunSwap = {
+                        if (uiState.canExecuteSwap) ensureNotificationPermissionPromptOnce()
+                        viewModel.runActiveModePipeline()
+                    },
                     onSaveToGallery = { viewModel.saveResultToGallery(isHd = false) },
                     onSaveHdToGallery = { viewModel.saveResultToGallery(isHd = true) },
                     onShareResult = viewModel::shareResultImage,
@@ -603,7 +624,16 @@ fun FaceSwapStudioApp(
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,
                     onInpaintDepthGuardChanged = viewModel::setInpaintDepthGuardEnabled,
                     onComputeInpaintDepth = viewModel::computeInpaintDepthMap,
-                    onRunInpaint = viewModel::runInpaint,
+                    onToggleQuickAccessoryRemoval = viewModel::toggleQuickAccessoryRemoval,
+                    onComputeAccessoryLayers = viewModel::computeInpaintAccessoryLayers,
+                    onApplyAccessorySelectionAndExpand = viewModel::updateAccessorySelectionAndExpand,
+                    onInpaintMaskAndPromptUpdated = viewModel::applyMaskWithOptionalPrompt,
+                    onRunInpaint = {
+                        if (uiState.inpaintSourceBitmap != null && uiState.inpaintMaskBitmap != null) {
+                            ensureNotificationPermissionPromptOnce()
+                        }
+                        viewModel.runInpaint()
+                    },
                     onReuseInpaintResult = viewModel::reuseInpaintResultAsSource,
                     onSaveBitmapToFolder = requestSaveToFolder,
                     onDownloadBitmapToGallery = { bmp ->
