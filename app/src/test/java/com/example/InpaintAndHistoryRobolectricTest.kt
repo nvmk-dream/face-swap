@@ -42,14 +42,14 @@ class InpaintAndHistoryRobolectricTest {
         get() = ApplicationProvider.getApplicationContext()
 
     @Test
-    fun swapAuditDatabase_retainsOnlyLatestThreeRecordsAndDeletesOldImages() = runBlocking {
+    fun swapAuditDatabase_retainsOnlyLatestFiveRecordsAndDeletesOldImages() = runBlocking {
         val db = SwapAuditDatabase.getInstance(context)
         db.clearAll()
 
         val savedPaths = mutableListOf<String>()
-        for (i in 1..5) {
+        for (i in 1..7) {
             val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply {
-                eraseColor(Color.rgb(20 * i, 40 * i, 180))
+                eraseColor(Color.rgb((20 * i) % 255, (35 * i) % 255, 180))
             }
             val path = ImageGalleryHelper.saveBitmapToHistoryCache(context, bmp)!!
             savedPaths.add(path)
@@ -74,17 +74,21 @@ class InpaintAndHistoryRobolectricTest {
         }
 
         val logs = db.observeAllLogs().first()
-        assertEquals(3, logs.size)
-        assertEquals("Test #5", logs[0].pipelineSummary)
-        assertEquals("Test #4", logs[1].pipelineSummary)
-        assertEquals("Test #3", logs[2].pipelineSummary)
+        assertEquals(5, logs.size)
+        assertEquals("Test #7", logs[0].pipelineSummary)
+        assertEquals("Test #6", logs[1].pipelineSummary)
+        assertEquals("Test #5", logs[2].pipelineSummary)
+        assertEquals("Test #4", logs[3].pipelineSummary)
+        assertEquals("Test #3", logs[4].pipelineSummary)
 
-        // Older files (1 and 2) should be auto-deleted; latest 3 must still exist
+        // Older files (1 and 2) should be auto-deleted; latest 5 must still exist
         assertFalse(File(savedPaths[0]).exists())
         assertFalse(File(savedPaths[1]).exists())
         assertTrue(File(savedPaths[2]).exists())
         assertTrue(File(savedPaths[3]).exists())
         assertTrue(File(savedPaths[4]).exists())
+        assertTrue(File(savedPaths[5]).exists())
+        assertTrue(File(savedPaths[6]).exists())
     }
 
     @Test

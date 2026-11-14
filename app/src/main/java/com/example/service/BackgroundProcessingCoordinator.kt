@@ -2,8 +2,10 @@ package com.example.service
 
 import android.graphics.Bitmap
 import com.example.onnx.FaceSwapExecutionResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -43,6 +45,9 @@ object BackgroundProcessingCoordinator {
     private val _swapSync = MutableStateFlow(BackgroundSwapSync())
     val swapSync = _swapSync.asStateFlow()
 
+    @Volatile
+    var activeInpaintJob: Job? = null
+
     fun isAnyJobRunning(): Boolean = _inpaintSync.value.isRunning || _swapSync.value.isRunning
 
     fun updateInpaint(transform: (BackgroundInpaintSync) -> BackgroundInpaintSync) {
@@ -51,6 +56,21 @@ object BackgroundProcessingCoordinator {
 
     fun updateSwap(transform: (BackgroundSwapSync) -> BackgroundSwapSync) {
         _swapSync.update(transform)
+    }
+
+    fun cancelInpaintJob() {
+        runCatching {
+            activeInpaintJob?.cancel(CancellationException("Inpaint cancelled by user."))
+        }
+        activeInpaintJob = null
+        _inpaintSync.update {
+            it.copy(
+                isRunning = false,
+                progressText = null,
+                errorMessage = null,
+                statusMessage = "Inpaint generation cancelled."
+            )
+        }
     }
 
     fun clearInpaintResult() {

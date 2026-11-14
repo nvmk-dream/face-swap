@@ -2,7 +2,9 @@ package com.example.onnx
 
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import kotlinx.coroutines.CancellationException
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Log
@@ -31,6 +33,24 @@ data class InpaintExecutionResult(
  * from [sourceBitmap].
  */
 object InteractiveInpaintEngine {
+
+    @Volatile
+    private var cancelRequested = false
+
+    @Volatile
+    private var activeLamaRunOptions: OrtSession.RunOptions? = null
+
+    fun requestCancel() {
+        cancelRequested = true
+        SdInpaintOnnxEngine.requestCancelActiveInference()
+        runCatching { activeLamaRunOptions?.setTerminate(true) }
+    }
+
+    private fun ensureNotCancelled() {
+        if (cancelRequested || Thread.currentThread().isInterrupted) {
+            throw CancellationException("Inpaint cancelled by user.")
+        }
+    }
 
     /**
      * Protects closer foreground pixels from accidental brush overlap when painting background edits.
@@ -130,6 +150,8 @@ object InteractiveInpaintEngine {
         guidanceScale: Float = SdInpaintOnnxEngine.DEFAULT_GUIDANCE_SCALE,
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
+        cancelRequested = false
+        ensureNotCancelled()
         val guardedMaskBitmap = if (enableDepthGuard && depthMap != null) {
             applyDepthForegroundGuardToMask(sourceBitmap, maskBitmap, depthMap)
         } else {
@@ -168,6 +190,10 @@ object InteractiveInpaintEngine {
                         )
                     }
                     if (primaryAttempt.isSuccess) return primaryAttempt.getOrThrow()
+                    val primaryErr = primaryAttempt.exceptionOrNull()
+                    if (primaryErr is CancellationException || cancelRequested || Thread.currentThread().isInterrupted) {
+                        throw (primaryErr as? CancellationException ?: CancellationException("Inpaint cancelled by user."))
+                    }
                     onProgress("Switching to secondary option (${secondarySdPack.packType.displayLabel})...")
                     return SdInpaintOnnxEngine.inpaint(
                         ortEnv = ortEnv,
@@ -253,6 +279,7 @@ object InteractiveInpaintEngine {
         var inpaintedFull: Bitmap? = null
         var engineLabel = "On-Device Boundary-Diffusion Inpainter"
 
+        ensureNotCancelled()
         if (selectedOption != InpaintModelOption.CV_FALLBACK &&
             ortEnv != null &&
             lamaModelFile != null &&
@@ -260,7 +287,7 @@ object InteractiveInpaintEngine {
             lamaModelFile.length() > 1024L
         ) {
             onProgress("Running LaMa ONNX inpainting...")
-            val lamaOut = runCatching {
+            val lamaAttempt = runCatching {
                 runLamaInpaint(
                     ortEnv = ortEnv,
                     lamaFile = lamaModelFile,
@@ -268,12 +295,18 @@ object InteractiveInpaintEngine {
                     fullMaskAlpha = maskAlpha,
                     preferHardwareAccel = preferHardwareAccel
                 )
-            }.getOrNull()
+            }
+            val lamaErr = lamaAttempt.exceptionOrNull()
+            if (lamaErr is CancellationException || cancelRequested || Thread.currentThread().isInterrupted) {
+                throw (lamaErr as? CancellationException ?: CancellationException("Inpaint cancelled by user."))
+            }
+            val lamaOut = lamaAttempt.getOrNull()
             if (lamaOut != null) {
                 inpaintedFull = lamaOut
                 engineLabel = "LaMa ONNX (${lamaModelFile.name})"
             }
         }
+        ensureNotCancelled()
 
         // 3. Built-in boundary-diffusion fallback
         if (inpaintedFull == null) {
@@ -391,9 +424,12 @@ object InteractiveInpaintEngine {
                 imgBuf.rewind()
                 maskBuf.rewind()
 
-                OnnxTensor.createTensor(ortEnv, imgBuf, longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())).use { imgT ->
-                    OnnxTensor.createTensor(ortEnv, maskBuf, longArrayOf(1L, 1L, modelH.toLong(), modelW.toLong())).use { maskT ->
-                        session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
+                val runOptions = OrtSession.RunOptions()
+                activeLamaRunOptions = runOptions
+                try {
+                    OnnxTensor.createTensor(ortEnv, imgBuf, longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())).use { imgT ->
+                        OnnxTensor.createTensor(ortEnv, maskBuf, longArrayOf(1L, 1L, modelH.toLong(), modelW.toLong())).use { maskT ->
+                            session.run(mapOf(imgName to imgT, maskName to maskT), runOptions).use { res ->
                             val outT = res[0] as OnnxTensor
                             val outFloats = FloatArray(3 * hw)
                             outT.floatBuffer.get(outFloats)
@@ -408,17 +444,23 @@ object InteractiveInpaintEngine {
                             }
                             val outBmp = Bitmap.createBitmap(modelW, modelH, Bitmap.Config.ARGB_8888)
                             outBmp.setPixels(outPx, 0, modelW, 0, 0, modelW, modelH)
-                            return if (origW == modelW && origH == modelH) {
-                                outBmp
-                            } else {
-                                val resized = Bitmap.createScaledBitmap(outBmp, origW, origH, true)
-                                outBmp.recycle()
-                                resized
+                                return if (origW == modelW && origH == modelH) {
+                                    outBmp
+                                } else {
+                                    val resized = Bitmap.createScaledBitmap(outBmp, origW, origH, true)
+                                    outBmp.recycle()
+                                    resized
+                                }
                             }
+                        }
                     }
+                } finally {
+                    if (activeLamaRunOptions === runOptions) {
+                        activeLamaRunOptions = null
+                    }
+                    runCatching { runOptions.close() }
                 }
             }
-        }
     }
 
     /**
@@ -486,6 +528,7 @@ object InteractiveInpaintEngine {
         val peeledB = ArrayList<Float>(512)
 
         for (iter in 0 until maxPeelIters) {
+            ensureNotCancelled()
             peeledThisStep.clear()
             peeledR.clear()
             peeledG.clear()

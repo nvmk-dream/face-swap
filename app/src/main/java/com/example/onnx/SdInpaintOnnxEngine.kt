@@ -24,6 +24,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlinx.coroutines.CancellationException
 import kotlin.math.sqrt
 
 /**
@@ -68,6 +69,23 @@ object SdInpaintOnnxEngine {
         val filePath: String,
         val lastModified: Long
     )
+
+    @Volatile
+    private var cancelRequested = false
+
+    @Volatile
+    private var activeRunOptions: OrtSession.RunOptions? = null
+
+    fun requestCancelActiveInference() {
+        cancelRequested = true
+        runCatching { activeRunOptions?.setTerminate(true) }
+    }
+
+    private fun ensureNotCancelled() {
+        if (cancelRequested || Thread.currentThread().isInterrupted) {
+            throw CancellationException("Inpaint cancelled by user.")
+        }
+    }
 
     private val sessionLock = Any()
     private var cachedPackKey: String? = null
@@ -206,6 +224,51 @@ object SdInpaintOnnxEngine {
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
 
+        cancelRequested = false
+        val runOptions = OrtSession.RunOptions()
+        activeRunOptions = runOptions
+        try {
+            return inpaintInternal(
+                ortEnv = ortEnv,
+                pack = pack,
+                sourceBitmap = sourceBitmap,
+                maskBitmap = maskBitmap,
+                prompt = prompt,
+                negativePrompt = negativePrompt,
+                fastMode = fastMode,
+                preferHardwareAccel = preferHardwareAccel,
+                strength = strength,
+                guidanceScale = guidanceScale,
+                skipCompositeDebug = skipCompositeDebug,
+                seed = seed,
+                runOptions = runOptions,
+                onProgress = onProgress
+            )
+        } finally {
+            if (activeRunOptions === runOptions) {
+                activeRunOptions = null
+            }
+            runCatching { runOptions.close() }
+        }
+    }
+
+    private fun inpaintInternal(
+        ortEnv: OrtEnvironment,
+        pack: InstalledSdInpaintPack,
+        sourceBitmap: Bitmap,
+        maskBitmap: Bitmap,
+        prompt: String,
+        negativePrompt: String,
+        fastMode: Boolean,
+        preferHardwareAccel: Boolean,
+        strength: Float,
+        guidanceScale: Float,
+        skipCompositeDebug: Boolean,
+        seed: Long,
+        runOptions: OrtSession.RunOptions,
+        onProgress: (String) -> Unit
+    ): InpaintExecutionResult {
+        ensureNotCancelled()
         val t0 = System.currentTimeMillis()
         val origW = sourceBitmap.width
         val origH = sourceBitmap.height
@@ -278,12 +341,15 @@ object SdInpaintOnnxEngine {
             modelFile = pack.textEncoderOnnx,
             preferHardwareAccel = preferHardwareAccel
         )
+        ensureNotCancelled()
         val (uncondEmbed, condEmbed) = runTextEncoder(
             ortEnv = ortEnv,
             session = textEncSession,
             uncondIds = uncondIds,
-            condIds = condIds
+            condIds = condIds,
+            runOptions = runOptions
         )
+        ensureNotCancelled()
 
         // 2. Load/reuse cached VAE & UNet sessions to check native support for 512x768 / 768x512 dynamic shapes
         val (vaeEncSession, _) = getOrCreatePackSession(
@@ -346,6 +412,7 @@ object SdInpaintOnnxEngine {
 
         // 4. VAE Encoder -> masked & original latents [4, latentH, latentW]
         onProgress("2/4 Encoding ${targetDims.width}×${targetDims.height} (${targetDims.latentW}×${targetDims.latentH} latent)...")
+        ensureNotCancelled()
         val maskedLatent = runVaeEncoder(
             ortEnv = ortEnv,
             session = vaeEncSession,
@@ -353,8 +420,10 @@ object SdInpaintOnnxEngine {
             maskTarget = maskTarget,
             targetW = targetDims.width,
             targetH = targetDims.height,
-            applyZeroMask = true
+            applyZeroMask = true,
+            runOptions = runOptions
         )
+        ensureNotCancelled()
         val initLatent = runVaeEncoder(
             ortEnv = ortEnv,
             session = vaeEncSession,
@@ -362,7 +431,8 @@ object SdInpaintOnnxEngine {
             maskTarget = maskTarget,
             targetW = targetDims.width,
             targetH = targetDims.height,
-            applyZeroMask = false
+            applyZeroMask = false,
+            runOptions = runOptions
         )
         cropBmpTarget.recycle()
 
@@ -381,6 +451,7 @@ object SdInpaintOnnxEngine {
         )
 
         // 5. UNet Denoising Loop (Euler Discrete Scheduler)
+        ensureNotCancelled()
         val denoisedLatent = runUnetDenoisingLoop(
             ortEnv = ortEnv,
             session = unetSession,
@@ -394,6 +465,7 @@ object SdInpaintOnnxEngine {
             plan = plan,
             guidanceScale = clampedCfg,
             seed = seed,
+            runOptions = runOptions,
             onStep = { step, total ->
                 onProgress("3/4 Diffusion step $step/$total (${targetDims.width}×${targetDims.height} • $unetEpLabel)...")
             }
@@ -401,13 +473,16 @@ object SdInpaintOnnxEngine {
 
         // 6. VAE Decoder -> targetDims RGB Bitmap
         onProgress("4/4 Decoding ${targetDims.width}×${targetDims.height} to ${origW}×${origH}...")
+        ensureNotCancelled()
         val decodedCrop = runVaeDecoder(
             ortEnv = ortEnv,
             session = vaeDecSession,
             latent = denoisedLatent,
             targetW = targetDims.width,
-            targetH = targetDims.height
+            targetH = targetDims.height,
+            runOptions = runOptions
         )
+        ensureNotCancelled()
 
         // 7. Composite back onto exact origW x origH sourceBitmap without aspect stretching
         val resultBitmap = if (skipCompositeDebug) {
@@ -666,19 +741,22 @@ object SdInpaintOnnxEngine {
         ortEnv: OrtEnvironment,
         session: OrtSession,
         uncondIds: LongArray,
-        condIds: LongArray
+        condIds: LongArray,
+        runOptions: OrtSession.RunOptions
     ): Pair<FloatArray, FloatArray> {
         val inputName = session.inputNames.first()
         val inputType = (session.inputInfo[inputName]?.info as? TensorInfo)?.type ?: OnnxJavaType.INT32
         val shape = longArrayOf(1L, ClipBpeTokenizer.MAX_LENGTH.toLong())
 
+        ensureNotCancelled()
         val uncondOut = createIdsTensor(ortEnv, uncondIds, shape, inputType).use { t ->
-            session.run(mapOf(inputName to t)).use { res ->
+            session.run(mapOf(inputName to t), runOptions).use { res ->
                 readTensorAsFloats(res[0] as OnnxTensor)
             }
         }
+        ensureNotCancelled()
         val condOut = createIdsTensor(ortEnv, condIds, shape, inputType).use { t ->
-            session.run(mapOf(inputName to t)).use { res ->
+            session.run(mapOf(inputName to t), runOptions).use { res ->
                 readTensorAsFloats(res[0] as OnnxTensor)
             }
         }
@@ -692,7 +770,8 @@ object SdInpaintOnnxEngine {
         maskTarget: FloatArray,
         targetW: Int,
         targetH: Int,
-        applyZeroMask: Boolean
+        applyZeroMask: Boolean,
+        runOptions: OrtSession.RunOptions
     ): FloatArray {
         val hw = targetW * targetH
         val latentHW = (targetW / 8) * (targetH / 8)
@@ -715,8 +794,9 @@ object SdInpaintOnnxEngine {
         val inputType = (session.inputInfo[inputName]?.info as? TensorInfo)?.type ?: OnnxJavaType.FLOAT
         val shape = longArrayOf(1L, 3L, targetH.toLong(), targetW.toLong())
 
+        ensureNotCancelled()
         return createFloatOrHalfTensor(ortEnv, nchw, shape, inputType).use { inputTensor ->
-            session.run(mapOf(inputName to inputTensor)).use { res ->
+            session.run(mapOf(inputName to inputTensor), runOptions).use { res ->
                 val latent = readTensorAsFloats(res[0] as OnnxTensor)
                 val expectedSize = LATENT_CHANNELS * latentHW
                 val out = FloatArray(expectedSize)
@@ -741,6 +821,7 @@ object SdInpaintOnnxEngine {
         plan: DenoisePlan,
         guidanceScale: Float,
         seed: Long,
+        runOptions: OrtSession.RunOptions,
         onStep: (Int, Int) -> Unit
     ): FloatArray {
         val hwLatent = latentW * latentH
@@ -791,6 +872,7 @@ object SdInpaintOnnxEngine {
 
             createFloatOrHalfTensor(ortEnv, bothEmbeds, encoderShape2, encoderType).use { bothEncTensor ->
                 for ((localStep, stepIdx) in (plan.startStepIndex until plan.baseSteps).withIndex()) {
+                    ensureNotCancelled()
                     onStep(localStep + 1, plan.denoiseSteps)
                     val sigma = schedule.sigmas[stepIdx]
                     val nextSigma = schedule.sigmas[stepIdx + 1]
@@ -814,7 +896,8 @@ object SdInpaintOnnxEngine {
                                     sampleName to sTensor,
                                     timestepName to tTensor,
                                     encoderName to bothEncTensor
-                                )
+                                ),
+                                runOptions
                             ).use { res ->
                                 readTensorAsFloats(res[0] as OnnxTensor)
                             }
@@ -854,6 +937,7 @@ object SdInpaintOnnxEngine {
             createFloatOrHalfTensor(ortEnv, uncondEmbed, encoderShape, encoderType).use { uncondTensor ->
                 createFloatOrHalfTensor(ortEnv, condEmbed, encoderShape, encoderType).use { condTensor ->
                     for ((localStep, stepIdx) in (plan.startStepIndex until plan.baseSteps).withIndex()) {
+                        ensureNotCancelled()
                         onStep(localStep + 1, plan.denoiseSteps)
                         val sigma = schedule.sigmas[stepIdx]
                         val nextSigma = schedule.sigmas[stepIdx + 1]
@@ -884,17 +968,20 @@ object SdInpaintOnnxEngine {
                                         sampleName to sTensor,
                                         timestepName to tTensor,
                                         encoderName to uncondTensor
-                                    )
+                                    ),
+                                    runOptions
                                 ).use { res ->
                                     readTensorAsFloats(res[0] as OnnxTensor)
                                 }
 
+                                ensureNotCancelled()
                                 val condPred = session.run(
                                     mapOf(
                                         sampleName to sTensor,
                                         timestepName to tTensor,
                                         encoderName to condTensor
-                                    )
+                                    ),
+                                    runOptions
                                 ).use { res ->
                                     readTensorAsFloats(res[0] as OnnxTensor)
                                 }
@@ -936,7 +1023,8 @@ object SdInpaintOnnxEngine {
         session: OrtSession,
         latent: FloatArray,
         targetW: Int,
-        targetH: Int
+        targetH: Int,
+        runOptions: OrtSession.RunOptions
     ): Bitmap {
         val scaledLatent = FloatArray(latent.size) { i -> latent[i] / VAE_SCALE_FACTOR }
         val latentW = targetW / 8
@@ -945,8 +1033,9 @@ object SdInpaintOnnxEngine {
         val inputType = (session.inputInfo[inputName]?.info as? TensorInfo)?.type ?: OnnxJavaType.FLOAT
         val shape = longArrayOf(1L, LATENT_CHANNELS.toLong(), latentH.toLong(), latentW.toLong())
 
+        ensureNotCancelled()
         return createFloatOrHalfTensor(ortEnv, scaledLatent, shape, inputType).use { lTensor ->
-            session.run(mapOf(inputName to lTensor)).use { res ->
+            session.run(mapOf(inputName to lTensor), runOptions).use { res ->
                 val rgbFloats = readTensorAsFloats(res[0] as OnnxTensor)
                 val hw = targetW * targetH
                 val pixels = IntArray(hw)

@@ -4,7 +4,9 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
-import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
@@ -68,7 +70,8 @@ fun HistoryAuditTab(
     onDeleteLog: (Int) -> Unit,
     onClearAll: () -> Unit,
     onViewImageFullScreen: (Bitmap, String) -> Unit = { _, _ -> },
-    onSaveImageToFolder: (Bitmap) -> Unit = {},
+    onDownloadImage: (Bitmap) -> Unit = {},
+    onChangeDownloadFolder: (Bitmap) -> Unit = onDownloadImage,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -90,13 +93,13 @@ fun HistoryAuditTab(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Recent History (Last 3 Results)",
+                        text = "Recent History (Last 5 Results)",
                         style = MaterialTheme.typography.titleLarge,
                         color = Color(0xFF0F172A),
                         fontWeight = FontWeight.ExtraBold
                     )
                     Text(
-                        text = "Only the last 3 results are kept; older items auto-delete",
+                        text = "Only the last 5 results are kept; older items auto-delete",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color(0xFF334155),
                         fontWeight = FontWeight.Medium
@@ -142,7 +145,7 @@ fun HistoryAuditTab(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Run a Face Swap or Inpaint in Studio to keep up to 3 recent results here.",
+                            text = "Run a Face Swap or Inpaint in Studio to keep up to 5 recent results here.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = Color(0xFF334155)
                         )
@@ -160,7 +163,8 @@ fun HistoryAuditTab(
                             onViewFullScreen = { bmp ->
                                 onViewImageFullScreen(bmp, "History #${log.id}")
                             },
-                            onSaveToFolder = onSaveImageToFolder
+                            onDownloadImage = onDownloadImage,
+                            onChangeDownloadFolder = onChangeDownloadFolder
                         )
                     }
                 }
@@ -169,12 +173,14 @@ fun HistoryAuditTab(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AuditLogItemCard(
     log: SwapAuditLog,
     onDelete: () -> Unit,
     onViewFullScreen: (Bitmap) -> Unit,
-    onSaveToFolder: (Bitmap) -> Unit
+    onDownloadImage: (Bitmap) -> Unit,
+    onChangeDownloadFolder: (Bitmap) -> Unit
 ) {
     val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     val cachedBitmapState = produceState<Bitmap?>(initialValue = null, key1 = log.resultImagePath) {
@@ -312,20 +318,23 @@ private fun AuditLogItemCard(
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF0A2E26))
                             .border(1.dp, NeonEmerald, RoundedCornerShape(10.dp))
-                            .clickable { onSaveToFolder(cachedBitmap) }
-                            .testTag("history_btn_save_${log.id}"),
+                            .combinedClickable(
+                                onClick = { onDownloadImage(cachedBitmap) },
+                                onLongClick = { onChangeDownloadFolder(cachedBitmap) }
+                            )
+                            .testTag("history_btn_download_${log.id}"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.FolderOpen,
-                            contentDescription = "Save to Folder",
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Download to Saved Folder (Long-press to change folder)",
                             tint = NeonEmerald,
                             modifier = Modifier.size(17.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Save",
+                            text = "Download",
                             color = Color.White,
                             fontSize = 12.5.sp,
                             fontWeight = FontWeight.SemiBold

@@ -12,7 +12,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,14 +40,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Diamond
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Visibility
@@ -73,6 +76,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -175,10 +179,11 @@ fun InpaintPage(
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onMaskAndPromptUpdated: (Bitmap?, String?) -> Unit = { bmp, _ -> onMaskUpdated(bmp) },
     onCreateInpaint: () -> Unit,
-    onSaveToFolder: (Bitmap) -> Unit,
-    onDownloadToGallery: (Bitmap) -> Unit,
+    onOpenHistory: () -> Unit = {},
+    onDownloadToFolder: (Bitmap) -> Unit = {},
+    onChangeDownloadFolder: (Bitmap) -> Unit = onDownloadToFolder,
     onReuseResult: () -> Unit,
-    onOpenGalleryView: (Bitmap) -> Unit,
+    onCancelInpaint: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -846,31 +851,11 @@ fun InpaintPage(
                             }
                         }
 
-                        // OK Button to confirm and close the expanded card window
-                        Button(
+                        // Premium high-contrast OK button to confirm & close card
+                        PremiumCardOkButton(
                             onClick = { isMaskToolsCardExpanded = false },
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF0284C7),
-                                contentColor = Color.White
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("inpaint_mask_tools_ok_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = "Confirm and Close",
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "OK",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
-                        }
+                            tag = "inpaint_mask_tools_ok_btn"
+                        )
                     }
                 }
             }
@@ -1077,6 +1062,17 @@ fun InpaintPage(
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                PremiumCardOkButton(
+                                    onClick = { isPromptCardExpanded = false },
+                                    tag = "inpaint_prompt_ok_btn"
+                                )
+                            }
                         }
                     }
                 }
@@ -1267,25 +1263,26 @@ fun InpaintPage(
                 }
             }
 
-            // Bottom 4 Action Buttons: Save | Download | Reuse | Gallery
+            // Bottom 4 Action Buttons: History | Download | Reuse | Cancel
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 InpaintBottomActionButton(
-                    icon = Icons.Default.Save,
-                    label = "Save",
-                    enabled = resultBmp != null,
-                    onClick = { resultBmp?.let(onSaveToFolder) },
+                    icon = Icons.Default.History,
+                    label = "History",
+                    enabled = true,
+                    onClick = onOpenHistory,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("inpaint_btn_save")
+                        .testTag("inpaint_btn_history")
                 )
                 InpaintBottomActionButton(
                     icon = Icons.Default.Download,
                     label = "Download",
-                    enabled = resultBmp != null,
-                    onClick = { resultBmp?.let(onDownloadToGallery) },
+                    enabled = resultBmp != null && !uiState.isInpainting,
+                    onClick = { resultBmp?.let(onDownloadToFolder) },
+                    onLongClick = { resultBmp?.let(onChangeDownloadFolder) },
                     modifier = Modifier
                         .weight(1f)
                         .testTag("inpaint_btn_download")
@@ -1293,20 +1290,34 @@ fun InpaintPage(
                 InpaintBottomActionButton(
                     icon = Icons.Default.Refresh,
                     label = "Reuse",
-                    enabled = resultBmp != null,
+                    enabled = resultBmp != null && !uiState.isInpainting,
                     onClick = onReuseResult,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("inpaint_btn_reuse")
                 )
                 InpaintBottomActionButton(
-                    icon = Icons.Default.PhotoLibrary,
-                    label = "Gallery",
-                    enabled = resultBmp != null,
-                    onClick = { resultBmp?.let(onOpenGalleryView) },
+                    icon = Icons.Default.Close,
+                    label = "Cancel",
+                    enabled = uiState.isInpainting,
+                    onClick = onCancelInpaint,
+                    containerColor = if (uiState.isInpainting) Color(0xFFDC2626) else Color(0xFFDCFCE7),
+                    borderColor = if (uiState.isInpainting) Color(0xFFFCA5A5) else Color(0xFF4ADE80),
+                    contentColor = if (uiState.isInpainting) Color.White else Color(0xFF15803D),
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("inpaint_btn_gallery")
+                        .testTag("inpaint_btn_cancel")
+                )
+            }
+
+            if (resultBmp != null && !uiState.isInpainting) {
+                Text(
+                    text = "Tip: First Download asks folder once. Long-press Download to change folder.",
+                    color = mutedSlate,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
 
@@ -1662,21 +1673,87 @@ private fun ModelDropdownEntry(
 }
 
 @Composable
+private fun PremiumCardOkButton(
+    onClick: () -> Unit,
+    tag: String,
+    modifier: Modifier = Modifier
+) {
+    val okShape = RoundedCornerShape(14.dp)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .shadow(elevation = 6.dp, shape = okShape)
+            .clip(okShape)
+            .background(
+                Brush.horizontalGradient(
+                    listOf(
+                        Color(0xFF047857),
+                        Color(0xFF0D9488),
+                        Color(0xFF0284C7)
+                    )
+                )
+            )
+            .border(1.3.dp, Color(0xCC6EE7B7), okShape)
+            .clickable(onClick = onClick)
+            .testTag(tag),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = "Confirm and Close",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+            Text(
+                text = "OK",
+                color = Color.White,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 15.sp,
+                letterSpacing = 0.8.sp
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun InpaintBottomActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
+    containerColor: Color? = null,
+    borderColor: Color? = null,
+    contentColor: Color? = null
 ) {
     val shape = RoundedCornerShape(12.dp)
+    val resolvedBg = containerColor ?: if (enabled) Color(0xE6FFFFFF) else Color(0x88FFFFFF)
+    val resolvedBorder = borderColor ?: Color(0xB3FFFFFF)
+    val resolvedContent = contentColor ?: if (enabled) Color(0xFF0F172A) else Color(0xFF64748B)
     Row(
         modifier = modifier
             .height(48.dp)
             .clip(shape)
-            .background(if (enabled) Color(0xE6FFFFFF) else Color(0x88FFFFFF))
-            .border(1.2.dp, Color(0xB3FFFFFF), shape)
-            .clickable(enabled = enabled, onClick = onClick)
+            .background(resolvedBg)
+            .border(1.2.dp, resolvedBorder, shape)
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(
+                        enabled = enabled,
+                        onClick = onClick,
+                        onLongClick = onLongClick
+                    )
+                } else {
+                    Modifier.clickable(enabled = enabled, onClick = onClick)
+                }
+            )
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -1684,14 +1761,14 @@ private fun InpaintBottomActionButton(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = if (enabled) Color(0xFF0F172A) else Color(0xFF64748B),
+            tint = resolvedContent,
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = label,
-            color = if (enabled) Color(0xFF0F172A) else Color(0xFF64748B),
-            fontWeight = FontWeight.SemiBold,
+            color = resolvedContent,
+            fontWeight = FontWeight.Bold,
             fontSize = 12.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis

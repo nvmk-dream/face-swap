@@ -66,7 +66,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.content.Intent
 import android.graphics.Bitmap
-import android.provider.MediaStore
 import com.example.onnx.ModelSlot
 import com.example.ui.AppTab
 import com.example.ui.FaceSwapViewModel
@@ -105,7 +104,7 @@ fun FaceSwapStudioApp(
     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
 
     var pendingImportSlot by remember { mutableStateOf(ModelSlot.DETECTOR) }
-    var pendingSaveBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var pendingDownloadBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var zoomViewerState by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -225,25 +224,41 @@ fun FaceSwapStudioApp(
         }
     }
 
-    // Mobile Memory -> Folder saver for Inpaint & History results
-    val folderSaveLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("image/png")
-    ) { uri ->
-        val bmp = pendingSaveBitmap
-        pendingSaveBitmap = null
-        if (uri != null && bmp != null) {
-            viewModel.saveBitmapToFolderUri(uri, bmp)
+    // One-time Mobile Folder Picker for Download (Saved once, reused automatically; long-press to change)
+    val downloadFolderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        val bmp = pendingDownloadBitmap
+        pendingDownloadBitmap = null
+        if (treeUri != null) {
+            com.example.util.ImageGalleryHelper.saveDownloadTreeUri(context, treeUri)
+            if (bmp != null) {
+                viewModel.saveBitmapToTreeFolder(treeUri, bmp)
+            } else {
+                val folderName = com.example.util.ImageGalleryHelper.getSavedDownloadFolderDisplayName(context, treeUri) ?: "Selected Folder"
+                viewModel.showStatusMessage("Download folder updated: $folderName")
+            }
         }
     }
 
-    val requestSaveToFolder: (Bitmap) -> Unit = { bmp ->
-        pendingSaveBitmap = bmp
-        folderSaveLauncher.launch("FaceSwapStudio_${System.currentTimeMillis()}.png")
+    val requestOneTimeFolderDownload: (Bitmap) -> Unit = { bmp ->
+        val savedTreeUri = com.example.util.ImageGalleryHelper.getSavedDownloadTreeUri(context)
+        if (savedTreeUri != null) {
+            viewModel.saveBitmapToTreeFolder(savedTreeUri, bmp)
+        } else {
+            pendingDownloadBitmap = bmp
+            downloadFolderPicker.launch(null)
+        }
+    }
+
+    val requestChangeDownloadFolder: (Bitmap?) -> Unit = { bmp ->
+        pendingDownloadBitmap = bmp
+        downloadFolderPicker.launch(null)
     }
 
     if (uiState.currentTab != AppTab.STUDIO) {
         BackHandler {
-            viewModel.selectTab(AppTab.STUDIO)
+            viewModel.returnFromHistoryOrSettings()
         }
     }
 
@@ -334,8 +349,7 @@ fun FaceSwapStudioApp(
                     IconButton(
                         onClick = {
                             if (isInsideSettings) {
-                                viewModel.selectStudioSubPage(StudioSubPage.FRONT_HOME)
-                                viewModel.selectTab(AppTab.STUDIO)
+                                viewModel.returnFromHistoryOrSettings()
                             } else {
                                 viewModel.selectTab(AppTab.MODELS)
                             }
@@ -408,8 +422,7 @@ fun FaceSwapStudioApp(
                                 .background(Color(0xFF132042))
                                 .border(1.dp, Color(0xFF284078), RoundedCornerShape(50))
                                 .clickable {
-                                    viewModel.selectStudioSubPage(StudioSubPage.FRONT_HOME)
-                                    viewModel.selectTab(AppTab.STUDIO)
+                                    viewModel.returnFromHistoryOrSettings()
                                 }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                                 .testTag("nav_tab_studio"),
@@ -423,7 +436,7 @@ fun FaceSwapStudioApp(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "← Back to Swap",
+                                text = if (uiState.historyReturnSubPage == StudioSubPage.INPAINT_PAGE) "← Back to Inpaint" else "← Back to Swap",
                                 color = Color.White,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 12.5.sp
@@ -638,24 +651,11 @@ fun FaceSwapStudioApp(
                         }
                         viewModel.runInpaint()
                     },
+                    onCancelInpaint = viewModel::cancelInpaint,
                     onReuseInpaintResult = viewModel::reuseInpaintResultAsSource,
-                    onSaveBitmapToFolder = requestSaveToFolder,
-                    onDownloadBitmapToGallery = { bmp ->
-                        viewModel.saveAnyBitmapToGallery(bmp, isHd = true, label = "Inpaint")
-                    },
-                    onOpenInpaintGallery = { bmp ->
-                        viewModel.saveAnyBitmapToGallery(bmp, isHd = true, label = "Inpaint")
-                        val launched = runCatching {
-                            val galleryIntent = Intent(
-                                Intent.ACTION_VIEW,
-                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                            )
-                            context.startActivity(galleryIntent)
-                        }.isSuccess
-                        if (!launched) {
-                            zoomViewerState = bmp to "Inpaint Result"
-                        }
-                    },
+                    onOpenInpaintHistory = viewModel::openHistoryFromInpaint,
+                    onDownloadInpaintResult = requestOneTimeFolderDownload,
+                    onChangeDownloadFolder = { bmp -> requestChangeDownloadFolder(bmp) },
                     onViewImageFullScreen = { bmp, title ->
                         zoomViewerState = bmp to title
                     }
@@ -685,7 +685,8 @@ fun FaceSwapStudioApp(
                     onViewImageFullScreen = { bmp, title ->
                         zoomViewerState = bmp to title
                     },
-                    onSaveImageToFolder = requestSaveToFolder
+                    onDownloadImage = requestOneTimeFolderDownload,
+                    onChangeDownloadFolder = { bmp -> requestChangeDownloadFolder(bmp) }
                 )
 
                 AppTab.ETHICS -> SafetyLicensesTab()
@@ -696,7 +697,7 @@ fun FaceSwapStudioApp(
                     bitmap = bmp,
                     title = title,
                     onDismiss = { zoomViewerState = null },
-                    onSaveToFolder = { requestSaveToFolder(bmp) },
+                    onSaveToFolder = { requestOneTimeFolderDownload(bmp) },
                     onSaveToGallery = {
                         viewModel.saveAnyBitmapToGallery(bmp, isHd = true, label = title)
                     }

@@ -162,10 +162,11 @@ fun StudioTab(
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onInpaintMaskAndPromptUpdated: (android.graphics.Bitmap?, String?) -> Unit = { bmp, _ -> onInpaintMaskUpdated(bmp) },
     onRunInpaint: () -> Unit = {},
+    onCancelInpaint: () -> Unit = {},
     onReuseInpaintResult: () -> Unit = {},
-    onSaveBitmapToFolder: (android.graphics.Bitmap) -> Unit = {},
-    onDownloadBitmapToGallery: (android.graphics.Bitmap) -> Unit = {},
-    onOpenInpaintGallery: (android.graphics.Bitmap) -> Unit = {},
+    onOpenInpaintHistory: () -> Unit = {},
+    onDownloadInpaintResult: (android.graphics.Bitmap) -> Unit = {},
+    onChangeDownloadFolder: (android.graphics.Bitmap) -> Unit = onDownloadInpaintResult,
     onViewImageFullScreen: (android.graphics.Bitmap, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
@@ -227,10 +228,11 @@ fun StudioTab(
             onApplyAccessorySelectionAndExpand = onApplyAccessorySelectionAndExpand,
             onMaskAndPromptUpdated = onInpaintMaskAndPromptUpdated,
             onCreateInpaint = onRunInpaint,
-            onSaveToFolder = onSaveBitmapToFolder,
-            onDownloadToGallery = onDownloadBitmapToGallery,
+            onOpenHistory = onOpenInpaintHistory,
+            onDownloadToFolder = onDownloadInpaintResult,
+            onChangeDownloadFolder = onChangeDownloadFolder,
             onReuseResult = onReuseInpaintResult,
-            onOpenGalleryView = onOpenInpaintGallery,
+            onCancelInpaint = onCancelInpaint,
             onViewResultFullScreen = { bmp ->
                 onViewImageFullScreen(bmp, "Inpaint Result")
             },
