@@ -2,6 +2,12 @@ package com.example.ui.tabs
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -66,6 +72,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -190,6 +197,7 @@ fun InpaintPage(
     var showOriginalCompare by remember { mutableStateOf(false) }
     var showPositivePromptScreen by remember { mutableStateOf(false) }
     var showNegativePromptScreen by remember { mutableStateOf(false) }
+    var isPromptCardExpanded by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -628,87 +636,172 @@ fun InpaintPage(
                     }
                 }
 
-                // Dedicated Positive Prompt Card (tap to open full-screen Positive Prompt editor)
-                val promptShape = RoundedCornerShape(14.dp)
-                Row(
+                // Single Collapsible Card combining both Positive Prompt & Negative Prompt
+                val promptShape = RoundedCornerShape(16.dp)
+                val promptArrowRotation by animateFloatAsState(
+                    targetValue = if (isPromptCardExpanded) 180f else 0f,
+                    label = "prompt_card_arrow_rotation"
+                )
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(promptShape)
                         .background(frostedCardBg)
                         .border(1.2.dp, frostedBorderColor, promptShape)
-                        .clickable { showPositivePromptScreen = true }
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
-                        .testTag("inpaint_prompt_input"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .testTag("inpaint_combined_prompt_card")
                 ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    // Collapsible Header Row with 🔽 open/close toggle
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isPromptCardExpanded = !isPromptCardExpanded }
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                            .testTag("inpaint_prompt_card_toggle"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            text = "Positive Prompt",
-                            color = Color(0xFF0284C7),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
-                        Text(
-                            text = uiState.inpaintPrompt.ifBlank { "Tap to open Positive Prompt screen (e.g. Modern dress)..." },
-                            color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.75f) else darkSlate,
-                            fontSize = 14.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Positive & Negative Prompts",
+                                color = Color(0xFF0284C7),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = if (uiState.inpaintPrompt.isBlank()) {
+                                    "Tap to open & edit Positive / Negative prompts"
+                                } else {
+                                    uiState.inpaintPrompt
+                                },
+                                color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.8f) else darkSlate,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(Color(0x1A0284C7)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (isPromptCardExpanded) "Close Prompts" else "Open Prompts",
+                                tint = Color(0xFF0284C7),
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .rotate(promptArrowRotation)
+                            )
+                        }
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = "Edit Positive Prompt",
-                        tint = Color(0xFF0284C7),
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
 
-                // Dedicated Negative Prompt Card (tap to open full-screen Negative Prompt editor)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(promptShape)
-                        .background(Color(0xD9FFF7F7))
-                        .border(1.2.dp, Color(0xB3FECACA), promptShape)
-                        .clickable { showNegativePromptScreen = true }
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                        .testTag("inpaint_negative_prompt_card"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    AnimatedVisibility(
+                        visible = isPromptCardExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
                     ) {
-                        Text(
-                            text = "Negative Prompt",
-                            color = Color(0xFFDC2626),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
-                        Text(
-                            text = uiState.inpaintNegativePrompt.ifBlank { SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT },
-                            color = darkSlate,
-                            fontSize = 13.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            HorizontalDivider(
+                                color = Color(0x3364748B),
+                                thickness = 1.dp,
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            // Positive Prompt Row inside the unified card
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showPositivePromptScreen = true }
+                                    .padding(horizontal = 14.dp, vertical = 11.dp)
+                                    .testTag("inpaint_prompt_input"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = "Positive Prompt",
+                                        color = Color(0xFF0284C7),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                    Text(
+                                        text = uiState.inpaintPrompt.ifBlank {
+                                            "Tap to open Positive Prompt screen (e.g. Modern dress)..."
+                                        },
+                                        color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.75f) else darkSlate,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "Edit Positive Prompt",
+                                    tint = Color(0xFF0284C7),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            HorizontalDivider(
+                                color = Color(0x33EF4444),
+                                thickness = 1.dp,
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            // Negative Prompt Row inside the unified card
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0x66FFF7F7))
+                                    .clickable { showNegativePromptScreen = true }
+                                    .padding(horizontal = 14.dp, vertical = 11.dp)
+                                    .testTag("inpaint_negative_prompt_card"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = "Negative Prompt",
+                                        color = Color(0xFFDC2626),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                    Text(
+                                        text = uiState.inpaintNegativePrompt.ifBlank {
+                                            SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT
+                                        },
+                                        color = darkSlate,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "Edit Negative Prompt",
+                                    tint = Color(0xFFDC2626),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = "Edit Negative Prompt",
-                        tint = Color(0xFFDC2626),
-                        modifier = Modifier.size(18.dp)
-                    )
                 }
 
                 // Optional Depth Guard Row (protects foreground subject from background mask bleed)
