@@ -190,6 +190,7 @@ fun InpaintPage(
     var showPositivePromptScreen by remember { mutableStateOf(false) }
     var showNegativePromptScreen by remember { mutableStateOf(false) }
     var isPromptCardExpanded by remember { mutableStateOf(false) }
+    var isMaskToolsCardExpanded by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -590,6 +591,290 @@ fun InpaintPage(
                 )
             }
 
+            // Single Collapsible Card above Prompt: Depth Guard + 1-Tap Auto Remove + OK button
+            val maskToolsShape = RoundedCornerShape(16.dp)
+            val maskToolsArrowRotation by animateFloatAsState(
+                targetValue = if (isMaskToolsCardExpanded) 180f else 0f,
+                label = "mask_tools_card_arrow_rotation"
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(maskToolsShape)
+                    .background(frostedCardBg)
+                    .border(1.2.dp, frostedBorderColor, maskToolsShape)
+                    .testTag("inpaint_mask_tools_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { isMaskToolsCardExpanded = !isMaskToolsCardExpanded }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .testTag("inpaint_mask_tools_card_toggle"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Depth Guard & 1-Tap Remove",
+                                color = Color(0xFF0284C7),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            if (uiState.isComputingAccessoryMask) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 1.8.dp,
+                                    color = Color(0xFF0284C7)
+                                )
+                            } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
+                                Text(
+                                    text = "Mask Ready ✓",
+                                    color = Color(0xFF059669),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        val accSummary = if (uiState.selectedAccessoryTargets.isEmpty()) {
+                            "Auto Remove: None"
+                        } else {
+                            "Remove: " + uiState.selectedAccessoryTargets.joinToString(", ") { it.shortLabel }
+                        }
+                        val depthSummary = if (uiState.isDepthModelReady) {
+                            if (uiState.inpaintDepthGuardEnabled) "Depth Guard: ON • " else "Depth Guard: OFF • "
+                        } else {
+                            ""
+                        }
+                        Text(
+                            text = depthSummary + accSummary,
+                            color = darkSlate,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x1A0284C7)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (isMaskToolsCardExpanded) "Close Depth Guard & 1-Tap Remove" else "Open Depth Guard & 1-Tap Remove",
+                            tint = Color(0xFF0284C7),
+                            modifier = Modifier
+                                .size(22.dp)
+                                .rotate(maskToolsArrowRotation)
+                        )
+                    }
+                }
+
+                AnimatedVisibility(
+                    visible = isMaskToolsCardExpanded,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        HorizontalDivider(
+                            color = Color(0x3364748B),
+                            thickness = 1.dp
+                        )
+
+                        // Depth Guard Switch Row
+                        if (uiState.isDepthModelReady) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xB3FFFFFF))
+                                    .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Depth Guard (Protect Foreground)",
+                                        color = darkSlate,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.5.sp
+                                    )
+                                    Text(
+                                        text = if (uiState.inpaintDepthMap != null) {
+                                            "Depth cached • ${uiState.inpaintDepthMap.modelUsedLabel}"
+                                        } else {
+                                            "Uses Depth Anything V2 / sentis-MiDaS"
+                                        },
+                                        color = mutedSlate,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Switch(
+                                    checked = uiState.inpaintDepthGuardEnabled,
+                                    onCheckedChange = onDepthGuardChanged,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color(0xFF059669),
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color(0xFF94A3B8)
+                                    ),
+                                    modifier = Modifier.testTag("inpaint_depth_guard_switch")
+                                )
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0x80FFFFFF))
+                                    .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Depth Guard: Install Depth Anything V2 or sentis-MiDaS in Models tab to enable",
+                                    color = mutedSlate,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        // 1-Tap Accessory Removal Chips (Multi-select: Cap, Cooling Glass, Jewels -> Auto Mask + Auto Prompt)
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "1-Tap Auto Remove (Mask + Prompt)",
+                                    color = darkSlate,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (uiState.isComputingAccessoryMask) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(12.dp),
+                                            strokeWidth = 1.8.dp,
+                                            color = Color(0xFF0284C7)
+                                        )
+                                        Text(
+                                            text = "Scanning...",
+                                            color = Color(0xFF0284C7),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
+                                    Text(
+                                        text = "Mask Ready ✓",
+                                        color = Color(0xFF059669),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    Triple(AccessoryTarget.CAP, Icons.Default.Face, "inpaint_quick_remove_cap"),
+                                    Triple(AccessoryTarget.GLASSES, Icons.Default.Visibility, "inpaint_quick_remove_glasses"),
+                                    Triple(AccessoryTarget.JEWELS, Icons.Default.Diamond, "inpaint_quick_remove_jewels")
+                                ).forEach { (target, iconVec, tag) ->
+                                    val isSelected = target in uiState.selectedAccessoryTargets
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .background(if (isSelected) Color(0xFF0284C7) else Color(0xD9FFFFFF))
+                                            .border(
+                                                1.dp,
+                                                if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
+                                                RoundedCornerShape(50)
+                                            )
+                                            .clickable(enabled = !uiState.isComputingAccessoryMask && !uiState.isInpainting) {
+                                                onToggleQuickAccessoryRemoval(target)
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 7.dp)
+                                            .testTag(tag),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = iconVec,
+                                            contentDescription = target.removalButtonLabel,
+                                            tint = if (isSelected) Color.White else Color(0xFF0284C7),
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Text(
+                                            text = target.removalButtonLabel,
+                                            color = if (isSelected) Color.White else darkSlate,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // OK Button to confirm and close the expanded card window
+                        Button(
+                            onClick = { isMaskToolsCardExpanded = false },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF0284C7),
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("inpaint_mask_tools_ok_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Confirm and Close",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "OK",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+
             // Prompt Header Row: "Prompt" left | "Fast Mode" + Switch right
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(
@@ -796,136 +1081,6 @@ fun InpaintPage(
                     }
                 }
 
-                // Optional Depth Guard Row (protects foreground subject from background mask bleed)
-                if (uiState.isDepthModelReady) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xB3FFFFFF))
-                            .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Depth Guard (Protect Foreground)",
-                                color = darkSlate,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.5.sp
-                            )
-                            Text(
-                                text = if (uiState.inpaintDepthMap != null) {
-                                    "Depth cached • ${uiState.inpaintDepthMap.modelUsedLabel}"
-                                } else {
-                                    "Uses Depth Anything V2 / sentis-MiDaS"
-                                },
-                                color = mutedSlate,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Switch(
-                            checked = uiState.inpaintDepthGuardEnabled,
-                            onCheckedChange = onDepthGuardChanged,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = Color(0xFF059669),
-                                uncheckedThumbColor = Color.White,
-                                uncheckedTrackColor = Color(0xFF94A3B8)
-                            ),
-                            modifier = Modifier.testTag("inpaint_depth_guard_switch")
-                        )
-                    }
-                }
-
-                // 1-Tap Accessory Removal Chips (Multi-select: Cap, Cooling Glass, Jewels -> Auto Mask + Auto Prompt)
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "1-Tap Auto Remove (Mask + Prompt)",
-                            color = darkSlate,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (uiState.isComputingAccessoryMask) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(12.dp),
-                                    strokeWidth = 1.8.dp,
-                                    color = Color(0xFF0284C7)
-                                )
-                                Text(
-                                    text = "Scanning...",
-                                    color = Color(0xFF0284C7),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
-                            Text(
-                                text = "Mask Ready ✓",
-                                color = Color(0xFF059669),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf(
-                            Triple(AccessoryTarget.CAP, Icons.Default.Face, "inpaint_quick_remove_cap"),
-                            Triple(AccessoryTarget.GLASSES, Icons.Default.Visibility, "inpaint_quick_remove_glasses"),
-                            Triple(AccessoryTarget.JEWELS, Icons.Default.Diamond, "inpaint_quick_remove_jewels")
-                        ).forEach { (target, iconVec, tag) ->
-                            val isSelected = target in uiState.selectedAccessoryTargets
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50))
-                                    .background(if (isSelected) Color(0xFF0284C7) else Color(0xD9FFFFFF))
-                                    .border(
-                                        1.dp,
-                                        if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
-                                        RoundedCornerShape(50)
-                                    )
-                                    .clickable(enabled = !uiState.isComputingAccessoryMask && !uiState.isInpainting) {
-                                        onToggleQuickAccessoryRemoval(target)
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)
-                                    .testTag(tag),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                Icon(
-                                    imageVector = iconVec,
-                                    contentDescription = target.removalButtonLabel,
-                                    tint = if (isSelected) Color.White else Color(0xFF0284C7),
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Text(
-                                    text = target.removalButtonLabel,
-                                    color = if (isSelected) Color.White else darkSlate,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                }
 
             }
 
