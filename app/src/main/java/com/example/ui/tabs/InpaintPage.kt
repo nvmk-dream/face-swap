@@ -105,8 +105,32 @@ private val POSITIVE_BOOSTER_TAGS = listOf(
     "natural skin texture",
     "high detail",
     "clean lighting",
-    "sleeveless dress",
-    "red silk saree"
+    "naked",
+    "nude",
+    "nudity",
+    "exposed breasts",
+    "exposed buttocks",
+    "visible genitals",
+    "see through fabric",
+    "sexy",
+    "cleavage",
+    "nipples",
+    "visible nipples",
+    "sitting straddled",
+    "show perky boobs"
+    "huge saggy natural boobs",
+    "boobs",
+    "curvy",
+    "big ass hole",
+    "show ass hole",
+    "gigantic ass",
+    "gaping anus",
+    "gegantic boobs",
+    "skinny voluptuous body",
+    "wide hip",
+    "wide waist",
+    "large giant breasts",
+
 )
 
 private val NEGATIVE_QUALITY_TAGS = listOf(
@@ -120,6 +144,11 @@ private val NEGATIVE_QUALITY_TAGS = listOf(
     "watermark",
     "text",
     "oversaturated"
+    "fully clothed",
+    "cloths",
+    "dress",
+    "covered breasts",
+    "full body coverage"
 )
 
 /**
