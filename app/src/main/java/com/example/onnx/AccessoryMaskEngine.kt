@@ -25,10 +25,10 @@ enum class AccessoryTarget(
     val removalPromptPhrase: String
 ) {
     CAP(
-        id = "cap",
-        shortLabel = "Cap",
-        removalButtonLabel = "Remove Cap",
-        removalPromptPhrase = "natural hair and forehead, bare head, clean realistic skin, no cap, no hat"
+        id = "dress",
+        shortLabel = "dress",
+        removalButtonLabel = "Remove dress",
+        removalPromptPhrase = "natural hair and forehead, bare head, clean realistic skin, no dress, no cloths"
     ),
     GLASSES(
         id = "glasses",
