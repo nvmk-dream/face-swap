@@ -105,32 +105,34 @@ object SdInpaintPackManager {
         val subDirs = root.listFiles()?.filter { it.isDirectory } ?: return emptyList()
 
         for (dir in subDirs) {
-            val packType = SdInpaintPackType.entries.firstOrNull { it.id == dir.name }
-                ?: classifyPackType(dir.name)
-            val textEnc = selectBestOnnxInComponentDir(File(dir, "text_encoder"), packType) ?: continue
-            val unet = selectBestOnnxInComponentDir(File(dir, "unet"), packType) ?: continue
-            val vaeEnc = selectBestOnnxInComponentDir(File(dir, "vae_encoder"), packType) ?: continue
-            val vaeDec = selectBestOnnxInComponentDir(File(dir, "vae_decoder"), packType) ?: continue
-            val tokSub = File(dir, "tokenizer")
-            val tokDir = when {
-                tokSub.exists() && tokSub.isDirectory && hasTokenizerFiles(tokSub) -> tokSub
-                hasTokenizerFiles(dir) -> dir
-                else -> tokSub.takeIf { it.exists() && it.isDirectory }
-            }
-            val totalBytes = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+            runCatching {
+                val packType = SdInpaintPackType.entries.firstOrNull { it.id == dir.name }
+                    ?: classifyPackType(dir.name)
+                val textEnc = selectBestOnnxInComponentDir(File(dir, "text_encoder"), packType) ?: return@runCatching
+                val unet = selectBestOnnxInComponentDir(File(dir, "unet"), packType) ?: return@runCatching
+                val vaeEnc = selectBestOnnxInComponentDir(File(dir, "vae_encoder"), packType) ?: return@runCatching
+                val vaeDec = selectBestOnnxInComponentDir(File(dir, "vae_decoder"), packType) ?: return@runCatching
+                val tokSub = File(dir, "tokenizer")
+                val tokDir = when {
+                    tokSub.exists() && tokSub.isDirectory && hasTokenizerFiles(tokSub) -> tokSub
+                    hasTokenizerFiles(dir) -> dir
+                    else -> tokSub.takeIf { it.exists() && it.isDirectory }
+                }
+                val totalBytes = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
-            val candidate = InstalledSdInpaintPack(
-                packType = packType,
-                packDir = dir,
-                textEncoderOnnx = textEnc,
-                unetOnnx = unet,
-                vaeEncoderOnnx = vaeEnc,
-                vaeDecoderOnnx = vaeDec,
-                tokenizerDir = tokDir,
-                totalSizeBytes = totalBytes
-            )
-            if (candidate.isComplete) {
-                packs.add(candidate)
+                val candidate = InstalledSdInpaintPack(
+                    packType = packType,
+                    packDir = dir,
+                    textEncoderOnnx = textEnc,
+                    unetOnnx = unet,
+                    vaeEncoderOnnx = vaeEnc,
+                    vaeDecoderOnnx = vaeDec,
+                    tokenizerDir = tokDir,
+                    totalSizeBytes = totalBytes
+                )
+                if (candidate.isComplete) {
+                    packs.add(candidate)
+                }
             }
         }
         return packs.sortedBy { it.packType.priorityOrder }
@@ -288,19 +290,57 @@ object SdInpaintPackManager {
     private fun fileContainsAnyAsciiToken(file: File, tokens: List<String>): Boolean {
         if (tokens.isEmpty() || !file.exists()) return false
         return runCatching {
-            val maxScanBytes = minOf(file.length(), 8L * 1024L * 1024L).toInt()
-            val bytes = ByteArray(maxScanBytes)
+            val tokenBytesList = tokens.filter { it.isNotEmpty() }.map { it.toByteArray(Charsets.ISO_8859_1) }
+            if (tokenBytesList.isEmpty()) return false
+            val maxTokenLen = tokenBytesList.maxOf { it.size }
+            val maxScanBytes = minOf(file.length(), 8L * 1024L * 1024L)
+            val chunkSize = 64 * 1024
+            val buffer = ByteArray(chunkSize + maxTokenLen)
+            var overlap = 0
+            var totalRead = 0L
             file.inputStream().use { input ->
-                var offset = 0
-                while (offset < maxScanBytes) {
-                    val read = input.read(bytes, offset, maxScanBytes - offset)
+                while (totalRead < maxScanBytes) {
+                    val toRead = minOf(chunkSize.toLong(), maxScanBytes - totalRead).toInt()
+                    val read = input.read(buffer, overlap, toRead)
                     if (read <= 0) break
-                    offset += read
+                    totalRead += read
+                    val validLen = overlap + read
+                    for (needle in tokenBytesList) {
+                        if (containsByteSequence(buffer, validLen, needle)) {
+                            return true
+                        }
+                    }
+                    overlap = minOf(maxTokenLen - 1, validLen).coerceAtLeast(0)
+                    if (overlap > 0) {
+                        System.arraycopy(buffer, validLen - overlap, buffer, 0, overlap)
+                    }
                 }
             }
-            val text = String(bytes, Charsets.ISO_8859_1)
-            tokens.any { token -> text.contains(token, ignoreCase = false) }
+            false
         }.getOrDefault(false)
+    }
+
+    private fun containsByteSequence(haystack: ByteArray, haystackLen: Int, needle: ByteArray): Boolean {
+        if (needle.isEmpty() || haystackLen < needle.size) return false
+        val first = needle[0]
+        val limit = haystackLen - needle.size
+        var i = 0
+        while (i <= limit) {
+            if (haystack[i] == first) {
+                var match = true
+                var j = 1
+                while (j < needle.size) {
+                    if (haystack[i + j] != needle[j]) {
+                        match = false
+                        break
+                    }
+                    j++
+                }
+                if (match) return true
+            }
+            i++
+        }
+        return false
     }
 
     private data class TreeNodeFile(

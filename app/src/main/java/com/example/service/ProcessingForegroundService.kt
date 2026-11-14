@@ -33,43 +33,58 @@ class ProcessingForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         ensureChannels(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        activeInstance = this
+        serviceActive = true
         ensureChannels(this)
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "FaceSwap Studio Running"
         val detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Processing image offline in background..."
         val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
 
-        acquireCpuWakeLock()
+        acquireOrRenewCpuWakeLock(forceRenew = false)
         val notification = buildOngoingNotification(this, title, detail, progress)
         val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         } else {
             0
         }
-        ServiceCompat.startForeground(this, ONGOING_NOTIFICATION_ID, notification, serviceType)
+        runCatching {
+            ServiceCompat.startForeground(this, ONGOING_NOTIFICATION_ID, notification, serviceType)
+        }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         serviceActive = false
+        startRequestedAtMs = 0L
         releaseCpuWakeLock()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        runCatching {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        }
         super.onDestroy()
     }
 
-    private fun acquireCpuWakeLock() {
-        if (wakeLock?.isHeld == true) return
+    private fun acquireOrRenewCpuWakeLock(forceRenew: Boolean) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!forceRenew && wakeLock?.isHeld == true && (now - lastWakeLockRenewMs) < WAKELOCK_RENEW_INTERVAL_MS) {
+            return
+        }
         runCatching {
             val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-            val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
+            val lock = wakeLock ?: pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
                 setReferenceCounted(false)
-                // Safety ceiling of 15 minutes so battery is never stranded
-                acquire(15L * 60L * 1000L)
             }
+            // Renew 30-minute safety window while job is actively making progress
+            lock.acquire(WAKELOCK_TIMEOUT_MS)
             wakeLock = lock
+            lastWakeLockRenewMs = now
         }
     }
 
@@ -79,6 +94,7 @@ class ProcessingForegroundService : Service() {
                 if (lock.isHeld) lock.release()
             }
             wakeLock = null
+            lastWakeLockRenewMs = 0L
         }
     }
 
@@ -88,6 +104,9 @@ class ProcessingForegroundService : Service() {
         private const val ONGOING_NOTIFICATION_ID = 4201
         private const val DONE_NOTIFICATION_ID = 4202
         private const val WAKELOCK_TAG = "FaceSwapStudio:OnnxBackgroundWakeLock"
+        private const val WAKELOCK_TIMEOUT_MS = 30L * 60L * 1000L
+        private const val WAKELOCK_RENEW_INTERVAL_MS = 5L * 60L * 1000L
+        private const val NOTIFY_THROTTLE_MS = 400L
 
         private const val EXTRA_TITLE = "extra_title"
         private const val EXTRA_DETAIL = "extra_detail"
@@ -95,6 +114,18 @@ class ProcessingForegroundService : Service() {
 
         @Volatile
         private var serviceActive = false
+
+        @Volatile
+        private var activeInstance: ProcessingForegroundService? = null
+
+        @Volatile
+        private var startRequestedAtMs = 0L
+
+        @Volatile
+        private var lastWakeLockRenewMs = 0L
+
+        @Volatile
+        private var lastOngoingNotifyAtMs = 0L
 
         fun startOrUpdate(
             context: Context,
@@ -104,7 +135,12 @@ class ProcessingForegroundService : Service() {
         ) {
             val appCtx = context.applicationContext
             ensureChannels(appCtx)
-            if (!serviceActive) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            activeInstance?.acquireOrRenewCpuWakeLock(forceRenew = false)
+
+            val shouldAttemptStart = !serviceActive && (now - startRequestedAtMs > 2000L)
+            if (shouldAttemptStart) {
+                startRequestedAtMs = now
                 val intent = Intent(appCtx, ProcessingForegroundService::class.java).apply {
                     putExtra(EXTRA_TITLE, title)
                     putExtra(EXTRA_DETAIL, detail)
@@ -114,12 +150,21 @@ class ProcessingForegroundService : Service() {
                     ContextCompat.startForegroundService(appCtx, intent)
                 }.isSuccess
                 if (launched) {
-                    serviceActive = true
+                    lastOngoingNotifyAtMs = now
+                    return
                 }
-            } else if (canPostNotifications(appCtx)) {
+            }
+
+            // Throttle intermediate notification ticks to avoid Android OS rate-limiting
+            val isNearCompletion = progressPercent >= 95
+            if (!isNearCompletion && (now - lastOngoingNotifyAtMs) < NOTIFY_THROTTLE_MS) {
+                return
+            }
+            if (canPostNotifications(appCtx)) {
                 runCatching {
                     val notification = buildOngoingNotification(appCtx, title, detail, progressPercent)
                     NotificationManagerCompat.from(appCtx).notify(ONGOING_NOTIFICATION_ID, notification)
+                    lastOngoingNotifyAtMs = now
                 }
             }
         }
@@ -132,6 +177,9 @@ class ProcessingForegroundService : Service() {
         ) {
             val appCtx = context.applicationContext
             serviceActive = false
+            startRequestedAtMs = 0L
+            lastOngoingNotifyAtMs = 0L
+            activeInstance?.releaseCpuWakeLock()
             runCatching {
                 appCtx.stopService(Intent(appCtx, ProcessingForegroundService::class.java))
             }

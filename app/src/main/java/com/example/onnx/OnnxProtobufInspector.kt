@@ -317,6 +317,7 @@ object OnnxProtobufInspector {
     )
 
     fun getModelsRootDir(context: Context): File {
+        appContextRef = context.applicationContext ?: context
         val root = File(context.filesDir, MODELS_ROOT_DIR)
         if (!root.exists()) root.mkdirs()
         for (sub in SUBDIRECTORIES) {
@@ -408,10 +409,82 @@ object OnnxProtobufInspector {
     private val globalSessionCache = java.util.concurrent.ConcurrentHashMap<String, CachedOrtSessionEntry>()
     private val globalSessionLock = Any()
 
+    @Volatile
+    private var appContextRef: Context? = null
+
+    private const val CRASH_GUARD_PREFS = "ort_native_crash_guard_v1"
+    private const val KEY_PENDING_MODEL = "pending_model_key"
+    private const val KEY_PENDING_RANK = "pending_stage_rank"
+    private const val PREFIX_MIN_RANK = "min_safe_rank_"
+    private const val RANK_XNNPACK = 0
+    private const val RANK_CPU_ALL_OPT = 1
+    private const val RANK_CPU_BASIC = 2
+    private const val RANK_CPU_NO_OPT = 3
+    private const val RANK_QUARANTINED = 4
+
+    private fun buildCrashGuardModelKey(file: File): String =
+        "${file.name.lowercase()}_${file.length()}_${file.lastModified()}"
+
+    @Synchronized
+    internal fun promoteStuckCrashBreadcrumbIfAny(context: Context? = appContextRef) {
+        val ctx = context?.applicationContext ?: context ?: return
+        appContextRef = ctx
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        val pendingKey = prefs.getString(KEY_PENDING_MODEL, null)
+        val pendingRank = prefs.getInt(KEY_PENDING_RANK, -1)
+        if (!pendingKey.isNullOrBlank() && pendingRank >= 0) {
+            val prevMin = prefs.getInt("$PREFIX_MIN_RANK$pendingKey", 0)
+            val nextSafeRank = maxOf(prevMin, pendingRank + 1).coerceAtMost(RANK_QUARANTINED)
+            prefs.edit()
+                .putInt("$PREFIX_MIN_RANK$pendingKey", nextSafeRank)
+                .remove(KEY_PENDING_MODEL)
+                .remove(KEY_PENDING_RANK)
+                .commit()
+        }
+    }
+
+    internal fun getMinSafeRankForFile(file: File, context: Context? = appContextRef): Int {
+        promoteStuckCrashBreadcrumbIfAny(context)
+        val ctx = context?.applicationContext ?: context ?: return 0
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return 0
+        val key = buildCrashGuardModelKey(file)
+        return prefs.getInt("$PREFIX_MIN_RANK$key", 0).coerceIn(0, RANK_QUARANTINED)
+    }
+
+    internal fun clearCrashGuardForFile(file: File, context: Context? = appContextRef) {
+        val ctx = context?.applicationContext ?: context ?: return
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        val key = buildCrashGuardModelKey(file)
+        prefs.edit()
+            .remove("$PREFIX_MIN_RANK$key")
+            .apply()
+    }
+
+    private fun markPendingSessionAttempt(file: File, rank: Int) {
+        val ctx = appContextRef ?: return
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        val key = buildCrashGuardModelKey(file)
+        prefs.edit()
+            .putString(KEY_PENDING_MODEL, key)
+            .putInt(KEY_PENDING_RANK, rank)
+            .commit()
+    }
+
+    private fun clearPendingSessionAttempt() {
+        val ctx = appContextRef ?: return
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        if (prefs.contains(KEY_PENDING_MODEL)) {
+            prefs.edit()
+                .remove(KEY_PENDING_MODEL)
+                .remove(KEY_PENDING_RANK)
+                .commit()
+        }
+    }
+
     /**
      * Loads and caches an [OrtSession] for [file] once and reuses it across subsequent calls.
-     * To prevent native C++ OutOfMemory / Android lmkd SIGKILL on mobile devices, at most ONE
-     * heavy model session (> 25 MB including external .data weights) is kept resident in native RAM at a time.
+     * Routes creation through [createSessionWithFallback] (with Native Crash Breadcrumb Guard)
+     * so startup preloads and dynamic models never hard-crash in `libonnxruntime.so`.
      */
     fun getOrCreateCachedSession(
         ortEnv: OrtEnvironment?,
@@ -500,8 +573,8 @@ object OnnxProtobufInspector {
     /**
      * Creates a memory-safe, optimized `OrtSession.SessionOptions` for Android mobile execution.
      * Never combines NNAPI and XNNPACK in the same session (which causes native SIGSEGV/SIGABRT on
-     * Android HALs), caps intra-op threads to 2..4 performance cores, and keeps memoryPattern &
-     * CPUArenaAllocator OFF to curb native heap growth.
+     * Android HALs), keeps NNAPI OFF by default, caps intra-op threads to 2..4 performance cores,
+     * and keeps memoryPattern & CPUArenaAllocator OFF to curb native heap growth.
      */
     fun createOptimizedSessionOptions(
         preferHardwareAcceleration: Boolean = false,
@@ -519,8 +592,7 @@ object OnnxProtobufInspector {
         opts.setOptimizationLevel(optLevel)
         if (effectiveNnapi) {
             runCatching { opts.addNnapi() }
-        }
-        if (effectiveXnnpack) {
+        } else if (effectiveXnnpack) {
             val xnnAdded = runCatching {
                 opts.addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
                 true
@@ -534,8 +606,8 @@ object OnnxProtobufInspector {
     }
 
     /**
-     * Creates an [OrtSession] trying NNAPI alone (if requested) -> XNNPACK -> CPU ALL_OPT -> CPU BASIC_OPT -> CPU NO_OPT
-     * so mobile ONNX graphs accelerate safely without native EP partitioner crashes.
+     * Creates an [OrtSession] trying NNAPI alone (only if requested) -> XNNPACK -> CPU ALL_OPT -> CPU BASIC_OPT -> CPU NO_OPT
+     * while avoiding unstable NNAPI+XNNPACK mixing and guarding against native crash loops.
      */
     fun createSessionWithFallback(
         ortEnv: OrtEnvironment,
@@ -544,33 +616,56 @@ object OnnxProtobufInspector {
         intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     ): Pair<OrtSession, String> {
         val threads = intraOpThreads.coerceIn(1, 4)
+        val minSafeRank = getMinSafeRankForFile(modelFile)
+        if (minSafeRank >= RANK_QUARANTINED) {
+            throw IllegalStateException(
+                "Skipped ${modelFile.name}: previous native crash detected even in CPU(NO_OPT). Re-import the model to retry."
+            )
+        }
+
         data class Attempt(
+            val rank: Int,
             val label: String,
             val nnapi: Boolean,
             val xnnpack: Boolean,
             val optLevel: OrtSession.SessionOptions.OptLevel
         )
-        val attempts = buildList {
+        val allAttempts = buildList {
             if (preferHardwareAcceleration) {
-                add(Attempt("NNAPI", nnapi = true, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
+                // Keep NNAPI at rank 0 only when user explicitly toggled Hardware Acceleration ON;
+                // if NNAPI crashes natively, breadcrumb promotes minSafeRank -> 1 (XNNPACK) so next run skips NNAPI.
+                add(Attempt(RANK_XNNPACK, "NNAPI", nnapi = true, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
+                add(Attempt(RANK_CPU_ALL_OPT, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                add(Attempt(RANK_CPU_BASIC, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                add(Attempt(RANK_CPU_NO_OPT, "CPU(NO_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.NO_OPT))
+            } else {
+                add(Attempt(RANK_XNNPACK, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                add(Attempt(RANK_CPU_ALL_OPT, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                add(Attempt(RANK_CPU_BASIC, "CPU(BASIC)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
+                add(Attempt(RANK_CPU_NO_OPT, "CPU(NO_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.NO_OPT))
             }
-            add(Attempt("XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
-            add(Attempt("CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
-            add(Attempt("CPU(BASIC)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
+        }
+        val attempts = allAttempts.filter { it.rank >= minSafeRank }.ifEmpty {
+            listOf(allAttempts.last())
         }
 
         var lastError: Throwable? = null
         for (attempt in attempts) {
-            val res = runCatching {
-                createOptimizedSessionOptions(
-                    preferHardwareAcceleration = attempt.nnapi,
-                    intraOpThreads = threads,
-                    useXnnpack = attempt.xnnpack,
-                    useNnapi = attempt.nnapi,
-                    optLevel = attempt.optLevel
-                ).use { opts ->
-                    ortEnv.createSession(modelFile.absolutePath, opts) to attempt.label
+            markPendingSessionAttempt(modelFile, attempt.rank)
+            val res = try {
+                runCatching {
+                    createOptimizedSessionOptions(
+                        preferHardwareAcceleration = attempt.nnapi,
+                        intraOpThreads = threads,
+                        useXnnpack = attempt.xnnpack,
+                        useNnapi = attempt.nnapi,
+                        optLevel = attempt.optLevel
+                    ).use { opts ->
+                        ortEnv.createSession(modelFile.absolutePath, opts) to attempt.label
+                    }
                 }
+            } finally {
+                clearPendingSessionAttempt()
             }
             if (res.isSuccess) return res.getOrThrow()
             lastError = res.exceptionOrNull()
@@ -578,15 +673,7 @@ object OnnxProtobufInspector {
                 System.gc()
             }
         }
-        return createOptimizedSessionOptions(
-            preferHardwareAcceleration = false,
-            intraOpThreads = threads,
-            useXnnpack = false,
-            useNnapi = false,
-            optLevel = OrtSession.SessionOptions.OptLevel.NO_OPT
-        ).use { opts ->
-            ortEnv.createSession(modelFile.absolutePath, opts) to "CPU(NO_OPT)"
-        }
+        throw (lastError ?: IllegalStateException("Unable to initialize ONNX Runtime session for ${modelFile.name}"))
     }
 
     private const val PREFS_NAME = "onnx_model_folder_prefs"
@@ -1145,6 +1232,7 @@ object OnnxProtobufInspector {
                 legacyRootFile.delete()
             }
 
+            clearCrashGuardForFile(destFile, context)
             Result.success(destFile)
         } catch (oom: OutOfMemoryError) {
             System.gc()
@@ -1155,6 +1243,8 @@ object OnnxProtobufInspector {
     }
 
     fun inspectAllModels(context: Context, ortEnv: OrtEnvironment?): List<OnnxModelInspection> {
+        appContextRef = context.applicationContext ?: context
+        promoteStuckCrashBreadcrumbIfAny(appContextRef)
         syncBundledAssetsIfPresent(context)
         return ModelSlot.entries.map { slot ->
             inspectSlot(context, ortEnv, slot)

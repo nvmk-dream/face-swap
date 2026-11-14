@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -12,10 +13,11 @@ import com.example.onnx.AccessoryTarget
 import com.example.onnx.ClipBpeTokenizer
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.InteractiveInpaintEngine
-import android.app.Application
+import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
+import com.example.service.ProcessingForegroundService
 import com.example.ui.FaceSwapViewModel
 import com.example.util.ImageGalleryHelper
 import kotlinx.coroutines.flow.first
@@ -26,6 +28,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
@@ -379,8 +382,50 @@ class InpaintAndHistoryRobolectricTest {
     }
 
     @Test
+    fun mainActivity_coldLaunchesSafelyEvenWhenDetectorOnnxIsPresent_andCrashBreadcrumbPromotesFallbackRank() {
+        val detFile = OnnxProtobufInspector.resolveModelFile(context, com.example.onnx.ModelSlot.DETECTOR)
+        detFile.parentFile?.mkdirs()
+        // Place a dummy invalid ONNX file on disk (simulates previously uploaded det_10g.onnx on device)
+        detFile.writeBytes(ByteArray(4096) { 0x1A })
+
+        // Verify crash breadcrumb guard promotes safe fallback rank and resets cleanly on re-import
+        OnnxProtobufInspector.clearCrashGuardForFile(detFile, context)
+        assertEquals(0, OnnxProtobufInspector.getMinSafeRankForFile(detFile, context))
+
+        val guardPrefs = context.getSharedPreferences("ort_native_crash_guard_v1", Context.MODE_PRIVATE)
+        val modelKey = "${detFile.name.lowercase()}_${detFile.length()}_${detFile.lastModified()}"
+        guardPrefs.edit()
+            .putString("pending_model_key", modelKey)
+            .putInt("pending_stage_rank", 0)
+            .commit()
+
+        assertEquals(1, OnnxProtobufInspector.getMinSafeRankForFile(detFile, context))
+        OnnxProtobufInspector.clearCrashGuardForFile(detFile, context)
+        assertEquals(0, OnnxProtobufInspector.getMinSafeRankForFile(detFile, context))
+
+        // Cold launch MainActivity with models present on disk -> must not crash
+        val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+        assertNotNull(controller.get())
+        controller.pause().stop().destroy()
+
+        // Background service start/update/finish lifecycle must also succeed safely
+        ProcessingForegroundService.startOrUpdate(
+            context = context,
+            title = "Test Job",
+            detail = "Step 1/8",
+            progressPercent = 12
+        )
+        ProcessingForegroundService.finishAndNotify(
+            context = context,
+            showCompletionNotification = false,
+            completedTitle = "Done",
+            completedBody = "Done"
+        )
+    }
+
+    @Test
     fun startupModelService_verifiesDetectorOnDiskSafely_andDefaultsHardwareAccelOff() {
-        val modelsRoot = com.example.onnx.OnnxProtobufInspector.getModelsRootDir(context)
+        val modelsRoot = OnnxProtobufInspector.getModelsRootDir(context)
         modelsRoot.deleteRecursively()
         val faceSwapDir = File(modelsRoot, "face_swap").apply { mkdirs() }
         File(faceSwapDir, "det_10g.onnx").writeBytes(ByteArray(4096) { 9 })
@@ -389,14 +434,14 @@ class InpaintAndHistoryRobolectricTest {
         assertFalse(defaultState.preferHardwareAcceleration)
 
         // Ensure EP isolation never enables NNAPI and XNNPACK together
-        val (nnapiOn, xnnOnWhenNnapi) = com.example.onnx.OnnxProtobufInspector.resolveEffectiveEpFlags(
+        val (nnapiOn, xnnOnWhenNnapi) = OnnxProtobufInspector.resolveEffectiveEpFlags(
             useNnapi = true,
             useXnnpack = true
         )
         assertTrue(nnapiOn)
         assertFalse(xnnOnWhenNnapi)
 
-        val (nnapiOff, xnnOnCpu) = com.example.onnx.OnnxProtobufInspector.resolveEffectiveEpFlags(
+        val (nnapiOff, xnnOnCpu) = OnnxProtobufInspector.resolveEffectiveEpFlags(
             useNnapi = false,
             useXnnpack = true
         )
