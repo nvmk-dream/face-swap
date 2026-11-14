@@ -170,6 +170,7 @@ fun InpaintPage(
     onNegativePromptChanged: (String) -> Unit = {},
     onResetNegativePrompt: () -> Unit = {},
     onFastModeChanged: (Boolean) -> Unit,
+    onDenoiseStepsChanged: (Int) -> Unit = {},
     onStrengthChanged: (Float) -> Unit = {},
     onCfgScaleChanged: (Float) -> Unit = {},
     onDepthGuardChanged: (Boolean) -> Unit = {},
@@ -196,6 +197,7 @@ fun InpaintPage(
     var showNegativePromptScreen by remember { mutableStateOf(false) }
     var isPromptCardExpanded by remember { mutableStateOf(false) }
     var isMaskToolsCardExpanded by remember { mutableStateOf(false) }
+    var isTuningCardExpanded by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -554,46 +556,186 @@ fun InpaintPage(
                 }
             }
 
-            // Diffusion Tuning Card (Strength 1..10 & CFG 1..15) directly above Prompt
+            // Collapsible Diffusion Tuning Card (Denoise • Strength • CFG + Simple Tamil Notes + OK)
+            val tuningCardShape = RoundedCornerShape(16.dp)
+            val tuningArrowRotation by animateFloatAsState(
+                targetValue = if (isTuningCardExpanded) 180f else 0f,
+                label = "tuning_card_arrow_rotation"
+            )
+            val strengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
+            val cfgDisplay = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f)
+            val denoiseDisplay = uiState.inpaintDenoiseSteps.coerceIn(4, 24)
+            val isFastCfgActive = cfgDisplay <= 1.05f
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
+                    .clip(tuningCardShape)
                     .background(frostedCardBg)
-                    .border(1.2.dp, frostedBorderColor, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-                    .testTag("inpaint_tuning_card"),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                    .border(1.2.dp, frostedBorderColor, tuningCardShape)
+                    .testTag("inpaint_tuning_card")
             ) {
-                val strengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
-                CleanTuningSliderRow(
-                    label = "Strength",
-                    value = strengthDisplay,
-                    valueRange = 1.0f..10.0f,
-                    steps = 17,
-                    onValueChange = { sliderVal ->
-                        val snapped = (sliderVal * 2f).roundToInt() / 2f
-                        onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
-                    },
-                    onResetDefault = { onStrengthChanged(0.70f) },
-                    sliderTag = "inpaint_strength_slider",
-                    valueTag = "inpaint_strength_value",
-                    labelColor = darkSlate
-                )
-                CleanTuningSliderRow(
-                    label = "CFG",
-                    value = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f),
-                    valueRange = 1.0f..15.0f,
-                    steps = 27,
-                    onValueChange = { sliderVal ->
-                        val snapped = (sliderVal * 2f).roundToInt() / 2f
-                        onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
-                    },
-                    onResetDefault = { onCfgScaleChanged(7.0f) },
-                    sliderTag = "inpaint_cfg_slider",
-                    valueTag = "inpaint_cfg_value",
-                    labelColor = darkSlate
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { isTuningCardExpanded = !isTuningCardExpanded }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .testTag("inpaint_tuning_card_toggle"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Denoise • Strength • CFG",
+                                color = Color(0xFF0284C7),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            if (isFastCfgActive) {
+                                Text(
+                                    text = "⚡ 2× Speed",
+                                    color = Color(0xFF059669),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Denoise: $denoiseDisplay • Strength: ${String.format(Locale.US, "%.1f", strengthDisplay)} • CFG: ${String.format(Locale.US, "%.1f", cfgDisplay)}",
+                            color = darkSlate,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x1A0284C7)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (isTuningCardExpanded) "Close Denoise Strength CFG" else "Open Denoise Strength CFG",
+                            tint = Color(0xFF0284C7),
+                            modifier = Modifier
+                                .size(22.dp)
+                                .rotate(tuningArrowRotation)
+                        )
+                    }
+                }
+
+                AnimatedVisibility(
+                    visible = isTuningCardExpanded,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        HorizontalDivider(
+                            color = Color(0x3364748B),
+                            thickness = 1.dp
+                        )
+
+                        // 1. Denoise Steps Slider + Simple Tamil Note
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CleanTuningSliderRow(
+                                label = "Denoise",
+                                value = denoiseDisplay.toFloat(),
+                                valueRange = 4f..24f,
+                                steps = 19,
+                                onValueChange = { sliderVal ->
+                                    onDenoiseStepsChanged(sliderVal.roundToInt().coerceIn(4, 24))
+                                },
+                                onResetDefault = {
+                                    onDenoiseStepsChanged(if (uiState.inpaintFastMode) 12 else 20)
+                                },
+                                sliderTag = "inpaint_denoise_slider",
+                                valueTag = "inpaint_denoise_value",
+                                labelColor = darkSlate,
+                                isIntegerDisplay = true
+                            )
+                            SimpleTamilNoteBox(
+                                lowTitle = "குறைவு (4 - 10):",
+                                lowDesc = "படம் வேகமாக (Speed-ஆ) வரும்; ஆனால் சின்ன விவரங்கள் சற்று மங்கலாக இருக்கலாம்.",
+                                highTitle = "அதிகம் (16 - 24):",
+                                highDesc = "படம் மிகத் தெளிவாகவும் நேர்த்தியாகவும் வரும்; ஆனால் ரெடியாக அதிக நேரம் எடுக்கும். (10 - 14 சிறந்தது)",
+                                tag = "inpaint_denoise_note"
+                            )
+                        }
+
+                        // 2. Strength Slider + Simple Tamil Note
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CleanTuningSliderRow(
+                                label = "Strength",
+                                value = strengthDisplay,
+                                valueRange = 1.0f..10.0f,
+                                steps = 17,
+                                onValueChange = { sliderVal ->
+                                    val snapped = (sliderVal * 2f).roundToInt() / 2f
+                                    onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
+                                },
+                                onResetDefault = { onStrengthChanged(0.70f) },
+                                sliderTag = "inpaint_strength_slider",
+                                valueTag = "inpaint_strength_value",
+                                labelColor = darkSlate
+                            )
+                            SimpleTamilNoteBox(
+                                lowTitle = "குறைவு (1.0 - 4.0):",
+                                lowDesc = "பழைய போட்டோவின் சாயல் அதிகம் மாறாமல், லேசாக மட்டும் மாற்றம் செய்யும்.",
+                                highTitle = "அதிகம் (7.5 - 10.0):",
+                                highDesc = "நீங்கள் வரைந்த இடத்தில் பழையதை முழுமையாக நீக்கி, புதிதாகப் படத்தை உருவாக்கும்.",
+                                tag = "inpaint_strength_note"
+                            )
+                        }
+
+                        // 3. CFG Slider + Simple Tamil Note (highlighting <= 1.05 fast mode)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            CleanTuningSliderRow(
+                                label = "CFG",
+                                value = cfgDisplay,
+                                valueRange = 1.0f..15.0f,
+                                steps = 27,
+                                onValueChange = { sliderVal ->
+                                    val snapped = (sliderVal * 2f).roundToInt() / 2f
+                                    onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
+                                },
+                                onResetDefault = { onCfgScaleChanged(7.0f) },
+                                sliderTag = "inpaint_cfg_slider",
+                                valueTag = "inpaint_cfg_value",
+                                labelColor = darkSlate
+                            )
+                            SimpleTamilNoteBox(
+                                lowTitle = "குறைவு (CFG ≤ 1.0):",
+                                lowDesc = "⚡ 2 மடங்கு வேகம்! இயற்கையாகவும் மென்மையாகவும் வரும்; ஆனால் Prompt-ஐ லேசாகவே எடுத்துக் கொள்ளும்.",
+                                highTitle = "அதிகம் (8.0 - 15.0):",
+                                highDesc = "நீங்கள் எழுதிய Prompt-இல் உள்ளபடியே கண்டிப்பாக மாற்றும்; மிக அதிகமானால் கலர் செயற்கையாகத் தெரியலாம்.",
+                                highlightLow = isFastCfgActive,
+                                tag = "inpaint_cfg_note"
+                            )
+                        }
+
+                        // Premium OK button to confirm & auto-close card
+                        PremiumCardOkButton(
+                            onClick = { isTuningCardExpanded = false },
+                            tag = "inpaint_tuning_ok_btn"
+                        )
+                    }
+                }
             }
 
             // Single Collapsible Card above Prompt: Depth Guard + 1-Tap Auto Remove + OK button
@@ -1776,6 +1918,43 @@ private fun InpaintBottomActionButton(
     }
 }
 
+@Composable
+private fun SimpleTamilNoteBox(
+    lowTitle: String,
+    lowDesc: String,
+    highTitle: String,
+    highDesc: String,
+    highlightLow: Boolean = false,
+    tag: String
+) {
+    val bgColor = if (highlightLow) Color(0x14059669) else Color(0x88F8FAFC)
+    val borderColor = if (highlightLow) Color(0x4D059669) else Color(0x3364748B)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(bgColor)
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .testTag(tag),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(
+            text = "• $lowTitle $lowDesc",
+            color = if (highlightLow) Color(0xFF065F46) else Color(0xFF334155),
+            fontSize = 11.2.sp,
+            lineHeight = 15.sp,
+            fontWeight = if (highlightLow) FontWeight.SemiBold else FontWeight.Normal
+        )
+        Text(
+            text = "• $highTitle $highDesc",
+            color = Color(0xFF334155),
+            fontSize = 11.2.sp,
+            lineHeight = 15.sp
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CleanTuningSliderRow(
@@ -1787,7 +1966,8 @@ private fun CleanTuningSliderRow(
     onResetDefault: () -> Unit,
     sliderTag: String,
     valueTag: String,
-    labelColor: Color
+    labelColor: Color,
+    isIntegerDisplay: Boolean = false
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1838,8 +2018,13 @@ private fun CleanTuningSliderRow(
                 }
             }
         )
+        val formattedValue = if (isIntegerDisplay) {
+            value.roundToInt().toString()
+        } else {
+            String.format(Locale.US, "%.1f", value)
+        }
         Text(
-            text = "(${String.format(Locale.US, "%.1f", value)})",
+            text = "($formattedValue)",
             color = Color(0xFF475569),
             fontWeight = FontWeight.Medium,
             fontSize = 14.sp,

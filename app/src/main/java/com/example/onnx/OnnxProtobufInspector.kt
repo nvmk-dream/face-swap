@@ -581,14 +581,15 @@ object OnnxProtobufInspector {
         intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
         useXnnpack: Boolean = !preferHardwareAcceleration,
         useNnapi: Boolean = preferHardwareAcceleration,
-        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT
+        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT,
+        useArenaAndMemoryPattern: Boolean = false
     ): OrtSession.SessionOptions {
         val threads = intraOpThreads.coerceIn(1, 4)
         val (effectiveNnapi, effectiveXnnpack) = resolveEffectiveEpFlags(useNnapi = useNnapi, useXnnpack = useXnnpack)
         val opts = OrtSession.SessionOptions()
         opts.setIntraOpNumThreads(threads)
-        opts.setMemoryPatternOptimization(false)
-        opts.setCPUArenaAllocator(false)
+        opts.setMemoryPatternOptimization(useArenaAndMemoryPattern)
+        opts.setCPUArenaAllocator(useArenaAndMemoryPattern)
         opts.setOptimizationLevel(optLevel)
         if (effectiveNnapi) {
             runCatching { opts.addNnapi() }
@@ -613,7 +614,8 @@ object OnnxProtobufInspector {
         ortEnv: OrtEnvironment,
         modelFile: File,
         preferHardwareAcceleration: Boolean = false,
-        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
+        useArenaAndMemoryPattern: Boolean = false
     ): Pair<OrtSession, String> {
         val threads = intraOpThreads.coerceIn(1, 4)
         val minSafeRank = getMinSafeRankForFile(modelFile)
@@ -659,7 +661,8 @@ object OnnxProtobufInspector {
                         intraOpThreads = threads,
                         useXnnpack = attempt.xnnpack,
                         useNnapi = attempt.nnapi,
-                        optLevel = attempt.optLevel
+                        optLevel = attempt.optLevel,
+                        useArenaAndMemoryPattern = useArenaAndMemoryPattern
                     ).use { opts ->
                         ortEnv.createSession(modelFile.absolutePath, opts) to attempt.label
                     }

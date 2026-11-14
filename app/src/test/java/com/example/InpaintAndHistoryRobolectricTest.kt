@@ -331,6 +331,11 @@ class InpaintAndHistoryRobolectricTest {
         assertEquals(16, fastMin.baseSteps)
         assertEquals(2, fastMin.denoiseSteps)
 
+        val customTen = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.70f, customSteps = 10)
+        assertEquals(10, customTen.baseSteps)
+        assertEquals(7, customTen.denoiseSteps)
+        assertEquals(3, customTen.startStepIndex)
+
         val mask = FloatArray(32 * 32)
         mask[16 * 32 + 16] = 1.0f
         val dilated = SdInpaintOnnxEngine.dilateBinaryMask(mask, 32, 32, radiusPx = 5)
@@ -375,6 +380,16 @@ class InpaintAndHistoryRobolectricTest {
 
         vm.setInpaintStrength(1.20f)
         assertEquals(1.00f, vm.uiState.value.inpaintStrength, 0.001f)
+
+        assertEquals(12, vm.uiState.value.inpaintDenoiseSteps)
+        vm.setInpaintFastMode(false)
+        assertEquals(20, vm.uiState.value.inpaintDenoiseSteps)
+        vm.setInpaintDenoiseSteps(2)
+        assertEquals(4, vm.uiState.value.inpaintDenoiseSteps)
+        vm.setInpaintDenoiseSteps(99)
+        assertEquals(24, vm.uiState.value.inpaintDenoiseSteps)
+        vm.setInpaintFastMode(true)
+        assertEquals(12, vm.uiState.value.inpaintDenoiseSteps)
 
         vm.updateAccessorySelectionAndExpand(setOf(AccessoryTarget.CAP), 6f)
         assertTrue(vm.uiState.value.segformerAutoSelectedForAccessory)

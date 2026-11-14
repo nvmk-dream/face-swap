@@ -152,6 +152,7 @@ data class FaceSwapUiState(
     val inpaintPrompt: String = "",
     val inpaintNegativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
     val inpaintFastMode: Boolean = true,
+    val inpaintDenoiseSteps: Int = 12,
     val inpaintStrength: Float = 0.70f,
     val inpaintCfgScale: Float = 7.0f,
     val inpaintDepthGuardEnabled: Boolean = false,
@@ -1536,7 +1537,16 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setInpaintFastMode(fastMode: Boolean) {
-        _uiState.update { it.copy(inpaintFastMode = fastMode) }
+        _uiState.update {
+            it.copy(
+                inpaintFastMode = fastMode,
+                inpaintDenoiseSteps = if (fastMode) 12 else 20
+            )
+        }
+    }
+
+    fun setInpaintDenoiseSteps(steps: Int) {
+        _uiState.update { it.copy(inpaintDenoiseSteps = steps.coerceIn(4, 24)) }
     }
 
     fun setInpaintStrength(strength: Float) {
@@ -1968,6 +1978,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         enableDepthGuard = state.inpaintDepthGuardEnabled,
                         strength = state.inpaintStrength,
                         guidanceScale = state.inpaintCfgScale,
+                        denoiseSteps = state.inpaintDenoiseSteps,
                         onProgress = { progressMsg ->
                             if (!runningScope.isActive || BackgroundProcessingCoordinator.activeInpaintJob !== launchedJob) return@inpaint
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }

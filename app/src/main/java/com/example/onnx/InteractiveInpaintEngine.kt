@@ -148,6 +148,7 @@ object InteractiveInpaintEngine {
         enableDepthGuard: Boolean = false,
         strength: Float = SdInpaintOnnxEngine.DEFAULT_STRENGTH,
         guidanceScale: Float = SdInpaintOnnxEngine.DEFAULT_GUIDANCE_SCALE,
+        denoiseSteps: Int? = null,
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
         cancelRequested = false
@@ -186,6 +187,7 @@ object InteractiveInpaintEngine {
                             preferHardwareAccel = preferHardwareAccel,
                             strength = strength,
                             guidanceScale = guidanceScale,
+                            customSteps = denoiseSteps,
                             onProgress = onProgress
                         )
                     }
@@ -206,6 +208,7 @@ object InteractiveInpaintEngine {
                         preferHardwareAccel = preferHardwareAccel,
                         strength = strength,
                         guidanceScale = guidanceScale,
+                        customSteps = denoiseSteps,
                         onProgress = onProgress
                     )
                 } else {
@@ -220,6 +223,7 @@ object InteractiveInpaintEngine {
                         preferHardwareAccel = preferHardwareAccel,
                         strength = strength,
                         guidanceScale = guidanceScale,
+                        customSteps = denoiseSteps,
                         onProgress = onProgress
                     )
                 }
