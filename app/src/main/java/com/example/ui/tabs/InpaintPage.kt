@@ -117,7 +117,7 @@ private val POSITIVE_BOOSTER_TAGS = listOf(
     "nipples",
     "visible nipples",
     "sitting straddled",
-    "show perky boobs"
+    "show perky boobs",
     "huge saggy natural boobs",
     "boobs",
     "curvy",
@@ -129,7 +129,7 @@ private val POSITIVE_BOOSTER_TAGS = listOf(
     "skinny voluptuous body",
     "wide hip",
     "wide waist",
-    "large giant breasts",
+    "large giant breasts"
 
 )
 
@@ -143,7 +143,7 @@ private val NEGATIVE_QUALITY_TAGS = listOf(
     "mutated limbs",
     "watermark",
     "text",
-    "oversaturated"
+    "oversaturated",
     "fully clothed",
     "cloths",
     "dress",
