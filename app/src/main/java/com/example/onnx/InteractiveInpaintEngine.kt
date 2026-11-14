@@ -345,8 +345,12 @@ object InteractiveInpaintEngine {
         val origW = sourceBitmap.width
         val origH = sourceBitmap.height
 
-        OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel).use { opts ->
-            ortEnv.createSession(lamaFile.absolutePath, opts).use { session ->
+        val (lamaSession, _) = OnnxProtobufInspector.createSessionWithFallback(
+            ortEnv = ortEnv,
+            modelFile = lamaFile,
+            preferHardwareAcceleration = preferHardwareAccel
+        )
+        lamaSession.use { session ->
                 val names = session.inputNames.toList()
                 val imgName = names.firstOrNull { it.contains("image", ignoreCase = true) } ?: names[0]
                 val maskName = names.firstOrNull { it.contains("mask", ignoreCase = true) }
@@ -411,7 +415,6 @@ object InteractiveInpaintEngine {
                                 outBmp.recycle()
                                 resized
                             }
-                        }
                     }
                 }
             }

@@ -377,4 +377,51 @@ class InpaintAndHistoryRobolectricTest {
         vm.updateAccessorySelectionAndExpand(emptySet(), 6f)
         assertFalse(vm.uiState.value.segformerAutoSelectedForAccessory)
     }
+
+    @Test
+    fun startupModelService_verifiesDetectorOnDiskSafely_andDefaultsHardwareAccelOff() {
+        val modelsRoot = com.example.onnx.OnnxProtobufInspector.getModelsRootDir(context)
+        modelsRoot.deleteRecursively()
+        val faceSwapDir = File(modelsRoot, "face_swap").apply { mkdirs() }
+        File(faceSwapDir, "det_10g.onnx").writeBytes(ByteArray(4096) { 9 })
+
+        val defaultState = com.example.ui.FaceSwapUiState()
+        assertFalse(defaultState.preferHardwareAcceleration)
+
+        // Ensure EP isolation never enables NNAPI and XNNPACK together
+        val (nnapiOn, xnnOnWhenNnapi) = com.example.onnx.OnnxProtobufInspector.resolveEffectiveEpFlags(
+            useNnapi = true,
+            useXnnpack = true
+        )
+        assertTrue(nnapiOn)
+        assertFalse(xnnOnWhenNnapi)
+
+        val (nnapiOff, xnnOnCpu) = com.example.onnx.OnnxProtobufInspector.resolveEffectiveEpFlags(
+            useNnapi = false,
+            useXnnpack = true
+        )
+        assertFalse(nnapiOff)
+        assertTrue(xnnOnCpu)
+
+        val service = com.example.onnx.OnnxRuntimeModelService(context, ortEnv = null)
+        val memState = service.loadModelsIntoMemory(preferHardwareAccel = false, lowMemoryMode = false)
+        assertTrue(memState.detectorLoaded)
+        val detInfo = memState.loadedSessions[com.example.onnx.ModelSlot.DETECTOR]
+        assertNotNull(detInfo)
+        assertTrue(detInfo!!.executionProvider.contains("On-Demand", ignoreCase = true))
+
+        val vm = FaceSwapViewModel(context.applicationContext as Application)
+        val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+        val deadline = System.currentTimeMillis() + 5000L
+        while ((vm.uiState.value.isInspectingModels || vm.uiState.value.modelInspections.isEmpty()) &&
+            System.currentTimeMillis() < deadline
+        ) {
+            mainLooperShadow.idle()
+            Thread.sleep(25L)
+        }
+        mainLooperShadow.idle()
+        assertFalse(vm.uiState.value.preferHardwareAcceleration)
+        assertTrue(vm.uiState.value.isDetectorReady)
+        assertTrue(vm.uiState.value.memoryServiceState.detectorLoaded)
+    }
 }

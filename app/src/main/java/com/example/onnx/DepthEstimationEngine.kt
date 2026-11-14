@@ -397,9 +397,12 @@ object DepthEstimationEngine {
         OnnxProtobufInspector.clearCachedSessions()
         System.gc()
 
-        val opts = OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel)
-        try {
-            ortEnv.createSession(candidate.file.absolutePath, opts).use { session ->
+        val (depthSession, _) = OnnxProtobufInspector.createSessionWithFallback(
+            ortEnv = ortEnv,
+            modelFile = candidate.file,
+            preferHardwareAcceleration = preferHardwareAccel
+        )
+        depthSession.use { session ->
                 val inputEntry = session.inputInfo.entries.firstOrNull()
                     ?: error("Depth model has no input tensor.")
                 val inputName = inputEntry.key
@@ -527,9 +530,6 @@ object DepthEstimationEngine {
                     modelUsedLabel = "${candidate.family.displayLabel} (${candidate.displayName})",
                     elapsedMs = elapsed
                 )
-            }
-        } finally {
-            runCatching { opts.close() }
         }
     }
 

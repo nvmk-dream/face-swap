@@ -135,7 +135,7 @@ data class FaceSwapUiState(
     val faceScaleAdjust: Float = 1.0f,
     val enableProvenanceWatermark: Boolean = false,
     val allowTwoModelFallbackForTesting: Boolean = false,
-    val preferHardwareAcceleration: Boolean = true,
+    val preferHardwareAcceleration: Boolean = false,
     val lowMemoryMode: Boolean = false,
     val isSwapping: Boolean = false,
     val swapProgress: SwapStageProgress? = null,
@@ -442,6 +442,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setPreferHardwareAcceleration(enabled: Boolean) {
+        OnnxProtobufInspector.clearCachedSessions()
+        SdInpaintOnnxEngine.clearSessionCache()
         _uiState.update { it.copy(preferHardwareAcceleration = enabled) }
     }
 
@@ -669,6 +671,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 onSuccess = { importedSlots ->
                     val ctx = getApplication<Application>()
                     val (inspections, memState, sdPackTypes, lamaFile) = withContext(Dispatchers.IO) {
+                        OnnxProtobufInspector.clearCachedSessions()
                         val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                         val mem = modelService.loadModelsIntoMemory(
                             preferHardwareAccel = _uiState.value.preferHardwareAcceleration,

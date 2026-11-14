@@ -228,31 +228,31 @@ class OnnxRuntimeModelService(
         synchronized(sessionLock) {
             val tStart = System.currentTimeMillis()
 
-            // Only preload lightweight DETECTOR (~16.9 MB) into native OrtSession upfront.
-            // All heavy models (w600k_r50 166MB, hyperswap/inswapper 250-554MB, gfpgan 340MB, segformer 325MB)
-            // are verified on disk and loaded one-at-a-time per stage so Android lmkd never kills the app.
+            // Verify all model slots on disk cleanly without eager native OrtSession allocation on boot
+            // or immediately after bulk folder import. Native sessions load lazily on-demand via
+            // createSessionWithFallback so app startup can never hit a native driver Force-Stop loop.
             for (slot in ModelSlot.entries) {
                 val file = resolveValidFile(slot)
                 if (file == null) {
                     closeSlotInternal(slot)
                     continue
                 }
-                if (slot == ModelSlot.DETECTOR && file.length() <= 30L * 1024L * 1024L) {
-                    runCatching { loadModelSlotInternal(slot, preferHardwareAccel) }
-                } else {
-                    sessionMetadata[slot] = LoadedSessionInfo(
-                        slot = slot,
-                        canonicalFileName = file.name,
-                        isLoadedInMemory = true,
-                        fileSizeBytes = file.length(),
-                        loadTimeMs = 1L,
-                        inputSignature = slot.expectedInputSignature,
-                        outputSignature = slot.expectedOutputSignature,
-                        executionProvider = "ONNX Runtime Ready (Stage-by-Stage RAM Guard)",
-                        statusNote = "Verified on disk (${file.name}) • Loads on-demand per stage"
-                    )
-                    loadedFileLastModified[slot] = file.lastModified()
+                val existingSession = activeSessions[slot]
+                if (existingSession != null && loadedFileLastModified[slot] == file.lastModified()) {
+                    continue
                 }
+                sessionMetadata[slot] = LoadedSessionInfo(
+                    slot = slot,
+                    canonicalFileName = file.name,
+                    isLoadedInMemory = true,
+                    fileSizeBytes = file.length(),
+                    loadTimeMs = 1L,
+                    inputSignature = slot.expectedInputSignature,
+                    outputSignature = slot.expectedOutputSignature,
+                    executionProvider = "ONNX Runtime Ready (On-Demand Safe Guard)",
+                    statusNote = "Verified on disk (${file.name}) • Loads on-demand"
+                )
+                loadedFileLastModified[slot] = file.lastModified()
             }
 
             val totalElapsed = (System.currentTimeMillis() - tStart).coerceAtLeast(1L)

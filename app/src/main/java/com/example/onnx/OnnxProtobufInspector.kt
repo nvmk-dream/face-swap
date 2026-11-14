@@ -454,11 +454,13 @@ object OnnxProtobufInspector {
                 }
             }
             return try {
-                createOptimizedSessionOptions(preferHardwareAcceleration).use { opts ->
-                    val session = ortEnv.createSession(file.absolutePath, opts)
-                    globalSessionCache[key] = CachedOrtSessionEntry(session, lastMod, effectiveLen)
-                    session
-                }
+                val (session, _) = createSessionWithFallback(
+                    ortEnv = ortEnv,
+                    modelFile = file,
+                    preferHardwareAcceleration = preferHardwareAcceleration
+                )
+                globalSessionCache[key] = CachedOrtSessionEntry(session, lastMod, effectiveLen)
+                session
             } catch (oom: OutOfMemoryError) {
                 clearCachedSessions()
                 System.gc()
@@ -487,28 +489,38 @@ object OnnxProtobufInspector {
         }
     }
 
+    internal fun resolveEffectiveEpFlags(
+        useNnapi: Boolean,
+        useXnnpack: Boolean
+    ): Pair<Boolean, Boolean> {
+        // Never attach both NNAPI and XNNPACK to the same SessionOptions to avoid ORT partitioner native crashes
+        return useNnapi to (useXnnpack && !useNnapi)
+    }
+
     /**
-     * Creates an optimized `OrtSession.SessionOptions` for Android mobile execution.
-     * Uses all available CPU cores, `ALL_OPT` graph fusion, XNNPACK (ARM NEON Conv/MatMul),
-     * and optional NNAPI while keeping memoryPattern & CPUArenaAllocator OFF to curb native heap growth.
+     * Creates a memory-safe, optimized `OrtSession.SessionOptions` for Android mobile execution.
+     * Never combines NNAPI and XNNPACK in the same session (which causes native SIGSEGV/SIGABRT on
+     * Android HALs), caps intra-op threads to 2..4 performance cores, and keeps memoryPattern &
+     * CPUArenaAllocator OFF to curb native heap growth.
      */
     fun createOptimizedSessionOptions(
         preferHardwareAcceleration: Boolean = false,
-        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2),
-        useXnnpack: Boolean = true,
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
+        useXnnpack: Boolean = !preferHardwareAcceleration,
         useNnapi: Boolean = preferHardwareAcceleration,
         optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT
     ): OrtSession.SessionOptions {
-        val threads = intraOpThreads.coerceAtLeast(1)
+        val threads = intraOpThreads.coerceIn(1, 4)
+        val (effectiveNnapi, effectiveXnnpack) = resolveEffectiveEpFlags(useNnapi = useNnapi, useXnnpack = useXnnpack)
         val opts = OrtSession.SessionOptions()
         opts.setIntraOpNumThreads(threads)
         opts.setMemoryPatternOptimization(false)
         opts.setCPUArenaAllocator(false)
         opts.setOptimizationLevel(optLevel)
-        if (useNnapi) {
+        if (effectiveNnapi) {
             runCatching { opts.addNnapi() }
         }
-        if (useXnnpack) {
+        if (effectiveXnnpack) {
             val xnnAdded = runCatching {
                 opts.addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
                 true
@@ -522,16 +534,16 @@ object OnnxProtobufInspector {
     }
 
     /**
-     * Creates an [OrtSession] trying NNAPI (if requested) -> XNNPACK -> CPU ALL_OPT -> CPU BASIC_OPT
-     * so mobile ONNX graphs accelerate maximally without crashing on unsupported ops or tight RAM.
+     * Creates an [OrtSession] trying NNAPI alone (if requested) -> XNNPACK -> CPU ALL_OPT -> CPU BASIC_OPT -> CPU NO_OPT
+     * so mobile ONNX graphs accelerate safely without native EP partitioner crashes.
      */
     fun createSessionWithFallback(
         ortEnv: OrtEnvironment,
         modelFile: File,
         preferHardwareAcceleration: Boolean = false,
-        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     ): Pair<OrtSession, String> {
-        val threads = intraOpThreads.coerceAtLeast(1)
+        val threads = intraOpThreads.coerceIn(1, 4)
         data class Attempt(
             val label: String,
             val nnapi: Boolean,
@@ -540,7 +552,7 @@ object OnnxProtobufInspector {
         )
         val attempts = buildList {
             if (preferHardwareAcceleration) {
-                add(Attempt("NNAPI+XNNPACK", nnapi = true, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                add(Attempt("NNAPI", nnapi = true, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
             }
             add(Attempt("XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
             add(Attempt("CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
@@ -551,7 +563,7 @@ object OnnxProtobufInspector {
         for (attempt in attempts) {
             val res = runCatching {
                 createOptimizedSessionOptions(
-                    preferHardwareAcceleration = preferHardwareAcceleration,
+                    preferHardwareAcceleration = attempt.nnapi,
                     intraOpThreads = threads,
                     useXnnpack = attempt.xnnpack,
                     useNnapi = attempt.nnapi,

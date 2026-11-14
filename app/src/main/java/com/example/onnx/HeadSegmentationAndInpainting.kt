@@ -754,8 +754,12 @@ object HeadSegmentationAndInpainting {
         imgBuf.rewind()
         maskBuf.rewind()
 
-        OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel).use { opts ->
-            ortEnv.createSession(lamaFile.absolutePath, opts).use { session ->
+        val (lamaSession, _) = OnnxProtobufInspector.createSessionWithFallback(
+            ortEnv = ortEnv,
+            modelFile = lamaFile,
+            preferHardwareAcceleration = preferHardwareAccel
+        )
+        lamaSession.use { session ->
                 val names = session.inputNames.toList()
                 val imgName = names.firstOrNull { it.contains("image", ignoreCase = true) } ?: names[0]
                 val maskName = names.firstOrNull { it.contains("mask", ignoreCase = true) }
@@ -787,7 +791,6 @@ object HeadSegmentationAndInpainting {
                             }
                         }
                     }
-                }
             }
         }
     }
@@ -973,10 +976,13 @@ object HeadSegmentationAndInpainting {
         }
         if (segModelFile != null && segModelFile.exists() && segModelFile.length() > 1024L) {
             return runCatching {
-                OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel).use { opts ->
-                    ortEnv.createSession(segModelFile.absolutePath, opts).use { session ->
-                        parseWithSession(session)
-                    }
+                val (segSession, _) = OnnxProtobufInspector.createSessionWithFallback(
+                    ortEnv = ortEnv,
+                    modelFile = segModelFile,
+                    preferHardwareAcceleration = preferHardwareAccel
+                )
+                segSession.use { session ->
+                    parseWithSession(session)
                 }
             }.getOrNull()
         }

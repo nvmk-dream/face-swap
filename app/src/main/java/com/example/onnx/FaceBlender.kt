@@ -867,10 +867,13 @@ object FaceBlender {
             return null
         }
         return runCatching {
-            OnnxProtobufInspector.createOptimizedSessionOptions(preferHardwareAccel).use { opts ->
-                ortEnv.createSession(gfpganFile.absolutePath, opts).use { session ->
-                    runGfpganSession512(ortEnv, session, crop128Or512)
-                }
+            val (session, _) = OnnxProtobufInspector.createSessionWithFallback(
+                ortEnv = ortEnv,
+                modelFile = gfpganFile,
+                preferHardwareAcceleration = preferHardwareAccel
+            )
+            session.use { s ->
+                runGfpganSession512(ortEnv, s, crop128Or512)
             }
         }.getOrNull()
     }
