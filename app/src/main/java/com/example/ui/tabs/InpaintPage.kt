@@ -98,14 +98,6 @@ import com.example.ui.components.DrawMaskEditorDialog
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private val SAFE_FASHION_PRESETS = listOf(
-    "hand on hip-arched back",
-    "over shoulder-direct gaze",
-    "lips parted-hair tuck",
-    "one leg extended-lean forward",
-    "spreading both legs"
-)
-
 private val POSITIVE_BOOSTER_TAGS = listOf(
     "photorealistic",
     "sharp focus",
@@ -935,36 +927,6 @@ fun InpaintPage(
                     }
                 }
 
-                // Safe Fashion Design Quick Preset Chips
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    SAFE_FASHION_PRESETS.forEach { preset ->
-                        val isSelected = uiState.inpaintPrompt.equals(preset, ignoreCase = true)
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .background(if (isSelected) Color(0xFF0284C7) else Color(0xCCFFFFFF))
-                                .border(
-                                    1.dp,
-                                    if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
-                                    RoundedCornerShape(50)
-                                )
-                                .clickable { onPromptChanged(preset) }
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = preset,
-                                color = if (isSelected) Color.White else darkSlate,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-                }
             }
 
             // Large Frosted Result Card
@@ -1231,7 +1193,7 @@ fun InpaintPage(
             accentColor = Color(0xFF0284C7),
             initialText = uiState.inpaintPrompt,
             placeholderText = "e.g. modern dress, natural skin texture, sharp focus...",
-            quickTags = POSITIVE_BOOSTER_TAGS + SAFE_FASHION_PRESETS,
+            quickTags = POSITIVE_BOOSTER_TAGS,
             showResetDefault = false,
             defaultText = "",
             dialogTag = "positive_prompt_fullscreen_dialog",
