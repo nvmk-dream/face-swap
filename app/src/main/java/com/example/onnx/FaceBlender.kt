@@ -416,7 +416,8 @@ object FaceBlender {
         outPx: IntArray,
         tgtPx: IntArray,
         size: Int,
-        geom: WarpedFaceGeometry
+        geom: WarpedFaceGeometry,
+        isNeuralSwap: Boolean = true
     ) {
         val browOffset = geom.eyeDist * 0.29f
         val browCenters = arrayOf(
@@ -469,7 +470,7 @@ object FaceBlender {
                         val finalG = (cG * (1f - corruptBlend) + tG * corruptBlend).toInt().coerceIn(0, 255)
                         val finalB = (cB * (1f - corruptBlend) + tB * corruptBlend).toInt().coerceIn(0, 255)
                         outPx[idx] = (0xFF shl 24) or (finalR shl 16) or (finalG shl 8) or finalB
-                    } else if (tLum < 75f && cLum > tLum + 48f) {
+                    } else if (!isNeuralSwap && tLum < 75f && cLum > tLum + 48f) {
                         val browBlend = (0.38f * archWeight).coerceIn(0f, 0.42f)
                         val finalR = (cR * (1f - browBlend) + tR * browBlend).toInt().coerceIn(0, 255)
                         val finalG = (cG * (1f - browBlend) + tG * browBlend).toInt().coerceIn(0, 255)
@@ -491,7 +492,8 @@ object FaceBlender {
         tgtPx: IntArray,
         srcPx: IntArray?,
         size: Int,
-        geom: WarpedFaceGeometry
+        geom: WarpedFaceGeometry,
+        isNeuralSwap: Boolean = true
     ) {
         val eyeCenters = arrayOf(geom.leftEye, geom.rightEye)
         val rx = geom.eyeDist * 0.22f
@@ -534,7 +536,11 @@ object FaceBlender {
                     // Intervene on cloudy pupil artifacts OR out-of-gamut neon-red / collapsed-black holes
                     val isNeonRedArtifact = (cR - cG >= 72) && (cR - cB >= 72) && (tR - tG < 48)
                     val isCollapsedBlackHole = (cR <= 8 && cG <= 8 && cB <= 8) && (tLum > 48f)
-                    val isCloudyPupilAnomaly = normDist <= 0.65f && tLum < 55f && cLum > tLum + 42f
+                    val isCloudyPupilAnomaly = if (isNeuralSwap) {
+                        normDist <= 0.45f && tLum < 36f && cLum > tLum + 92f
+                    } else {
+                        normDist <= 0.65f && tLum < 55f && cLum > tLum + 42f
+                    }
                     if (isNeonRedArtifact || isCollapsedBlackHole) {
                         val eyeBlend = (0.92f * socketWeight).coerceIn(0f, 0.94f)
                         val eR = (cR * (1f - eyeBlend) + tR * eyeBlend).toInt().coerceIn(0, 255)
@@ -542,7 +548,8 @@ object FaceBlender {
                         val eB = (cB * (1f - eyeBlend) + tB * eyeBlend).toInt().coerceIn(0, 255)
                         outPx[idx] = (0xFF shl 24) or (eR shl 16) or (eG shl 8) or eB
                     } else if (isCloudyPupilAnomaly) {
-                        val eyeBlend = (0.55f * socketWeight).coerceIn(0f, 0.60f)
+                        val eyeCap = if (isNeuralSwap) 0.36f else 0.60f
+                        val eyeBlend = (0.55f * socketWeight).coerceIn(0f, eyeCap)
                         val eR = (cR * (1f - eyeBlend) + tR * eyeBlend).toInt().coerceIn(0, 255)
                         val eG = (cG * (1f - eyeBlend) + tG * eyeBlend).toInt().coerceIn(0, 255)
                         val eB = (cB * (1f - eyeBlend) + tB * eyeBlend).toInt().coerceIn(0, 255)
@@ -1052,12 +1059,12 @@ object FaceBlender {
             val gfpPx = IntArray(total512)
             gfp512.getPixels(gfpPx, 0, HD_SIZE, 0, 0, HD_SIZE, HD_SIZE)
             gfp512.recycle()
-            // For 256px neural models (hyperswap_1b_256), cap GFPGAN at 0.45 so Source identity is preserved
-            // while still refining micro-pores and ocular clarity; allow up to 0.68 for 128px models.
+            // For 256px neural models (hyperswap_1b_256), cap GFPGAN at 0.22 so Source identity is strongly preserved
+            // while refining micro-pores and ocular clarity; allow up to 0.52 for 128px models.
             val gfpWeight = if (activeSwapCrop.width >= 256) {
-                (0.16f + 0.29f * clampedEnhance).coerceIn(0f, 0.45f)
+                (0.06f + 0.16f * clampedEnhance).coerceIn(0f, 0.22f)
             } else {
-                (0.24f + 0.44f * clampedEnhance).coerceIn(0f, 0.68f)
+                (0.18f + 0.34f * clampedEnhance).coerceIn(0f, 0.52f)
             }
             val invEnh = 1.0f - gfpWeight
             for (i in 0 until total512) {
@@ -1183,14 +1190,16 @@ object FaceBlender {
                 outPx = swapPx512,
                 tgtPx = tgtPx512,
                 size = HD_SIZE,
-                geom = geom512
+                geom = geom512,
+                isNeuralSwap = isNeuralSwap
             )
             restoreDynamicOcularSockets(
                 outPx = swapPx512,
                 tgtPx = tgtPx512,
                 srcPx = null,
                 size = HD_SIZE,
-                geom = geom512
+                geom = geom512,
+                isNeuralSwap = isNeuralSwap
             )
             // Negative Artifact Suppression: Fix cloudy pupils without erasing Source eye shape
             NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
@@ -1307,16 +1316,18 @@ object FaceBlender {
                 config = LcmInpaintingPipeline.LcmConfig()
             )
 
-            // 9. Final-pass Target-Aware Upper-Lip & Philtrum Protection Lock
-            val tGuard1 = System.currentTimeMillis()
-            protectTargetUpperLipAndEliminateMoustache512(
-                swapPx512 = swapPx512,
-                tgtPx512 = tgtPx512,
-                geom512 = geom512,
-                forceMoustacheCleanse = hadDonorMoustache
-            )
-            guard2Elapsed = (System.currentTimeMillis() - tGuard1).coerceAtLeast(0L)
-            upperLipGuardMs = (upperLipGuardMs + guard2Elapsed).coerceAtLeast(1L)
+            // 9. Final-pass Target-Aware Upper-Lip & Philtrum Protection Lock (only when donor moustache detected or non-neural fallback)
+            if (!isNeuralSwap || hadDonorMoustache) {
+                val tGuard1 = System.currentTimeMillis()
+                protectTargetUpperLipAndEliminateMoustache512(
+                    swapPx512 = swapPx512,
+                    tgtPx512 = tgtPx512,
+                    geom512 = geom512,
+                    forceMoustacheCleanse = hadDonorMoustache
+                )
+                guard2Elapsed = (System.currentTimeMillis() - tGuard1).coerceAtLeast(0L)
+                upperLipGuardMs = (upperLipGuardMs + guard2Elapsed).coerceAtLeast(1L)
+            }
         }
 
         // 10. Direct High-Resolution Warp of 512x512 HD Face onto full-resolution targetPixels using Catmull-Rom Bicubic
@@ -1665,7 +1676,7 @@ object FaceBlender {
         // compared to Target's own philtrum. Clean-shaven or female faces have natural nose-base/lip shading in both Target and Swap
         // and are left 100% untouched (zero oval nose cutout or horizontal upper-lip strip).
         val hasDonorMoustache = forceMoustacheCleanse ||
-            (tPhiltrumRatio >= 0.86f && sPhiltrumRatio < 0.82f && philtrumRatioDrop > 0.08f && philtrumLumDrop > 12f)
+            (tPhiltrumRatio >= 0.86f && sPhiltrumRatio < 0.78f && philtrumRatioDrop > 0.12f && philtrumLumDrop > 18f)
         if (!hasDonorMoustache) return false
 
         val residualR = sCheekR - tCheekR
@@ -1787,18 +1798,18 @@ object FaceBlender {
         for (y in step2 until HD_SIZE - step2) {
             val row = y * HD_SIZE
             val regionBoost = when {
-                y < 185 -> 0.86f
-                y > 395 -> 0.84f
-                else -> 0.72f
+                y < 185 -> 0.64f
+                y > 395 -> 0.60f
+                else -> 0.48f
             }
             for (x in step2 until HD_SIZE - step2) {
                 val idx = row + x
                 val m = mask512[idx]
-                // Skip both outside mask (m <= 0.01f) and solid inner facial core (m >= 0.95f: eyes, nose, philtrum, lips)
-                // so Target's side-view nose shadow or parted mouth never bleeds into the swapped core features
-                if (m <= 0.01f || m >= 0.95f) continue
+                // Skip both outside mask (m <= 0.01f) and inner facial region (m >= 0.78f: eyes, nose, cheeks, philtrum, lips)
+                // so Target's skin/lighting never pulls the inner face back toward Target identity
+                if (m <= 0.01f || m >= 0.78f) continue
 
-                val boundaryWeight = ((1.0f - m) * regionBoost).coerceIn(0f, 0.84f)
+                val boundaryWeight = ((1.0f - m) * regionBoost).coerceIn(0f, 0.56f)
                 val sLow1 = compute5PointLowPassRGB512(origSwap, x, y, step1)
                 val sLow2 = compute5PointLowPassRGB512(origSwap, x, y, step2)
                 val tLow1 = compute5PointLowPassRGB512(tgtPx512, x, y, step1)
@@ -1994,9 +2005,9 @@ object FaceBlender {
                 tBMean * 0.96 + sBMean * 0.04
             )
             SkinToneSourceMode.SOURCE_IDENTITY -> Triple(
-                dRMean * 0.62 + tRMean * 0.38,
-                dGMean * 0.62 + tGMean * 0.38,
-                dBMean * 0.62 + tBMean * 0.38
+                dRMean * 0.76 + tRMean * 0.24,
+                dGMean * 0.76 + tGMean * 0.24,
+                dBMean * 0.76 + tBMean * 0.24
             )
             SkinToneSourceMode.BALANCED_BLEND -> Triple(
                 dRMean * 0.50 + tRMean * 0.50,
@@ -2012,9 +2023,9 @@ object FaceBlender {
                 0.85 * tBStd + 0.15 * sBStd
             )
             SkinToneSourceMode.SOURCE_IDENTITY -> Triple(
-                0.68 * dRStd + 0.32 * tRStd,
-                0.68 * dGStd + 0.32 * tGStd,
-                0.68 * dBStd + 0.32 * tBStd
+                0.78 * dRStd + 0.22 * tRStd,
+                0.78 * dGStd + 0.22 * tGStd,
+                0.78 * dBStd + 0.22 * tBStd
             )
             SkinToneSourceMode.BALANCED_BLEND -> Triple(
                 0.50 * dRStd + 0.50 * tRStd,
@@ -2028,9 +2039,9 @@ object FaceBlender {
         val scaleB = (goalBStd / sBStd).toFloat().coerceIn(0.82f, 1.18f)
 
         val strength = when (skinToneMode) {
-            SkinToneSourceMode.TARGET_SCENE -> 0.90f
-            SkinToneSourceMode.SOURCE_IDENTITY -> 0.88f
-            SkinToneSourceMode.BALANCED_BLEND -> 0.88f
+            SkinToneSourceMode.TARGET_SCENE -> 0.88f
+            SkinToneSourceMode.SOURCE_IDENTITY -> 0.52f
+            SkinToneSourceMode.BALANCED_BLEND -> 0.76f
         }
 
         for (y in 0 until HD_SIZE) {
@@ -2280,7 +2291,7 @@ object FaceBlender {
         val centerX = (eyeMidX * 0.38f + geom512.nose.x * 0.32f + mouthMidX * 0.30f)
         val centerY = (eyeMidY * 0.32f + geom512.nose.y * 0.30f + mouthMidY * 0.38f)
 
-        val baseRadiusX = (geom512.eyeDist * 1.06f).coerceIn(134f, 168f)
+        val baseRadiusX = (geom512.eyeDist * 1.12f).coerceIn(140f, 176f)
         // Use 3D Head-Pose left/right visibility + 106-point jawline span to contract the foreshortened side of the mask
         val pose3D = geom512.reconstructed3D.headPose
         val leftYawContract = ((1.0f - 0.22f * max(0f, geom512.yawRatio)) * (0.35f + 0.65f * pose3D.leftSideVisibility))
@@ -2299,7 +2310,7 @@ object FaceBlender {
         }
         val radiusYTop = (geom512.eyeDist * 1.04f).coerceIn(136f, 162f)
         val radiusYBottom = chinDist.coerceIn(148f, 174f)
-        val innerCoreRatio = 0.66f
+        val innerCoreRatio = 0.76f
         val borderMargin = 24
 
         val noseCoreRx = geom512.eyeDist * 0.42f

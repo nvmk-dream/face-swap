@@ -92,8 +92,12 @@ object NegativeArtifactSuppression {
                 val tMin = min(tR, min(tG, tB))
                 val tSat = (tMax - tMin).toFloat() / tMax.toFloat()
 
-                // Tongue chromatic signature: reddish-pink, prominent R channel, healthy saturation
-                val isTongueColor = v > 2f && tR > tG + 16 && tR > tB + 10 && tSat >= 0.16f && tSat <= 0.78f && tLum >= 60f && tLum <= 215f
+                // Tongue chromatic signature: for neural swaps, only match an actual protruding tongue below the lower lip
+                val isTongueColor = if (isNeuralSwap) {
+                    v > mouthWidth * 0.16f && tR > tG + 62 && tR > tB + 32 && tSat >= 0.40f && tSat <= 0.82f && tLum >= 55f && tLum <= 205f
+                } else {
+                    v > 2f && tR > tG + 16 && tR > tB + 10 && tSat >= 0.16f && tSat <= 0.78f && tLum >= 60f && tLum <= 215f
+                }
                 // Teeth chromatic signature: high luminance, neutral saturation
                 val isTeethColor = tLum > 165f && tSat < 0.22f
                 // Dark mouth interior
@@ -112,8 +116,8 @@ object NegativeArtifactSuppression {
 
         val hasTongueOrOpenMouth = if (isNeuralSwap) {
             // For real neural HyperSwap/InSwapper runs, let the model naturally synthesize Source's
-            // teeth and smile matching Target's reaction; only intervene on an actual protruding tongue.
-            (tongueRatio > 0.12f * (1.1f - sensitivity)) || (tonguePixelCount >= 48)
+            // teeth, lips, and smile matching Target's reaction; only intervene on an actual protruding tongue.
+            (tongueRatio > 0.12f * (1.1f - sensitivity)) || (tonguePixelCount >= 64)
         } else {
             (tongueRatio > 0.04f * (1.1f - sensitivity)) ||
                 (teethRatio > 0.08f) ||
@@ -155,7 +159,12 @@ object NegativeArtifactSuppression {
                 val sB = sc and 0xFF
 
                 // Determine pixel confidence in protruding tongue (or teeth/cavity only for non-neural fallback)
-                val isTonguePixel = v > 4f && tR > tG + 16 && tR > tB + 10 && tSat >= 0.16f && tSat <= 0.82f && tLum >= 55f && tLum <= 220f
+                val isTonguePixel = if (isNeuralSwap) {
+                    v > mouthWidth * 0.16f && tR > tG + 62 && tR > tB + 32 && tSat >= 0.40f && tSat <= 0.82f && tLum >= 55f && tLum <= 205f &&
+                        (tR - sR >= 12 || sG - tG >= 24)
+                } else {
+                    v > 4f && tR > tG + 16 && tR > tB + 10 && tSat >= 0.16f && tSat <= 0.82f && tLum >= 55f && tLum <= 220f
+                }
                 val isTeethPixel = !isNeuralSwap && tLum > 160f && tSat < 0.24f
                 val isDarkInterior = !isNeuralSwap && tLum < 52f && v < ryDown * 0.6f
 
@@ -232,12 +241,12 @@ object NegativeArtifactSuppression {
 
                     val isNeonRedArtifact = (sR - sG >= 72) && (sR - sB >= 72) && (tR - tG < 48)
                     val isCollapsedBlackHole = (sR <= 8 && sG <= 8 && sB <= 8) && (tLum > 48f)
-                    val isEyelinerLoss = if (isNeuralSwap) {
-                        tLum < 42f && sLum > tLum + 55f
+                    val isEyelinerLoss = !isNeuralSwap && tLum < 65f && sLum > tLum + 28f
+                    val isCloudyPupil = if (isNeuralSwap) {
+                        dSq < 0.28f && tLum < 38f && sLum > tLum + 95f
                     } else {
-                        tLum < 65f && sLum > tLum + 28f
+                        dSq < 0.36f && tLum < 48f && sLum > tLum + 38f
                     }
-                    val isCloudyPupil = dSq < 0.36f && tLum < 48f && sLum > tLum + (if (isNeuralSwap) 68f else 38f)
                     val isSquintFoldDeformation = !isNeuralSwap && v < -2f && abs(sLum - tLum) > 42f
 
                     if (isNeonRedArtifact || isCollapsedBlackHole) {
@@ -249,7 +258,7 @@ object NegativeArtifactSuppression {
                         swapPx512[idx] = (0xFF shl 24) or (outR shl 16) or (outG shl 8) or outB
                     } else if (isEyelinerLoss || isCloudyPupil || isSquintFoldDeformation) {
                         val env = (0.5f * (1.0f + cos(Math.PI * sqrt(dSq)))).toFloat()
-                        val maxCap = if (isNeuralSwap) 0.58f else 0.88f
+                        val maxCap = if (isNeuralSwap) 0.38f else 0.88f
                         val w = (env * makeupPreservationStrength * 0.82f).coerceIn(0f, maxCap)
                         val outR = (sR * (1f - w) + tR * w).toInt().coerceIn(0, 255)
                         val outG = (sG * (1f - w) + tG * w).toInt().coerceIn(0, 255)

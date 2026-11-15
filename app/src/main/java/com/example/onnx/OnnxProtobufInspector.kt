@@ -1439,9 +1439,13 @@ object OnnxProtobufInspector {
         }
     }
 
-    fun loadOrExtractInswapperEmap(context: Context, inswapperFile: File): FloatArray? {
+    fun loadOrExtractInswapperEmap(
+        context: Context,
+        inswapperFile: File,
+        bypassHyperSwapNameSkip: Boolean = false
+    ): FloatArray? {
         if (!inswapperFile.exists()) return null
-        if (inswapperFile.name.lowercase().contains("hyperswap")) {
+        if (!bypassHyperSwapNameSkip && inswapperFile.name.lowercase().contains("hyperswap")) {
             // HyperSwap 1a/1b/1c 256 models consume the L2-normalized 512-D ArcFace vector directly
             return null
         }
@@ -1603,9 +1607,13 @@ object OnnxProtobufInspector {
         }
 
         val inputSet = inputNames.toSet()
+        val imageInputSet = inputNames.filter { name ->
+            val l = name.lowercase()
+            !l.contains("source") && !l.contains("emb") && !l.contains("latent")
+        }.toSet().ifEmpty { inputSet }
         val outputSet = outputNames.toSet()
         val leadingInputOps = nodes
-            .filter { (ins, _, _) -> ins.any { it in inputSet } }
+            .filter { (ins, _, _) -> ins.any { it in imageInputSet } }
             .map { it.third }
         val trailingOutputOps = nodes
             .filter { (_, outs, _) -> outs.any { it in outputSet } }

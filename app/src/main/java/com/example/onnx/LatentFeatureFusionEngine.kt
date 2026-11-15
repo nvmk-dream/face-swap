@@ -341,7 +341,7 @@ object LatentFeatureFusionEngine {
         val shadingStrength = if (skinToneMode == SkinToneSourceMode.TARGET_SCENE) {
             0.42f * sidePoseFactor + 0.14f
         } else {
-            0.26f * sidePoseFactor + 0.08f
+            0.16f * sidePoseFactor + 0.04f
         }
 
         val yMin = (noseBridge.y - 48f).toInt().coerceIn(8, size - 9)

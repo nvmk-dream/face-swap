@@ -38,7 +38,7 @@ object LcmInpaintingPipeline {
 
         val steps = config.inferenceSteps.coerceIn(2, 4)
         val loraWeight = config.loraScale.coerceIn(0f, 1f)
-        val stepWeight = (0.28f * loraWeight / steps.toFloat()).coerceIn(0.04f, 0.18f)
+        val stepWeight = (0.14f * loraWeight / steps.toFloat()).coerceIn(0.02f, 0.09f)
 
         val total = HD_SIZE * HD_SIZE
         val copy = swapPx512.copyOf()
@@ -56,8 +56,8 @@ object LcmInpaintingPipeline {
                 for (x in radius until HD_SIZE - radius) {
                     val idx = row + x
                     val m = mask512[idx]
-                    // Focus on transition and outer facial blend boundaries
-                    if (m <= 0.02f || m >= 0.98f) continue
+                    // Focus strictly on outer facial blend seam so inner cheeks/forehead/chin keep 100% Source identity
+                    if (m <= 0.02f || m >= 0.80f) continue
 
                     val c = copy[idx]
                     val r = (c ushr 16) and 0xFF

@@ -340,6 +340,17 @@ object InSwapperEngine {
             // InSwapper 128 takes the emap-projected 512-D latentSourceVector512
             val sourceVector = if (isHyperSwap256 && !sourceEmbedding.usedEmbeddedEmap) {
                 sourceEmbedding.rawNormedEmbedding512
+            } else if (!isHyperSwap256 && !sourceEmbedding.usedEmbeddedEmap) {
+                val recoveredEmap = OnnxProtobufInspector.loadOrExtractInswapperEmap(
+                    context = context,
+                    inswapperFile = activeSwapFile,
+                    bypassHyperSwapNameSkip = true
+                )
+                if (recoveredEmap != null) {
+                    ArcFaceRecognizer.projectWithEmap(sourceEmbedding.rawNormedEmbedding512, recoveredEmap)
+                } else {
+                    sourceEmbedding.latentSourceVector512
+                }
             } else {
                 sourceEmbedding.latentSourceVector512
             }
@@ -813,7 +824,8 @@ object InSwapperEngine {
         val neonRedFraction: Float,
         val collapsedBlackFraction: Float,
         val lumaCorrelation: Float,
-        val artifactScore: Float
+        val artifactScore: Float,
+        val centerFaceDiff: Float = 0f
     )
 
     private val verifiedSwapSpecCache = ConcurrentHashMap<String, SwapTensorSpec>()
@@ -957,6 +969,30 @@ object InSwapperEngine {
             (cov / sqrt(varT * varS)).toFloat().coerceIn(-1f, 1f)
         } else 0f
 
+        val cropSide = sqrt(hw.toDouble()).toInt().coerceAtLeast(1)
+        var centerDiffSum = 0.0
+        var centerDiffCount = 0
+        if (cropSide * cropSide == hw && cropSide >= 16) {
+            val y0 = cropSide / 4
+            val y1 = (cropSide * 3) / 4
+            val x0 = cropSide / 4
+            val x1 = (cropSide * 3) / 4
+            for (y in y0 until y1) {
+                val row = y * cropSide
+                for (x in x0 until x1) {
+                    val idx = row + x
+                    val sc = outPixels[idx]
+                    val tc = targetPixels[idx]
+                    val dr = kotlin.math.abs(((sc ushr 16) and 0xFF) - ((tc ushr 16) and 0xFF))
+                    val dg = kotlin.math.abs(((sc ushr 8) and 0xFF) - ((tc ushr 8) and 0xFF))
+                    val db = kotlin.math.abs((sc and 0xFF) - (tc and 0xFF))
+                    centerDiffSum += (dr + dg + db) / 3.0
+                    centerDiffCount++
+                }
+            }
+        }
+        val centerFaceDiff = if (centerDiffCount > 0) (centerDiffSum / centerDiffCount).toFloat() else 0f
+
         val neonRedFrac = neonRedCount.toFloat() / hw.toFloat()
         val blackFrac = collapsedBlackCount.toFloat() / hw.toFloat()
         val nanFrac = nanCount.toFloat() / nFloats.toFloat()
@@ -973,7 +1009,8 @@ object InSwapperEngine {
             neonRedFraction = neonRedFrac,
             collapsedBlackFraction = blackFrac,
             lumaCorrelation = lumaCorr,
-            artifactScore = artifactScore
+            artifactScore = artifactScore,
+            centerFaceDiff = centerFaceDiff
         )
     }
 
@@ -1094,13 +1131,18 @@ object InSwapperEngine {
         var bestSpec = primarySpec
 
         // Self-healing fallback check: if HyperSwap primary spec causes out-of-gamut neon-red / collapsed-black
-        // corruption or inverted luminance correlation, automatically verify alternative channel/range specs.
+        // corruption, inverted luminance correlation, or near-identity passthrough, verify alternative specs.
         val hasCorruption = bestStats.neonRedFraction > 0.015f ||
             bestStats.collapsedBlackFraction > 0.02f ||
             bestStats.nanFraction > 0.005f ||
             bestStats.lumaCorrelation < 0.10f
-        if (isHyperSwapModel && hasCorruption) {
+        val isNearIdentityPassthrough = isHyperSwapModel &&
+            !hasCorruption &&
+            bestStats.lumaCorrelation > 0.965f &&
+            bestStats.centerFaceDiff < 12.0f
+        if (isHyperSwapModel && (hasCorruption || isNearIdentityPassthrough)) {
             val candidates = listOf(
+                SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.SIGNED_MINUS1_TO_1),
                 SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.UNSIGNED_0_TO_1),
                 SwapTensorSpec(SwapChannelOrder.BGR, SwapInputRange.SIGNED_MINUS1_TO_1),
                 SwapTensorSpec(SwapChannelOrder.BGR, SwapInputRange.UNSIGNED_0_TO_1)
@@ -1118,11 +1160,25 @@ object InSwapperEngine {
                     outputRangeHint = outputRangeHint,
                     sourceTensor = sourceTensor
                 )
-                if (candStats.artifactScore < bestStats.artifactScore) {
-                    bestPixels = candPixels
-                    bestStats = candStats
-                    bestSpec = candSpec
-                    if (bestStats.artifactScore < 0.02f) break
+                if (hasCorruption) {
+                    if (candStats.artifactScore < bestStats.artifactScore) {
+                        bestPixels = candPixels
+                        bestStats = candStats
+                        bestSpec = candSpec
+                        if (bestStats.artifactScore < 0.02f) break
+                    }
+                } else {
+                    val candClean = candStats.neonRedFraction <= 0.01f &&
+                        candStats.collapsedBlackFraction <= 0.015f &&
+                        candStats.nanFraction <= 0.002f &&
+                        candStats.lumaCorrelation in 0.45f..0.985f &&
+                        (candStats.maxVal - candStats.minVal) >= 0.45f
+                    if (candClean && candStats.centerFaceDiff > bestStats.centerFaceDiff * 1.45f + 3.0f) {
+                        bestPixels = candPixels
+                        bestStats = candStats
+                        bestSpec = candSpec
+                        break
+                    }
                 }
             }
             verifiedSwapSpecCache[modelCacheKey] = bestSpec
@@ -1136,7 +1192,8 @@ object InSwapperEngine {
             "range=${"%.2f".format(bestStats.minVal)}..${"%.2f".format(bestStats.maxVal)} " +
             "red=${"%.1f".format(bestStats.neonRedFraction * 100f)}% " +
             "blk=${"%.1f".format(bestStats.collapsedBlackFraction * 100f)}% " +
-            "corr=${"%.2f".format(bestStats.lumaCorrelation)}"
+            "corr=${"%.2f".format(bestStats.lumaCorrelation)} " +
+            "cdiff=${"%.1f".format(bestStats.centerFaceDiff)}"
         return swappedBitmap to diagSummary
     }
 }

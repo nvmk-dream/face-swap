@@ -1136,4 +1136,119 @@ class ExampleRobolectricTest {
         viewModel.dismissMissingModelPrompt()
         assertEquals(null, viewModel.uiState.value.missingModelPromptSlot)
     }
+
+    @Test
+    fun `test18 neural swap preserves source pink lips eyes and cheeks against target overwrite`() {
+        val size = 512
+        val tgtPx = IntArray(size * size) { (0xFF shl 24) or (205 shl 16) or (165 shl 8) or 140 }
+        val swapPx = IntArray(size * size) { (0xFF shl 24) or (175 shl 16) or (135 shl 8) or 115 }
+        val geom = com.example.onnx.FaceBlender.computeWarpedGeometry(
+            FloatArray(6) { 0f }.apply { this[0] = 1f; this[4] = 1f },
+            listOf(
+                PointF(195f, 220f),
+                PointF(317f, 220f),
+                PointF(256f, 290f),
+                PointF(212f, 355f),
+                PointF(300f, 355f)
+            ),
+            scale = 1.0f
+        )
+
+        // 1. Target has natural pink lower lip (NOT a protruding tongue); Source has distinct rosy coral lips
+        val targetNaturalLip = (0xFF shl 24) or (188 shl 16) or (148 shl 8) or 132
+        val sourceSwapLip = (0xFF shl 24) or (210 shl 16) or (120 shl 8) or 125
+        for (y in 356..364) {
+            for (x in 228..284) {
+                tgtPx[y * size + x] = targetNaturalLip
+                swapPx[y * size + x] = sourceSwapLip
+            }
+        }
+        val triggeredTongue = com.example.onnx.NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
+            swapPx512 = swapPx,
+            tgtPx512 = tgtPx,
+            geom512 = geom,
+            sensitivity = 0.85f,
+            isNeuralSwap = true
+        )
+        assertFalse("Natural target lower lip must NOT trigger tongue overwrite in neural swap", triggeredTongue)
+        assertEquals("Source lip color must stay untouched", sourceSwapLip, swapPx[360 * size + 256])
+
+        // 2. Target has dark kajal/eyeliner; Source has lighter natural eyelid/iris
+        val targetDarkEyeliner = (0xFF shl 24) or (22 shl 16) or (18 shl 8) or 18
+        val sourceLightEye = (0xFF shl 24) or (112 shl 16) or (86 shl 8) or 74
+        for (y in 215..225) {
+            for (x in 188..204) {
+                tgtPx[y * size + x] = targetDarkEyeliner
+                swapPx[y * size + x] = sourceLightEye
+            }
+        }
+        com.example.onnx.NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
+            swapPx512 = swapPx,
+            tgtPx512 = tgtPx,
+            geom512 = geom,
+            makeupPreservationStrength = 0.85f,
+            isNeuralSwap = true
+        )
+        assertEquals("Source eye/eyelid must not be overwritten by target kajal in neural swap", sourceLightEye, swapPx[220 * size + 195])
+
+        // 3. Full HD FaceBlender with distinct Source crop vs Target portrait must keep strong inner-face Source identity
+        val (tgtBmp, tgtFace) = createSyntheticPortrait(
+            width = 480,
+            height = 640,
+            bgColor = Color.rgb(210, 210, 210),
+            skinColor = Color.rgb(232, 198, 174),
+            hairColor = Color.rgb(25, 20, 20),
+            rollDegrees = 0f
+        )
+        val (srcBmp, _) = createSyntheticPortrait(
+            width = 480,
+            height = 640,
+            bgColor = Color.rgb(40, 40, 40),
+            skinColor = Color.rgb(168, 122, 96),
+            hairColor = Color.rgb(40, 30, 25),
+            rollDegrees = 0f
+        )
+        val m256 = FaceAlignment.estimateNorm(tgtFace.landmarks5, 256)
+        val swappedCrop256 = FaceAlignment.warpAffineCrop(srcBmp, m256, 256)
+        val targetPixels = IntArray(tgtBmp.width * tgtBmp.height)
+        tgtBmp.getPixels(targetPixels, 0, tgtBmp.width, 0, 0, tgtBmp.width, tgtBmp.height)
+        val blended = com.example.onnx.FaceBlender.enhanceAndBlendOnlineHdFace512(
+            ortEnv = ortEnv,
+            gfpganFile = null,
+            targetBitmap = tgtBmp,
+            targetPixels = targetPixels,
+            targetWidth = tgtBmp.width,
+            targetHeight = tgtBmp.height,
+            colorCorrected128 = swappedCrop256,
+            forwardMatrix128 = m256,
+            targetLandmarks5 = tgtFace.landmarks5,
+            skinToneMode = com.example.onnx.SkinToneSourceMode.SOURCE_IDENTITY,
+            faceReactionMode = com.example.onnx.FaceReactionSourceMode.TARGET_REACTION,
+            enableColorTransfer = true,
+            enableOcclusionProtection = true,
+            blendStrength = 1.0f,
+            enhancementStrength = 0.85f,
+            isNeuralSwap = true
+        )
+        val m512 = FloatArray(6) { i -> m256[i] * 2.0f }
+        val alignedTgt512 = FaceAlignment.warpAffineCrop(tgtBmp, m512, 512)
+        val alignedOut512 = FaceAlignment.warpAffineCrop(blended, m512, 512)
+        var centerDiff = 0.0
+        var samples = 0
+        for (y in 200..360 step 4) {
+            for (x in 176..336 step 4) {
+                val tc = alignedTgt512.getPixel(x, y)
+                val oc = alignedOut512.getPixel(x, y)
+                centerDiff += (kotlin.math.abs(Color.red(tc) - Color.red(oc)) +
+                    kotlin.math.abs(Color.green(tc) - Color.green(oc)) +
+                    kotlin.math.abs(Color.blue(tc) - Color.blue(oc))) / 3.0
+                samples++
+            }
+        }
+        val meanCenterDiff = centerDiff / samples.coerceAtLeast(1)
+        assertTrue(
+            "Inner face must strongly reflect Source identity over Target (meanCenterDiff=$meanCenterDiff)",
+            meanCenterDiff >= 25.0
+        )
+    }
 }

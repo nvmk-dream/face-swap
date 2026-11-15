@@ -94,15 +94,7 @@ object ArcFaceRecognizer {
         val latentVector: FloatArray
         val usedEmap: Boolean
         if (emap512x512 != null && emap512x512.size == EMBEDDING_DIM * EMBEDDING_DIM) {
-            val projected = FloatArray(EMBEDDING_DIM)
-            for (col in 0 until EMBEDDING_DIM) {
-                var sum = 0f
-                for (row in 0 until EMBEDDING_DIM) {
-                    sum += normedEmbedding[row] * emap512x512[row * EMBEDDING_DIM + col]
-                }
-                projected[col] = sum
-            }
-            latentVector = l2Normalize(projected)
+            latentVector = projectWithEmap(normedEmbedding, emap512x512)
             usedEmap = true
         } else {
             latentVector = normedEmbedding.copyOf()
@@ -130,6 +122,21 @@ object ArcFaceRecognizer {
             rawEmbeddingL2Norm = rawNorm,
             executionProvider = activeEp
         )
+    }
+
+    internal fun projectWithEmap(normedEmbedding: FloatArray, emap512x512: FloatArray): FloatArray {
+        if (normedEmbedding.size != EMBEDDING_DIM || emap512x512.size != EMBEDDING_DIM * EMBEDDING_DIM) {
+            return normedEmbedding.copyOf()
+        }
+        val projected = FloatArray(EMBEDDING_DIM)
+        for (col in 0 until EMBEDDING_DIM) {
+            var sum = 0f
+            for (row in 0 until EMBEDDING_DIM) {
+                sum += normedEmbedding[row] * emap512x512[row * EMBEDDING_DIM + col]
+            }
+            projected[col] = sum
+        }
+        return l2Normalize(projected)
     }
 
     fun computeL2Norm(vec: FloatArray): Float {
