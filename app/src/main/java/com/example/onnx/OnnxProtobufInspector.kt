@@ -403,11 +403,51 @@ object OnnxProtobufInspector {
     private data class CachedOrtSessionEntry(
         val session: OrtSession,
         val lastModified: Long,
-        val fileLength: Long
+        val fileLength: Long,
+        val providerLabel: String
     )
 
     private val globalSessionCache = java.util.concurrent.ConcurrentHashMap<String, CachedOrtSessionEntry>()
     private val globalSessionLock = Any()
+
+    enum class SwapperOutputRangeHint {
+        AUTO,
+        SIGNED_MINUS1_TO_1,
+        UNSIGNED_0_TO_1
+    }
+
+    data class SwapperGraphSpec(
+        val inputNames: List<String>,
+        val outputNames: List<String>,
+        val trailingOutputOps: List<String>,
+        val leadingInputOps: List<String>,
+        val outputRangeHint: SwapperOutputRangeHint,
+        val hasEmbeddedInputNorm: Boolean
+    )
+
+    private val swapperGraphSpecCache = java.util.concurrent.ConcurrentHashMap<String, SwapperGraphSpec>()
+
+    internal fun shouldBypassXnnpackForFile(modelFile: File): Boolean {
+        val lower = modelFile.name.lowercase()
+        // ONNX Runtime Android 1.20.0 XNNPACK has NCHW<->NHWC repacking & ConvTranspose/Resize
+        // layout bugs on UNet/GAN generators & ArcFace backbones that corrupt dark regions into
+        // black blocks & red overflows without throwing exceptions. Run these on pure CPU(ALL_OPT).
+        return lower.contains("hyperswap") ||
+            lower.contains("inswapper") ||
+            lower.contains("w600k") ||
+            lower.contains("arcface") ||
+            lower.contains("gfpgan") ||
+            lower.contains("codeformer") ||
+            lower.contains("lama") ||
+            lower.contains("segformer") ||
+            lower.contains("bisenet") ||
+            lower.contains("occluder") ||
+            lower.contains("xseg")
+    }
+
+    fun getCachedExecutionProvider(file: File): String? {
+        return globalSessionCache[file.absolutePath]?.providerLabel
+    }
 
     @Volatile
     private var appContextRef: Context? = null
@@ -527,12 +567,12 @@ object OnnxProtobufInspector {
                 }
             }
             return try {
-                val (session, _) = createSessionWithFallback(
+                val (session, epLabel) = createSessionWithFallback(
                     ortEnv = ortEnv,
                     modelFile = file,
                     preferHardwareAcceleration = preferHardwareAcceleration
                 )
-                globalSessionCache[key] = CachedOrtSessionEntry(session, lastMod, effectiveLen)
+                globalSessionCache[key] = CachedOrtSessionEntry(session, lastMod, effectiveLen, epLabel)
                 session
             } catch (oom: OutOfMemoryError) {
                 clearCachedSessions()
@@ -630,16 +670,21 @@ object OnnxProtobufInspector {
             val xnnpack: Boolean,
             val optLevel: OrtSession.SessionOptions.OptLevel
         )
+        val bypassXnnpack = shouldBypassXnnpackForFile(modelFile)
         val allAttempts = buildList {
             if (preferHardwareAcceleration) {
                 // Keep NNAPI at rank 0 only when user explicitly toggled Hardware Acceleration ON;
-                // if NNAPI crashes natively, breadcrumb promotes minSafeRank -> 1 (XNNPACK) so next run skips NNAPI.
+                // if NNAPI crashes natively, breadcrumb promotes minSafeRank -> next safe stage.
                 add(Attempt(RANK_XNNPACK, "NNAPI", nnapi = true, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
-                add(Attempt(RANK_CPU_ALL_OPT, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                if (!bypassXnnpack) {
+                    add(Attempt(RANK_CPU_ALL_OPT, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                }
                 add(Attempt(RANK_CPU_BASIC, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
                 add(Attempt(RANK_CPU_NO_OPT, "CPU(NO_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.NO_OPT))
             } else {
-                add(Attempt(RANK_XNNPACK, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                if (!bypassXnnpack) {
+                    add(Attempt(RANK_XNNPACK, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                }
                 add(Attempt(RANK_CPU_ALL_OPT, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
                 add(Attempt(RANK_CPU_BASIC, "CPU(BASIC)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
                 add(Attempt(RANK_CPU_NO_OPT, "CPU(NO_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.NO_OPT))
@@ -1469,6 +1514,123 @@ object OnnxProtobufInspector {
             }
         }
         return HeaderMeta(irVersion, producerName, opsetVersion)
+    }
+
+    /**
+     * Inspects an ONNX graph's leading input nodes and trailing output activation ops
+     * while skipping multi-hundred-MB weight initializers in O(1) stream skips.
+     */
+    fun inspectSwapperGraphSpec(file: File): SwapperGraphSpec {
+        val cacheKey = "${file.absolutePath}_${file.length()}_${file.lastModified()}"
+        swapperGraphSpecCache[cacheKey]?.let { return it }
+
+        val inputNames = mutableListOf<String>()
+        val outputNames = mutableListOf<String>()
+        val nodes = mutableListOf<Triple<List<String>, List<String>, String>>()
+
+        runCatching {
+            BufferedInputStream(FileInputStream(file), 256 * 1024).use { input ->
+                val reader = ProtoStreamReader(input, maxBytesToRead = file.length())
+                while (!reader.isEof()) {
+                    val tag = reader.readVarint32()
+                    if (tag <= 0) break
+                    val fieldNumber = tag ushr 3
+                    val wireType = tag and 0x07
+                    if (fieldNumber == 7 && wireType == 2) {
+                        val graphLen = reader.readVarint64()
+                        val graphEnd = reader.bytesRead + graphLen
+                        while (reader.bytesRead < graphEnd && !reader.isEof()) {
+                            val gTag = reader.readVarint32()
+                            if (gTag <= 0) break
+                            val gField = gTag ushr 3
+                            val gWire = gTag and 0x07
+                            when {
+                                gField == 1 && gWire == 2 -> {
+                                    val nodeLen = reader.readVarint64()
+                                    val nodeEnd = reader.bytesRead + nodeLen
+                                    val nodeInputs = mutableListOf<String>()
+                                    val nodeOutputs = mutableListOf<String>()
+                                    var opType = ""
+                                    while (reader.bytesRead < nodeEnd && !reader.isEof()) {
+                                        val nTag = reader.readVarint32()
+                                        if (nTag <= 0) break
+                                        val nField = nTag ushr 3
+                                        val nWire = nTag and 0x07
+                                        when {
+                                            nField == 1 && nWire == 2 -> nodeInputs.add(reader.readString())
+                                            nField == 2 && nWire == 2 -> nodeOutputs.add(reader.readString())
+                                            nField == 4 && nWire == 2 -> opType = reader.readString()
+                                            else -> reader.skipField(nWire)
+                                        }
+                                    }
+                                    if (reader.bytesRead < nodeEnd) {
+                                        reader.skipBytes(nodeEnd - reader.bytesRead)
+                                    }
+                                    if (opType.isNotEmpty()) {
+                                        nodes.add(Triple(nodeInputs, nodeOutputs, opType))
+                                    }
+                                }
+                                (gField == 11 || gField == 12) && gWire == 2 -> {
+                                    val viLen = reader.readVarint64()
+                                    val viEnd = reader.bytesRead + viLen
+                                    var viName = ""
+                                    while (reader.bytesRead < viEnd && !reader.isEof()) {
+                                        val vTag = reader.readVarint32()
+                                        if (vTag <= 0) break
+                                        val vField = vTag ushr 3
+                                        val vWire = vTag and 0x07
+                                        if (vField == 1 && vWire == 2) {
+                                            viName = reader.readString()
+                                        } else {
+                                            reader.skipField(vWire)
+                                        }
+                                    }
+                                    if (reader.bytesRead < viEnd) {
+                                        reader.skipBytes(viEnd - reader.bytesRead)
+                                    }
+                                    if (viName.isNotEmpty()) {
+                                        if (gField == 11) inputNames.add(viName) else outputNames.add(viName)
+                                    }
+                                }
+                                else -> reader.skipField(gWire)
+                            }
+                        }
+                    } else {
+                        reader.skipField(wireType)
+                    }
+                }
+            }
+        }
+
+        val inputSet = inputNames.toSet()
+        val outputSet = outputNames.toSet()
+        val leadingInputOps = nodes
+            .filter { (ins, _, _) -> ins.any { it in inputSet } }
+            .map { it.third }
+        val trailingOutputOps = nodes
+            .filter { (_, outs, _) -> outs.any { it in outputSet } }
+            .map { it.third }
+            .ifEmpty { nodes.takeLast(3).map { it.third } }
+
+        val hasEmbeddedInputNorm = leadingInputOps.any {
+            it == "Div" || it == "Sub" || it == "Mul" || it == "Add"
+        }
+        val outputRangeHint = when {
+            trailingOutputOps.any { it.equals("Tanh", ignoreCase = true) } ->
+                SwapperOutputRangeHint.SIGNED_MINUS1_TO_1
+            trailingOutputOps.any { it.equals("Sigmoid", ignoreCase = true) || it.equals("Clip", ignoreCase = true) } ->
+                SwapperOutputRangeHint.UNSIGNED_0_TO_1
+            else -> SwapperOutputRangeHint.AUTO
+        }
+
+        return SwapperGraphSpec(
+            inputNames = inputNames,
+            outputNames = outputNames,
+            trailingOutputOps = trailingOutputOps,
+            leadingInputOps = leadingInputOps,
+            outputRangeHint = outputRangeHint,
+            hasEmbeddedInputNorm = hasEmbeddedInputNorm
+        ).also { swapperGraphSpecCache[cacheKey] = it }
     }
 
     private data class CandidateInitializer512(

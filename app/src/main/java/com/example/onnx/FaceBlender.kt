@@ -460,8 +460,16 @@ object FaceBlender {
                     val tB = tc and 0xFF
                     val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
 
-                    // Only heal if the swapped eyebrow has an unnatural blown-out bright white gap (cLum > tLum + 48)
-                    if (tLum < 75f && cLum > tLum + 48f) {
+                    // Heal bright white gaps AND out-of-gamut neon-red or collapsed-black decoder corruption
+                    val isNeonRedArtifact = (cR - cG >= 72) && (cR - cB >= 72) && (tR - tG < 48)
+                    val isCollapsedBlackHole = (cR <= 8 && cG <= 8 && cB <= 8) && (tLum > 48f)
+                    if (isNeonRedArtifact || isCollapsedBlackHole) {
+                        val corruptBlend = (0.92f * archWeight).coerceIn(0f, 0.94f)
+                        val finalR = (cR * (1f - corruptBlend) + tR * corruptBlend).toInt().coerceIn(0, 255)
+                        val finalG = (cG * (1f - corruptBlend) + tG * corruptBlend).toInt().coerceIn(0, 255)
+                        val finalB = (cB * (1f - corruptBlend) + tB * corruptBlend).toInt().coerceIn(0, 255)
+                        outPx[idx] = (0xFF shl 24) or (finalR shl 16) or (finalG shl 8) or finalB
+                    } else if (tLum < 75f && cLum > tLum + 48f) {
                         val browBlend = (0.38f * archWeight).coerceIn(0f, 0.42f)
                         val finalR = (cR * (1f - browBlend) + tR * browBlend).toInt().coerceIn(0, 255)
                         val finalG = (cG * (1f - browBlend) + tG * browBlend).toInt().coerceIn(0, 255)
@@ -523,9 +531,17 @@ object FaceBlender {
                     val tB = tc and 0xFF
                     val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
 
-                    // Only intervene if a dark pupil/iris pixel turned cloudy/white in the neural output
+                    // Intervene on cloudy pupil artifacts OR out-of-gamut neon-red / collapsed-black holes
+                    val isNeonRedArtifact = (cR - cG >= 72) && (cR - cB >= 72) && (tR - tG < 48)
+                    val isCollapsedBlackHole = (cR <= 8 && cG <= 8 && cB <= 8) && (tLum > 48f)
                     val isCloudyPupilAnomaly = normDist <= 0.65f && tLum < 55f && cLum > tLum + 42f
-                    if (isCloudyPupilAnomaly) {
+                    if (isNeonRedArtifact || isCollapsedBlackHole) {
+                        val eyeBlend = (0.92f * socketWeight).coerceIn(0f, 0.94f)
+                        val eR = (cR * (1f - eyeBlend) + tR * eyeBlend).toInt().coerceIn(0, 255)
+                        val eG = (cG * (1f - eyeBlend) + tG * eyeBlend).toInt().coerceIn(0, 255)
+                        val eB = (cB * (1f - eyeBlend) + tB * eyeBlend).toInt().coerceIn(0, 255)
+                        outPx[idx] = (0xFF shl 24) or (eR shl 16) or (eG shl 8) or eB
+                    } else if (isCloudyPupilAnomaly) {
                         val eyeBlend = (0.55f * socketWeight).coerceIn(0f, 0.60f)
                         val eR = (cR * (1f - eyeBlend) + tR * eyeBlend).toInt().coerceIn(0, 255)
                         val eG = (cG * (1f - eyeBlend) + tG * eyeBlend).toInt().coerceIn(0, 255)
@@ -799,7 +815,7 @@ object FaceBlender {
         ortEnv: OrtEnvironment,
         session: OrtSession,
         crop128Or512: Bitmap
-    ): Bitmap {
+    ): Bitmap? {
         val gfpSize = HD_SIZE
         val hw = gfpSize * gfpSize
         val pixels = upscaleBitmapBicubicTo512(crop128Or512)
@@ -819,18 +835,44 @@ object FaceBlender {
         val outPixels512 = IntArray(hw)
         val inputName = session.inputNames.first()
         val shape = longArrayOf(1L, 3L, gfpSize.toLong(), gfpSize.toLong())
+        var introducedNeonRed = 0
+        var introducedBlack = 0
+        var nanFloats = 0
         OnnxTensor.createTensor(ortEnv, inBuf, shape).use { inTensor ->
             session.run(mapOf(inputName to inTensor)).use { res ->
                 val outT = res[0] as OnnxTensor
                 val outFloats = FloatArray(3 * hw)
-                outT.floatBuffer.get(outFloats)
+                outT.floatBuffer.get(outFloats, 0, min(outT.floatBuffer.remaining(), outFloats.size))
+                for (v in outFloats) {
+                    if (!v.isFinite()) nanFloats++
+                }
+                if (nanFloats > hw / 50) return null
                 for (i in 0 until hw) {
-                    val r = (((outFloats[i] * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                    val g = (((outFloats[hw + i] * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                    val b = (((outFloats[2 * hw + i] * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                    val fr = if (outFloats[i].isFinite()) outFloats[i] else 0f
+                    val fg = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
+                    val fb = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
+                    val r = (((fr * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                    val g = (((fg * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                    val b = (((fb * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
                     outPixels512[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+
+                    val inC = pixels[i]
+                    val inR = (inC ushr 16) and 0xFF
+                    val inG = (inC ushr 8) and 0xFF
+                    val inB = inC and 0xFF
+                    val inLum = 0.299f * inR + 0.587f * inG + 0.114f * inB
+                    if ((r - g >= 72) && (r - b >= 72) && (inR - inG < 48)) {
+                        introducedNeonRed++
+                    }
+                    if (r <= 8 && g <= 8 && b <= 8 && inLum > 48f) {
+                        introducedBlack++
+                    }
                 }
             }
+        }
+        // Guard against StyleGAN/GFPGAN corruption (never blend corrupted buffer onto swapped crop)
+        if ((introducedNeonRed + introducedBlack).toFloat() / hw.toFloat() > 0.025f) {
+            return null
         }
         val restored512 = Bitmap.createBitmap(gfpSize, gfpSize, Bitmap.Config.ARGB_8888)
         restored512.setPixels(outPixels512, 0, gfpSize, 0, 0, gfpSize, gfpSize)
@@ -1010,8 +1052,13 @@ object FaceBlender {
             val gfpPx = IntArray(total512)
             gfp512.getPixels(gfpPx, 0, HD_SIZE, 0, 0, HD_SIZE, HD_SIZE)
             gfp512.recycle()
-            // Cap GFPGAN blend at ~68% so 512px restoration sharpens texture without erasing Source identity
-            val gfpWeight = (0.24f + 0.44f * clampedEnhance).coerceIn(0f, 0.68f)
+            // For 256px neural models (hyperswap_1b_256), cap GFPGAN at 0.45 so Source identity is preserved
+            // while still refining micro-pores and ocular clarity; allow up to 0.68 for 128px models.
+            val gfpWeight = if (activeSwapCrop.width >= 256) {
+                (0.16f + 0.29f * clampedEnhance).coerceIn(0f, 0.45f)
+            } else {
+                (0.24f + 0.44f * clampedEnhance).coerceIn(0f, 0.68f)
+            }
             val invEnh = 1.0f - gfpWeight
             for (i in 0 until total512) {
                 val bc = swapPx512[i]
@@ -1158,6 +1205,12 @@ object FaceBlender {
                 pixels512 = swapPx512,
                 geom512 = geom512,
                 params = FaceAgingStyleEngine.AgingParameters(ageFactor = 0.0f)
+            )
+            // Perioral / nostril / brow edge guard against non-target out-of-gamut neon-red or black overshoots
+            healOutOfGamutRedAndBlackAnomalies512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                geom512 = geom512
             )
         }
         val restoration512Ms = ((System.currentTimeMillis() - tRestore0) - upperLipGuardMs).coerceAtLeast(1L)
@@ -1399,8 +1452,8 @@ object FaceBlender {
 
     /**
      * Frequency-separated anatomical feature enhancer in 512x512 HD space:
-     * Boosts fine micro-contrast specifically on the Left Eye, Right Eye, Eyebrows, Nose Tip/Nostrils,
-     * and Lip Vermilion Contour (strictly excluding the philtrum/upper-lip skin region).
+     * Uses 3x3 (stride=1) edge-aware luminance sharpening on the Left Eye, Right Eye, Eyebrows,
+     * Nose Tip/Nostrils, and Lip Contour so 4px checkerboard aliasing and color fringing never occur.
      */
     private fun enhanceAnatomicalFeatures512(
         swapPx512: IntArray,
@@ -1436,19 +1489,65 @@ object FaceBlender {
                 val cr = (c ushr 16) and 0xFF
                 val cg = (c ushr 8) and 0xFF
                 val cb = c and 0xFF
+                val cLum = 0.299f * cr + 0.587f * cg + 0.114f * cb
 
-                val n = copy[(y - 2) * HD_SIZE + x]
-                val s = copy[(y + 2) * HD_SIZE + x]
-                val w = copy[row + x - 2]
-                val e = copy[row + x + 2]
+                val n = copy[(y - 1) * HD_SIZE + x]
+                val s = copy[(y + 1) * HD_SIZE + x]
+                val w = copy[row + x - 1]
+                val e = copy[row + x + 1]
                 val avgR = (((n ushr 16) and 0xFF) + ((s ushr 16) and 0xFF) + ((w ushr 16) and 0xFF) + ((e ushr 16) and 0xFF)) * 0.25f
                 val avgG = (((n ushr 8) and 0xFF) + ((s ushr 8) and 0xFF) + ((w ushr 8) and 0xFF) + ((e ushr 8) and 0xFF)) * 0.25f
                 val avgB = ((n and 0xFF) + (s and 0xFF) + (w and 0xFF) + (e and 0xFF)) * 0.25f
+                val avgLum = 0.299f * avgR + 0.587f * avgG + 0.114f * avgB
 
-                val outR = (cr + (cr - avgR) * featWeight * 0.65f).toInt().coerceIn(0, 255)
-                val outG = (cg + (cg - avgG) * featWeight * 0.65f).toInt().coerceIn(0, 255)
-                val outB = (cb + (cb - avgB) * featWeight * 0.65f).toInt().coerceIn(0, 255)
+                // Luminance-only bounded sharpening prevents 4px stride-2 checkerboards and RGB color halos
+                val deltaLum = ((cLum - avgLum) * featWeight * 0.48f).coerceIn(-18f, 18f)
+                val outR = (cr + deltaLum).toInt().coerceIn(0, 255)
+                val outG = (cg + deltaLum).toInt().coerceIn(0, 255)
+                val outB = (cb + deltaLum).toInt().coerceIn(0, 255)
                 swapPx512[idx] = (0xFF shl 24) or (outR shl 16) or (outG shl 8) or outB
+            }
+        }
+    }
+
+    private fun healOutOfGamutRedAndBlackAnomalies512(
+        swapPx512: IntArray,
+        tgtPx512: IntArray,
+        geom512: WarpedFaceGeometry
+    ) {
+        val browOffset = geom512.eyeDist * 0.28f
+        val minY = (min(geom512.leftEye.y, geom512.rightEye.y) - browOffset - geom512.eyeDist * 0.24f)
+            .toInt().coerceIn(12, HD_SIZE - 13)
+        val maxY = (max(geom512.leftMouth.y, geom512.rightMouth.y) + geom512.eyeDist * 0.30f)
+            .toInt().coerceIn(minY + 1, HD_SIZE - 13)
+        val minX = (min(geom512.leftEye.x, geom512.leftMouth.x) - geom512.eyeDist * 0.55f)
+            .toInt().coerceIn(12, HD_SIZE - 13)
+        val maxX = (max(geom512.rightEye.x, geom512.rightMouth.x) + geom512.eyeDist * 0.55f)
+            .toInt().coerceIn(minX + 1, HD_SIZE - 13)
+
+        for (y in minY..maxY) {
+            val row = y * HD_SIZE
+            for (x in minX..maxX) {
+                val idx = row + x
+                val sc = swapPx512[idx]
+                val sR = (sc ushr 16) and 0xFF
+                val sG = (sc ushr 8) and 0xFF
+                val sB = sc and 0xFF
+
+                val tc = tgtPx512[idx]
+                val tR = (tc ushr 16) and 0xFF
+                val tG = (tc ushr 8) and 0xFF
+                val tB = tc and 0xFF
+                val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
+
+                val isNeonRed = (sR - sG >= 68) && (sR - sB >= 68) && (tR - tG < 46)
+                val isCollapsedBlack = (sR <= 8 && sG <= 8 && sB <= 8) && (tLum > 48f)
+                if (isNeonRed || isCollapsedBlack) {
+                    val outR = (sR * 0.12f + tR * 0.88f).toInt().coerceIn(0, 255)
+                    val outG = (sG * 0.12f + tG * 0.88f).toInt().coerceIn(0, 255)
+                    val outB = (sB * 0.12f + tB * 0.88f).toInt().coerceIn(0, 255)
+                    swapPx512[idx] = (0xFF shl 24) or (outR shl 16) or (outG shl 8) or outB
+                }
             }
         }
     }
@@ -1924,14 +2023,14 @@ object FaceBlender {
             )
         }
 
-        val scaleR = (goalRStd / sRStd).toFloat().coerceIn(0.76f, 1.24f)
-        val scaleG = (goalGStd / sGStd).toFloat().coerceIn(0.76f, 1.24f)
-        val scaleB = (goalBStd / sBStd).toFloat().coerceIn(0.76f, 1.24f)
+        val scaleR = (goalRStd / sRStd).toFloat().coerceIn(0.82f, 1.18f)
+        val scaleG = (goalGStd / sGStd).toFloat().coerceIn(0.82f, 1.18f)
+        val scaleB = (goalBStd / sBStd).toFloat().coerceIn(0.82f, 1.18f)
 
         val strength = when (skinToneMode) {
-            SkinToneSourceMode.TARGET_SCENE -> 0.94f
-            SkinToneSourceMode.SOURCE_IDENTITY -> 0.92f
-            SkinToneSourceMode.BALANCED_BLEND -> 0.90f
+            SkinToneSourceMode.TARGET_SCENE -> 0.90f
+            SkinToneSourceMode.SOURCE_IDENTITY -> 0.88f
+            SkinToneSourceMode.BALANCED_BLEND -> 0.88f
         }
 
         for (y in 0 until HD_SIZE) {
@@ -1951,9 +2050,10 @@ object FaceBlender {
                 val maxCh = max(origR, max(origG, origB))
                 val minCh = min(origR, min(origG, origB))
                 val chroma = maxCh - minCh
-                // Protect only genuine neutral-dark pupil/lash/eyebrow hair cores (never high-chroma colors)
-                val darkFeatureProt = if (eyeProt > 0.18f && lum < 56f && chroma < 42) eyeProt * 0.85f else 0f
-                val blend = strength * (1.0f - darkFeatureProt)
+                // Protect dark pupil/lash/eyebrow hair cores AND extreme high-chroma outliers
+                val darkFeatureProt = if (eyeProt > 0.18f && lum < 64f) eyeProt * 0.85f else 0f
+                val outlierProt = if (chroma > 88) 0.70f else 0f
+                val blend = strength * (1.0f - max(darkFeatureProt, outlierProt))
 
                 // Apply horizontal directional lighting gradient (xNorm in [-1, +1])
                 val xNorm = ((xf - 256f) / 180f).coerceIn(-1f, 1f)

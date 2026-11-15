@@ -230,6 +230,8 @@ object NegativeArtifactSuppression {
                     val sB = sc and 0xFF
                     val sLum = 0.299f * sR + 0.587f * sG + 0.114f * sB
 
+                    val isNeonRedArtifact = (sR - sG >= 72) && (sR - sB >= 72) && (tR - tG < 48)
+                    val isCollapsedBlackHole = (sR <= 8 && sG <= 8 && sB <= 8) && (tLum > 48f)
                     val isEyelinerLoss = if (isNeuralSwap) {
                         tLum < 42f && sLum > tLum + 55f
                     } else {
@@ -238,7 +240,14 @@ object NegativeArtifactSuppression {
                     val isCloudyPupil = dSq < 0.36f && tLum < 48f && sLum > tLum + (if (isNeuralSwap) 68f else 38f)
                     val isSquintFoldDeformation = !isNeuralSwap && v < -2f && abs(sLum - tLum) > 42f
 
-                    if (isEyelinerLoss || isCloudyPupil || isSquintFoldDeformation) {
+                    if (isNeonRedArtifact || isCollapsedBlackHole) {
+                        val env = (0.5f * (1.0f + cos(Math.PI * sqrt(dSq)))).toFloat()
+                        val w = (env * 0.94f).coerceIn(0f, 0.94f)
+                        val outR = (sR * (1f - w) + tR * w).toInt().coerceIn(0, 255)
+                        val outG = (sG * (1f - w) + tG * w).toInt().coerceIn(0, 255)
+                        val outB = (sB * (1f - w) + tB * w).toInt().coerceIn(0, 255)
+                        swapPx512[idx] = (0xFF shl 24) or (outR shl 16) or (outG shl 8) or outB
+                    } else if (isEyelinerLoss || isCloudyPupil || isSquintFoldDeformation) {
                         val env = (0.5f * (1.0f + cos(Math.PI * sqrt(dSq)))).toFloat()
                         val maxCap = if (isNeuralSwap) 0.58f else 0.88f
                         val w = (env * makeupPreservationStrength * 0.82f).coerceIn(0f, maxCap)

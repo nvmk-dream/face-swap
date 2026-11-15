@@ -6,8 +6,10 @@ import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.PointF
+import ai.onnxruntime.TensorInfo
 import java.io.File
 import java.nio.FloatBuffer
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
@@ -295,9 +297,12 @@ object InSwapperEngine {
         val alignedSource256 = FaceAlignment.warpAffineCrop(sourceBitmap, srcM256, DEFAULT_SWAP_SIZE)
 
         var activeSwapFile = swapFile
+        var activeSwapGraphSpec: OnnxProtobufInspector.SwapperGraphSpec? = null
+        var lastSwapTensorDiag = ""
         val executeWithSwapSession: (OrtSession?) -> Unit = { swapSession ->
             var targetInputName = "target"
             var sourceInputName = "source"
+            var targetOutputName: String? = null
             var detectedCropSize = if (activeSwapFile.name.lowercase().contains("128")) {
                 CANONICAL_ALIGN_SIZE
             } else {
@@ -305,7 +310,7 @@ object InSwapperEngine {
             }
             if (swapSession != null) {
                 for ((name, nodeInfo) in swapSession.inputInfo) {
-                    val tInfo = nodeInfo.info as? ai.onnxruntime.TensorInfo ?: continue
+                    val tInfo = nodeInfo.info as? TensorInfo ?: continue
                     if (tInfo.shape.size == 4) {
                         targetInputName = name
                         val hDim = tInfo.shape[2].toInt()
@@ -317,9 +322,19 @@ object InSwapperEngine {
                         sourceInputName = name
                     }
                 }
+                for ((outName, nodeInfo) in swapSession.outputInfo) {
+                    val tInfo = nodeInfo.info as? TensorInfo ?: continue
+                    if (tInfo.shape.size == 4 && (tInfo.shape[1] == 3L || targetOutputName == null)) {
+                        targetOutputName = outName
+                    }
+                }
             }
             activeSwapCropSize = detectedCropSize
             val isHyperSwap256 = (detectedCropSize == 256)
+            val graphSpec = if (activeSwapFile.exists() && activeSwapFile.length() > 1024L) {
+                OnnxProtobufInspector.inspectSwapperGraphSpec(activeSwapFile)
+            } else null
+            activeSwapGraphSpec = graphSpec
 
             // HyperSwap 1b 256 takes the L2-normalized 512-D ArcFace identity vector (or emap-projected if embedded)
             // InSwapper 128 takes the emap-projected 512-D latentSourceVector512
@@ -344,7 +359,7 @@ object InSwapperEngine {
                             stepIndex = 4,
                             totalSteps = 5,
                             stageTitle = "Stage 4/5: Neural Face Swap (${detectedCropSize}x${detectedCropSize}) (${idx + 1}/${targetFacesToReplace.size})",
-                            detailMessage = "Running ${swapFile.name} on aligned ${detectedCropSize}x${detectedCropSize} target crop #${targetFace.index + 1}...",
+                            detailMessage = "Running ${activeSwapFile.name} on aligned ${detectedCropSize}x${detectedCropSize} target crop #${targetFace.index + 1}...",
                             progressFraction = stepFrac
                         )
                     )
@@ -363,16 +378,20 @@ object InSwapperEngine {
                         } else {
                             alignedTarget256
                         }
-                        val neuralCrop = runSwapModelSingleFace(
+                        val (neuralCrop, diagSummary) = runSwapModelSingleFace(
                             ortEnv = ortEnv,
                             swapSession = swapSession,
+                            swapModelFile = activeSwapFile,
+                            graphSpec = graphSpec,
                             targetInputName = targetInputName,
                             sourceInputName = sourceInputName,
+                            preferredOutputName = targetOutputName,
                             alignedTargetCrop = alignedTargetForModel,
                             cropSize = detectedCropSize,
                             isHyperSwapModel = isHyperSwap256,
                             sourceTensor = sourceTensor
                         )
+                        lastSwapTensorDiag = diagSummary
                         if (detectedCropSize == 128) {
                             val cleaned128 = FaceBlender.restoreEyesAndEliminateNegativeArtifacts128(
                                 swapped128 = neuralCrop,
@@ -614,6 +633,14 @@ object InSwapperEngine {
             "$prefix ${(portraitBlurStrength * 100).toInt()}%"
         } else ""
 
+        val swapEpLabel = OnnxProtobufInspector.getCachedExecutionProvider(activeSwapFile)
+            ?: if (preloadedSwapSession != null) "In-Memory" else "CPU"
+        val graphTag = activeSwapGraphSpec?.let { spec ->
+            val ops = spec.trailingOutputOps.joinToString(",").ifEmpty { "auto" }
+            " ops=[$ops]"
+        } ?: ""
+        val diagTag = if (lastSwapTensorDiag.isNotEmpty()) " | $lastSwapTensorDiag" else ""
+
         return FaceSwapExecutionResult(
             outputBitmap = finalBitmap,
             alignedSource112 = sourceEmbedding.aligned112Crop,
@@ -627,7 +654,7 @@ object InSwapperEngine {
             inswapperMs = totalSwapMs.coerceAtLeast(1L),
             blendingMs = totalBlendMs.coerceAtLeast(1L),
             totalMs = totalMs,
-            pipelineSummary = "det_10g.onnx -> ${sourceEmbedding.providerSummary} -> ${activeSwapFile.name} (${activeSwapCropSize}px)$gfpTag$segTag$bokehTag | engineUsed=$engineUsed",
+            pipelineSummary = "det_10g.onnx -> ${sourceEmbedding.providerSummary} -> ${activeSwapFile.name} (${activeSwapCropSize}px, EP=$swapEpLabel$graphTag)$gfpTag$segTag$bokehTag | engineUsed=$engineUsed$diagTag",
             stage1SwapOnly512 = if (captureDiagnostics) firstStage1SwapOnly512 else null,
             stage2SwapRestore512 = if (captureDiagnostics) firstStage2Restore512 else null,
             stage3FinalBlend512 = if (captureDiagnostics) firstRestoredHd512 else null,
@@ -765,43 +792,221 @@ object InSwapperEngine {
         )
     }
 
-    private fun runSwapModelSingleFace(
+    internal enum class SwapChannelOrder { RGB, BGR }
+
+    internal enum class SwapInputRange { SIGNED_MINUS1_TO_1, UNSIGNED_0_TO_1 }
+
+    internal data class SwapTensorSpec(
+        val channelOrder: SwapChannelOrder,
+        val inputRange: SwapInputRange
+    ) {
+        fun label(): String = "${channelOrder.name}_${if (inputRange == SwapInputRange.SIGNED_MINUS1_TO_1) "m1p1" else "0p1"}"
+    }
+
+    internal data class RawOutputStats(
+        val minVal: Float,
+        val maxVal: Float,
+        val negFraction: Float,
+        val gtOneFraction: Float,
+        val nanFraction: Float,
+        val isSignedOutput: Boolean,
+        val neonRedFraction: Float,
+        val collapsedBlackFraction: Float,
+        val lumaCorrelation: Float,
+        val artifactScore: Float
+    )
+
+    private val verifiedSwapSpecCache = ConcurrentHashMap<String, SwapTensorSpec>()
+
+    internal fun inferSignedOutputMode(
+        outFloats: FloatArray,
+        outputRangeHint: OnnxProtobufInspector.SwapperOutputRangeHint = OnnxProtobufInspector.SwapperOutputRangeHint.AUTO
+    ): Boolean {
+        var minVal = Float.MAX_VALUE
+        var maxVal = -Float.MAX_VALUE
+        var negBeyondTol = 0
+        var gtOneBeyondTol = 0
+        var finiteCount = 0
+        for (v in outFloats) {
+            if (v.isFinite()) {
+                finiteCount++
+                if (v < minVal) minVal = v
+                if (v > maxVal) maxVal = v
+                if (v < -0.15f) negBeyondTol++
+                if (v > 1.08f) gtOneBeyondTol++
+            }
+        }
+        if (finiteCount == 0) return false
+        val negFrac = negBeyondTol.toFloat() / finiteCount.toFloat()
+        val gtOneFrac = gtOneBeyondTol.toFloat() / finiteCount.toFloat()
+
+        return when (outputRangeHint) {
+            OnnxProtobufInspector.SwapperOutputRangeHint.SIGNED_MINUS1_TO_1 -> {
+                // Only override Tanh hint if output clearly lives strictly inside [0, 1]
+                !(minVal >= -0.02f && maxVal <= 1.02f && negFrac == 0f)
+            }
+            OnnxProtobufInspector.SwapperOutputRangeHint.UNSIGNED_0_TO_1 -> {
+                // Only override Sigmoid/Clip hint if strongly negative values exist
+                negFrac > 0.05f || minVal < -0.35f
+            }
+            OnnxProtobufInspector.SwapperOutputRangeHint.AUTO -> {
+                // Robust percentile/fraction check: single -0.01f overshoot must NOT flip [0,1] output
+                negFrac > 0.02f || minVal < -0.22f || (gtOneFrac > 0.05f && maxVal > 1.20f)
+            }
+        }
+    }
+
+    internal fun decodeRawOutputToPixels(
+        outFloats: FloatArray,
+        hw: Int,
+        channelOrder: SwapChannelOrder,
+        isSignedOutput: Boolean
+    ): IntArray {
+        val outPixels = IntArray(hw)
+        for (i in 0 until hw) {
+            val c0 = if (outFloats[i].isFinite()) outFloats[i] else 0f
+            val c1 = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
+            val c2 = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
+            val rRaw = if (channelOrder == SwapChannelOrder.RGB) c0 else c2
+            val gRaw = c1
+            val bRaw = if (channelOrder == SwapChannelOrder.RGB) c2 else c0
+            val r: Int
+            val g: Int
+            val b: Int
+            if (isSignedOutput) {
+                r = ((rRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                g = ((gRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                b = ((bRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+            } else {
+                r = (rRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                g = (gRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                b = (bRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+            }
+            outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        return outPixels
+    }
+
+    internal fun analyzeRawSwapOutput(
+        outFloats: FloatArray,
+        outPixels: IntArray,
+        targetPixels: IntArray,
+        isSignedOutput: Boolean
+    ): RawOutputStats {
+        var minVal = Float.MAX_VALUE
+        var maxVal = -Float.MAX_VALUE
+        var negCount = 0
+        var gtOneCount = 0
+        var nanCount = 0
+        for (v in outFloats) {
+            if (!v.isFinite()) {
+                nanCount++
+            } else {
+                if (v < minVal) minVal = v
+                if (v > maxVal) maxVal = v
+                if (v < -0.15f) negCount++
+                if (v > 1.05f) gtOneCount++
+            }
+        }
+        val nFloats = outFloats.size.coerceAtLeast(1)
+        val hw = outPixels.size.coerceAtLeast(1)
+
+        var neonRedCount = 0
+        var collapsedBlackCount = 0
+        var sumT = 0.0
+        var sumS = 0.0
+        var sumTT = 0.0
+        var sumSS = 0.0
+        var sumTS = 0.0
+        var corrSamples = 0
+
+        for (i in 0 until hw) {
+            val sc = outPixels[i]
+            val sr = (sc ushr 16) and 0xFF
+            val sg = (sc ushr 8) and 0xFF
+            val sb = sc and 0xFF
+
+            val tc = targetPixels[i]
+            val tr = (tc ushr 16) and 0xFF
+            val tg = (tc ushr 8) and 0xFF
+            val tb = tc and 0xFF
+            val tLum = 0.299f * tr + 0.587f * tg + 0.114f * tb
+            val sLum = 0.299f * sr + 0.587f * sg + 0.114f * sb
+
+            if ((sr - sg >= 72) && (sr - sb >= 72) && (tr - tg < 48)) {
+                neonRedCount++
+            }
+            if (sr <= 8 && sg <= 8 && sb <= 8 && tLum > 48f) {
+                collapsedBlackCount++
+            }
+
+            if ((i and 3) == 0) {
+                sumT += tLum
+                sumS += sLum
+                sumTT += tLum * tLum
+                sumSS += sLum * sLum
+                sumTS += tLum * sLum
+                corrSamples++
+            }
+        }
+
+        val lumaCorr = if (corrSamples > 16) {
+            val cov = sumTS - (sumT * sumS) / corrSamples
+            val varT = (sumTT - (sumT * sumT) / corrSamples).coerceAtLeast(1e-3)
+            val varS = (sumSS - (sumS * sumS) / corrSamples).coerceAtLeast(1e-3)
+            (cov / sqrt(varT * varS)).toFloat().coerceIn(-1f, 1f)
+        } else 0f
+
+        val neonRedFrac = neonRedCount.toFloat() / hw.toFloat()
+        val blackFrac = collapsedBlackCount.toFloat() / hw.toFloat()
+        val nanFrac = nanCount.toFloat() / nFloats.toFloat()
+        val corrPenalty = if (lumaCorr < 0.12f) 0.50f else 0f
+        val artifactScore = neonRedFrac * 4.0f + blackFrac * 3.0f + nanFrac * 10.0f + corrPenalty
+
+        return RawOutputStats(
+            minVal = if (minVal == Float.MAX_VALUE) 0f else minVal,
+            maxVal = if (maxVal == -Float.MAX_VALUE) 0f else maxVal,
+            negFraction = negCount.toFloat() / nFloats.toFloat(),
+            gtOneFraction = gtOneCount.toFloat() / nFloats.toFloat(),
+            nanFraction = nanFrac,
+            isSignedOutput = isSignedOutput,
+            neonRedFraction = neonRedFrac,
+            collapsedBlackFraction = blackFrac,
+            lumaCorrelation = lumaCorr,
+            artifactScore = artifactScore
+        )
+    }
+
+    private fun runSwapModelWithSpec(
         ortEnv: OrtEnvironment,
         swapSession: OrtSession,
         targetInputName: String,
         sourceInputName: String,
-        alignedTargetCrop: Bitmap,
+        preferredOutputName: String?,
+        targetPixels: IntArray,
         cropSize: Int,
-        isHyperSwapModel: Boolean,
+        spec: SwapTensorSpec,
+        outputRangeHint: OnnxProtobufInspector.SwapperOutputRangeHint,
         sourceTensor: OnnxTensor
-    ): Bitmap {
+    ): Pair<IntArray, RawOutputStats> {
         val hw = cropSize * cropSize
-        val pixels = IntArray(hw)
-        alignedTargetCrop.getPixels(pixels, 0, cropSize, 0, 0, cropSize, cropSize)
-
-        // Preprocess target crop according to actual ONNX graph:
-        //  - HyperSwap 1a/1b/1c (256x256): NCHW [1, 3, 256, 256], RGB normalized (px - 127.5f) / 127.5f in [-1.0f, 1.0f]
-        //  - InSwapper 128 (128x128): NCHW [1, 3, 128, 128], RGB normalized px / 255.0f in [0.0f, 1.0f]
         val targetBuffer = FloatBuffer.allocate(3 * hw)
-        if (isHyperSwapModel) {
-            for (i in 0 until hw) {
-                val c = pixels[i]
-                val r = (((c ushr 16) and 0xFF) - 127.5f) / 127.5f
-                val g = (((c ushr 8) and 0xFF) - 127.5f) / 127.5f
-                val b = ((c and 0xFF) - 127.5f) / 127.5f
-                targetBuffer.put(i, r)
-                targetBuffer.put(hw + i, g)
-                targetBuffer.put(2 * hw + i, b)
-            }
-        } else {
-            for (i in 0 until hw) {
-                val c = pixels[i]
-                val r = ((c ushr 16) and 0xFF) / 255.0f
-                val g = ((c ushr 8) and 0xFF) / 255.0f
-                val b = (c and 0xFF) / 255.0f
-                targetBuffer.put(i, r)
-                targetBuffer.put(hw + i, g)
-                targetBuffer.put(2 * hw + i, b)
+        for (i in 0 until hw) {
+            val c = targetPixels[i]
+            val rByte = (c ushr 16) and 0xFF
+            val gByte = (c ushr 8) and 0xFF
+            val bByte = c and 0xFF
+            val c0Byte = if (spec.channelOrder == SwapChannelOrder.RGB) rByte else bByte
+            val c1Byte = gByte
+            val c2Byte = if (spec.channelOrder == SwapChannelOrder.RGB) bByte else rByte
+            if (spec.inputRange == SwapInputRange.SIGNED_MINUS1_TO_1) {
+                targetBuffer.put(i, (c0Byte - 127.5f) / 127.5f)
+                targetBuffer.put(hw + i, (c1Byte - 127.5f) / 127.5f)
+                targetBuffer.put(2 * hw + i, (c2Byte - 127.5f) / 127.5f)
+            } else {
+                targetBuffer.put(i, c0Byte / 255.0f)
+                targetBuffer.put(hw + i, c1Byte / 255.0f)
+                targetBuffer.put(2 * hw + i, c2Byte / 255.0f)
             }
         }
         targetBuffer.rewind()
@@ -813,57 +1018,125 @@ object InSwapperEngine {
                 sourceInputName to sourceTensor
             )
             swapSession.run(inputs).use { results ->
-                val outTensor = results[0] as OnnxTensor
+                val outValue = if (preferredOutputName != null) {
+                    results.get(preferredOutputName).orElse(results[0])
+                } else {
+                    results[0]
+                }
+                val outTensor = outValue as OnnxTensor
                 val outBuf = outTensor.floatBuffer
                 val outFloats = FloatArray(3 * hw)
-                outBuf.get(outFloats)
+                outBuf.get(outFloats, 0, min(outBuf.remaining(), outFloats.size))
 
-                // Scan the ENTIRE output tensor (never just the first 512 elements!) to verify [-1.0, 1.0] vs [0.0, 1.0].
-                var minVal = Float.MAX_VALUE
-                var maxVal = -Float.MAX_VALUE
-                for (v in outFloats) {
-                    if (v.isFinite()) {
-                        if (v < minVal) minVal = v
-                        if (v > maxVal) maxVal = v
-                    }
-                }
-                val isSignedOutput = if (isHyperSwapModel) {
-                    minVal < -0.01f || maxVal > 1.05f || minVal == Float.MAX_VALUE
-                } else {
-                    minVal < -0.05f
-                }
-
-                // Postprocess output [1, 3, cropSize, cropSize] RGB -> ARGB_8888 Bitmap
-                val outPixels = IntArray(hw)
-                if (isSignedOutput) {
-                    for (i in 0 until hw) {
-                        val rRaw = if (outFloats[i].isFinite()) outFloats[i] else 0f
-                        val gRaw = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
-                        val bRaw = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
-                        val r = ((rRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val g = ((gRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val b = ((bRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                    }
-                } else {
-                    for (i in 0 until hw) {
-                        val rRaw = if (outFloats[i].isFinite()) outFloats[i] else 0f
-                        val gRaw = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
-                        val bRaw = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
-                        val r = (rRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val g = (gRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val b = (bRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                    }
-                }
-                val swappedBitmap = Bitmap.createBitmap(
-                    cropSize,
-                    cropSize,
-                    Bitmap.Config.ARGB_8888
+                val isSignedOutput = inferSignedOutputMode(outFloats, outputRangeHint)
+                val outPixels = decodeRawOutputToPixels(
+                    outFloats = outFloats,
+                    hw = hw,
+                    channelOrder = spec.channelOrder,
+                    isSignedOutput = isSignedOutput
                 )
-                swappedBitmap.setPixels(outPixels, 0, cropSize, 0, 0, cropSize, cropSize)
-                return swappedBitmap
+                val stats = analyzeRawSwapOutput(
+                    outFloats = outFloats,
+                    outPixels = outPixels,
+                    targetPixels = targetPixels,
+                    isSignedOutput = isSignedOutput
+                )
+                return outPixels to stats
             }
         }
+    }
+
+    private fun runSwapModelSingleFace(
+        ortEnv: OrtEnvironment,
+        swapSession: OrtSession,
+        swapModelFile: File,
+        graphSpec: OnnxProtobufInspector.SwapperGraphSpec?,
+        targetInputName: String,
+        sourceInputName: String,
+        preferredOutputName: String?,
+        alignedTargetCrop: Bitmap,
+        cropSize: Int,
+        isHyperSwapModel: Boolean,
+        sourceTensor: OnnxTensor
+    ): Pair<Bitmap, String> {
+        val hw = cropSize * cropSize
+        val pixels = IntArray(hw)
+        alignedTargetCrop.getPixels(pixels, 0, cropSize, 0, 0, cropSize, cropSize)
+
+        val modelCacheKey = "${swapModelFile.absolutePath}_${swapModelFile.length()}_${swapModelFile.lastModified()}"
+        val defaultSpec = if (isHyperSwapModel) {
+            val initRange = if (graphSpec?.hasEmbeddedInputNorm == true &&
+                graphSpec.outputRangeHint == OnnxProtobufInspector.SwapperOutputRangeHint.UNSIGNED_0_TO_1
+            ) {
+                SwapInputRange.UNSIGNED_0_TO_1
+            } else {
+                SwapInputRange.SIGNED_MINUS1_TO_1
+            }
+            SwapTensorSpec(SwapChannelOrder.RGB, initRange)
+        } else {
+            SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.UNSIGNED_0_TO_1)
+        }
+        val primarySpec = verifiedSwapSpecCache[modelCacheKey] ?: defaultSpec
+        val outputRangeHint = graphSpec?.outputRangeHint ?: OnnxProtobufInspector.SwapperOutputRangeHint.AUTO
+
+        var (bestPixels, bestStats) = runSwapModelWithSpec(
+            ortEnv = ortEnv,
+            swapSession = swapSession,
+            targetInputName = targetInputName,
+            sourceInputName = sourceInputName,
+            preferredOutputName = preferredOutputName,
+            targetPixels = pixels,
+            cropSize = cropSize,
+            spec = primarySpec,
+            outputRangeHint = outputRangeHint,
+            sourceTensor = sourceTensor
+        )
+        var bestSpec = primarySpec
+
+        // Self-healing fallback check: if HyperSwap primary spec causes out-of-gamut neon-red / collapsed-black
+        // corruption or inverted luminance correlation, automatically verify alternative channel/range specs.
+        val hasCorruption = bestStats.neonRedFraction > 0.015f ||
+            bestStats.collapsedBlackFraction > 0.02f ||
+            bestStats.nanFraction > 0.005f ||
+            bestStats.lumaCorrelation < 0.10f
+        if (isHyperSwapModel && hasCorruption) {
+            val candidates = listOf(
+                SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.UNSIGNED_0_TO_1),
+                SwapTensorSpec(SwapChannelOrder.BGR, SwapInputRange.SIGNED_MINUS1_TO_1),
+                SwapTensorSpec(SwapChannelOrder.BGR, SwapInputRange.UNSIGNED_0_TO_1)
+            ).filter { it != primarySpec }
+            for (candSpec in candidates) {
+                val (candPixels, candStats) = runSwapModelWithSpec(
+                    ortEnv = ortEnv,
+                    swapSession = swapSession,
+                    targetInputName = targetInputName,
+                    sourceInputName = sourceInputName,
+                    preferredOutputName = preferredOutputName,
+                    targetPixels = pixels,
+                    cropSize = cropSize,
+                    spec = candSpec,
+                    outputRangeHint = outputRangeHint,
+                    sourceTensor = sourceTensor
+                )
+                if (candStats.artifactScore < bestStats.artifactScore) {
+                    bestPixels = candPixels
+                    bestStats = candStats
+                    bestSpec = candSpec
+                    if (bestStats.artifactScore < 0.02f) break
+                }
+            }
+            verifiedSwapSpecCache[modelCacheKey] = bestSpec
+        } else if (isHyperSwapModel) {
+            verifiedSwapSpecCache[modelCacheKey] = bestSpec
+        }
+
+        val swappedBitmap = Bitmap.createBitmap(cropSize, cropSize, Bitmap.Config.ARGB_8888)
+        swappedBitmap.setPixels(bestPixels, 0, cropSize, 0, 0, cropSize, cropSize)
+        val diagSummary = "spec=${bestSpec.label()} out=${if (bestStats.isSignedOutput) "m1p1" else "0p1"} " +
+            "range=${"%.2f".format(bestStats.minVal)}..${"%.2f".format(bestStats.maxVal)} " +
+            "red=${"%.1f".format(bestStats.neonRedFraction * 100f)}% " +
+            "blk=${"%.1f".format(bestStats.collapsedBlackFraction * 100f)}% " +
+            "corr=${"%.2f".format(bestStats.lumaCorrelation)}"
+        return swappedBitmap to diagSummary
     }
 }

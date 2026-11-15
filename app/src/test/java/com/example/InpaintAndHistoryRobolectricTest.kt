@@ -469,4 +469,80 @@ class InpaintAndHistoryRobolectricTest {
         assertTrue(vm.uiState.value.isDetectorReady)
         assertTrue(vm.uiState.value.memoryServiceState.detectorLoaded)
     }
+
+    @Test
+    fun hyperSwapFixes_bypassXnnpack_inferOutputRange_andHealNeonRedEyeCorruption() {
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("hyperswap_1b_256.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("w600k_r50.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("gfpgan_1.4.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("inswapper_128.onnx")))
+        assertFalse(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("det_10g.onnx")))
+
+        // Single tiny negative rounding overshoot (-0.01f) in an unsigned [0,1] tensor must NOT flip signed mode
+        val mostlyUnsigned = FloatArray(3 * 64 * 64) { 0.55f }
+        mostlyUnsigned[10] = -0.015f
+        assertFalse(
+            com.example.onnx.InSwapperEngine.inferSignedOutputMode(
+                mostlyUnsigned,
+                OnnxProtobufInspector.SwapperOutputRangeHint.AUTO
+            )
+        )
+
+        // Genuine [-1, 1] Tanh output must resolve as signed
+        val signedTanh = FloatArray(3 * 64 * 64) { i -> if (i % 2 == 0) -0.75f else 0.75f }
+        assertTrue(
+            com.example.onnx.InSwapperEngine.inferSignedOutputMode(
+                signedTanh,
+                OnnxProtobufInspector.SwapperOutputRangeHint.SIGNED_MINUS1_TO_1
+            )
+        )
+
+        // Raw output analyzer catches neon-red & collapsed-black corruption against natural skin target
+        val hw = 64 * 64
+        val naturalTarget = IntArray(hw) { (0xFF shl 24) or (190 shl 16) or (145 shl 8) or 115 }
+        val corruptSwap = naturalTarget.copyOf()
+        for (i in 0 until 600) {
+            corruptSwap[i] = (0xFF shl 24) or (250 shl 16) or (5 shl 8) or 10 // Neon red
+            corruptSwap[1000 + i] = (0xFF shl 24) // Collapsed pitch black
+        }
+        val stats = com.example.onnx.InSwapperEngine.analyzeRawSwapOutput(
+            outFloats = FloatArray(3 * hw) { 0.5f },
+            outPixels = corruptSwap,
+            targetPixels = naturalTarget,
+            isSignedOutput = false
+        )
+        assertTrue(stats.neonRedFraction > 0.10f)
+        assertTrue(stats.collapsedBlackFraction > 0.10f)
+        assertTrue(stats.artifactScore > 0.50f)
+
+        // NegativeArtifactSuppression heals neon-red ocular corruption back toward natural target skin
+        val swap512 = IntArray(512 * 512) { (0xFF shl 24) or (188 shl 16) or (142 shl 8) or 112 }
+        val tgt512 = IntArray(512 * 512) { (0xFF shl 24) or (190 shl 16) or (145 shl 8) or 115 }
+        val leftEye = android.graphics.PointF(180f, 200f)
+        val rightEye = android.graphics.PointF(332f, 200f)
+        val nose = android.graphics.PointF(256f, 270f)
+        val lMouth = android.graphics.PointF(204f, 345f)
+        val rMouth = android.graphics.PointF(308f, 345f)
+        val geom512 = com.example.onnx.FaceBlender.computeWarpedGeometry(
+            forwardMatrix128 = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f),
+            targetLandmarks5 = listOf(leftEye, rightEye, nose, lMouth, rMouth),
+            scale = 1.0f
+        )
+        // Paint neon-red + pitch-black inside left eye socket
+        for (y in 188..212) {
+            for (x in 168..192) {
+                swap512[y * 512 + x] = (0xFF shl 24) or (252 shl 16) or (4 shl 8) or 8
+            }
+        }
+        com.example.onnx.NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
+            swapPx512 = swap512,
+            tgtPx512 = tgt512,
+            geom512 = geom512,
+            isNeuralSwap = true
+        )
+        val healedCenter = swap512[200 * 512 + 180]
+        val healedR = (healedCenter ushr 16) and 0xFF
+        val healedG = (healedCenter ushr 8) and 0xFF
+        assertTrue("Neon red eye center should be healed (R=$healedR, G=$healedG)", (healedR - healedG) < 60)
+    }
 }

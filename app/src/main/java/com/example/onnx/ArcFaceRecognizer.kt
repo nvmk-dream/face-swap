@@ -15,7 +15,9 @@ data class SourceEmbeddingResult(
     val aligned112Crop: Bitmap,
     val usedArcFaceModel: Boolean,
     val usedEmbeddedEmap: Boolean,
-    val providerSummary: String
+    val providerSummary: String,
+    val rawEmbeddingL2Norm: Float = 1.0f,
+    val executionProvider: String = "CPU"
 )
 
 /**
@@ -72,6 +74,20 @@ object ArcFaceRecognizer {
             )
         }
 
+        var rawNorm = computeL2Norm(rawEmbedding)
+        if (usedArcFace && (!rawNorm.isFinite() || rawNorm < 1e-4f)) {
+            aligned112.recycle()
+            throw IllegalStateException(
+                "ArcFace model (${arcFaceModelFile?.name ?: "w600k_r50.onnx"}) returned a degenerate zero/NaN embedding (norm=$rawNorm). " +
+                    "Verify the model file is not corrupted."
+            )
+        }
+        val activeEp = when {
+            preloadedArcFaceSession != null -> "In-Memory"
+            usedArcFace && arcFaceModelFile != null ->
+                OnnxProtobufInspector.getCachedExecutionProvider(arcFaceModelFile) ?: "CPU(ALL_OPT)"
+            else -> "Fallback"
+        }
         val normedEmbedding = l2Normalize(rawEmbedding)
 
         // 2. Project through 512x512 `emap` matrix extracted from `inswapper_128.onnx`
@@ -97,7 +113,7 @@ object ArcFaceRecognizer {
             append(
                 when {
                     preloadedArcFaceSession != null -> "w600k_r50.onnx (In-Memory Session 512-D)"
-                    usedArcFace -> "w600k_r50.onnx (ArcFace 512-D)"
+                    usedArcFace -> "w600k_r50.onnx (ArcFace 512-D, EP=$activeEp, norm=${"%.1f".format(rawNorm)})"
                     else -> "2-Model Spatial Descriptor (512-D)"
                 }
             )
@@ -110,8 +126,19 @@ object ArcFaceRecognizer {
             aligned112Crop = aligned112,
             usedArcFaceModel = usedArcFace,
             usedEmbeddedEmap = usedEmap,
-            providerSummary = summary
+            providerSummary = summary,
+            rawEmbeddingL2Norm = rawNorm,
+            executionProvider = activeEp
         )
+    }
+
+    fun computeL2Norm(vec: FloatArray): Float {
+        var sumSq = 0.0
+        for (v in vec) {
+            if (!v.isFinite()) return Float.NaN
+            sumSq += (v * v).toDouble()
+        }
+        return sqrt(sumSq).toFloat()
     }
 
     fun runArcFaceSession(
