@@ -153,7 +153,6 @@ fun StudioTab(
     onInpaintNegativePromptChanged: (String) -> Unit = {},
     onResetInpaintNegativePrompt: () -> Unit = {},
     onInpaintFastModeChanged: (Boolean) -> Unit = {},
-    onInpaintDenoiseStepsChanged: (Int) -> Unit = {},
     onInpaintStrengthChanged: (Float) -> Unit = {},
     onInpaintCfgScaleChanged: (Float) -> Unit = {},
     onInpaintDepthGuardChanged: (Boolean) -> Unit = {},
@@ -163,11 +162,10 @@ fun StudioTab(
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onInpaintMaskAndPromptUpdated: (android.graphics.Bitmap?, String?) -> Unit = { bmp, _ -> onInpaintMaskUpdated(bmp) },
     onRunInpaint: () -> Unit = {},
-    onCancelInpaint: () -> Unit = {},
     onReuseInpaintResult: () -> Unit = {},
-    onOpenInpaintHistory: () -> Unit = {},
-    onDownloadInpaintResult: (android.graphics.Bitmap) -> Unit = {},
-    onChangeDownloadFolder: (android.graphics.Bitmap) -> Unit = onDownloadInpaintResult,
+    onSaveBitmapToFolder: (android.graphics.Bitmap) -> Unit = {},
+    onDownloadBitmapToGallery: (android.graphics.Bitmap) -> Unit = {},
+    onOpenInpaintGallery: (android.graphics.Bitmap) -> Unit = {},
     onViewImageFullScreen: (android.graphics.Bitmap, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
@@ -197,6 +195,7 @@ fun StudioTab(
             onImportAllFromFolder = onImportAllFromFolder,
             onSkinToneModeChanged = onSkinToneModeChanged,
             onFaceReactionModeChanged = onFaceReactionModeChanged,
+            onOcclusionProtectionChanged = onOcclusionProtectionChanged,
             onOpenInpaintPage = {
                 onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
             },
@@ -220,7 +219,6 @@ fun StudioTab(
             onNegativePromptChanged = onInpaintNegativePromptChanged,
             onResetNegativePrompt = onResetInpaintNegativePrompt,
             onFastModeChanged = onInpaintFastModeChanged,
-            onDenoiseStepsChanged = onInpaintDenoiseStepsChanged,
             onStrengthChanged = onInpaintStrengthChanged,
             onCfgScaleChanged = onInpaintCfgScaleChanged,
             onDepthGuardChanged = onInpaintDepthGuardChanged,
@@ -230,11 +228,10 @@ fun StudioTab(
             onApplyAccessorySelectionAndExpand = onApplyAccessorySelectionAndExpand,
             onMaskAndPromptUpdated = onInpaintMaskAndPromptUpdated,
             onCreateInpaint = onRunInpaint,
-            onOpenHistory = onOpenInpaintHistory,
-            onDownloadToFolder = onDownloadInpaintResult,
-            onChangeDownloadFolder = onChangeDownloadFolder,
+            onSaveToFolder = onSaveBitmapToFolder,
+            onDownloadToGallery = onDownloadBitmapToGallery,
             onReuseResult = onReuseInpaintResult,
-            onCancelInpaint = onCancelInpaint,
+            onOpenGalleryView = onOpenInpaintGallery,
             onViewResultFullScreen = { bmp ->
                 onViewImageFullScreen(bmp, "Inpaint Result")
             },

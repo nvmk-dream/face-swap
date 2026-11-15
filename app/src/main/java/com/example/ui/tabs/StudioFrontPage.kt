@@ -40,13 +40,17 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -190,6 +194,7 @@ fun StudioFrontPage(
     onImportAllFromFolder: () -> Unit = {},
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
+    onOcclusionProtectionChanged: (Boolean) -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     modifier: Modifier = Modifier
@@ -236,7 +241,8 @@ fun StudioFrontPage(
                 onOpenSettingsPage = onOpenSettingsPage,
                 onRunSwap = onRunSwap,
                 onSkinToneModeChanged = onSkinToneModeChanged,
-                onFaceReactionModeChanged = onFaceReactionModeChanged
+                onFaceReactionModeChanged = onFaceReactionModeChanged,
+                onOcclusionProtectionChanged = onOcclusionProtectionChanged
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Download + Save to Gallery + Completed Footer)
@@ -703,7 +709,8 @@ private fun FrontMainWorkspaceCard(
     onOpenSettingsPage: () -> Unit,
     onRunSwap: () -> Unit,
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
-    onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {}
+    onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
+    onOcclusionProtectionChanged: (Boolean) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -828,8 +835,8 @@ private fun FrontMainWorkspaceCard(
                 // 2. Face Reaction Selector
                 Text(
                     text = "Face Reaction (முகபாவனை / சிரிப்பு)",
-                    color = Color(0xFFC4B5FD),
-                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF6D28D9),
+                    fontWeight = FontWeight.Bold,
                     fontSize = 12.sp
                 )
                 Row(
@@ -869,6 +876,59 @@ private fun FrontMainWorkspaceCard(
                             )
                         }
                     }
+                }
+
+                HorizontalDivider(color = Color(0x260284C7), thickness = 1.dp)
+
+                // 3. Direct Occlusion Protection Toggle on Front Swap Screen
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onOcclusionProtectionChanged(!uiState.enableOcclusionProtection) }
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = "Occlusion Protection",
+                            tint = if (uiState.enableOcclusionProtection) Color(0xFF0284C7) else Color(0xFF64748B),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Occlusion Protection (முடி, பொட்டு & ஆபரணம்)",
+                                color = Color(0xFF0F172A),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.5.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Protects Target hair, bindi (பொட்டு), glasses & jewellery",
+                                color = Color(0xFF475569),
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = uiState.enableOcclusionProtection,
+                        onCheckedChange = onOcclusionProtectionChanged,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF0284C7)
+                        ),
+                        modifier = Modifier.testTag("front_occlusion_protection_switch")
+                    )
                 }
             }
 
@@ -1219,28 +1279,63 @@ private fun FrontResultShowcaseCard(
                     )
                 }
 
-                // Ready to Download emerald pill
+                // Ready to Download / Engine Mode badge
+                val isSyntheticEngine = result != null &&
+                    (result.engineUsed != "NEURAL" || result.pipelineSummary.contains("engineUsed=SYNTHETIC"))
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(Color(0xFF0A2E26))
-                        .border(1.dp, Color(0xFF15694F), RoundedCornerShape(50))
+                        .background(if (isSyntheticEngine) Color(0xFF7F1D1D) else Color(0xFF0A2E26))
+                        .border(1.dp, if (isSyntheticEngine) Color(0xFFEF4444) else Color(0xFF15694F), RoundedCornerShape(50))
                         .clickable { onInspectResultDetails() }
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                        .testTag("result_engine_status_pill"),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.CheckCircle,
+                        imageVector = if (isSyntheticEngine) Icons.Default.WarningAmber else Icons.Default.CheckCircle,
                         contentDescription = null,
-                        tint = NeonEmerald,
+                        tint = if (isSyntheticEngine) Color(0xFFFCA5A5) else NeonEmerald,
                         modifier = Modifier.size(13.dp)
                     )
                     Text(
-                        text = if (result != null) "Ready to Download" else "Preview • Tap to Inspect",
-                        color = Color(0xFF6EE7B7),
+                        text = when {
+                            result == null -> "Preview • Tap to Inspect"
+                            isSyntheticEngine -> "SYNTHETIC FALLBACK!"
+                            else -> "NEURAL • Ready"
+                        },
+                        color = if (isSyntheticEngine) Color(0xFFFECACA) else Color(0xFF6EE7B7),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 11.sp
+                    )
+                }
+            }
+
+            if (result != null && (result.engineUsed != "NEURAL" || result.pipelineSummary.contains("engineUsed=SYNTHETIC"))) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFFEF2F2))
+                        .border(1.5.dp, Color(0xFFDC2626), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .testTag("synthetic_engine_warning_banner"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.WarningAmber,
+                        contentDescription = "Synthetic Fallback Warning",
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "WARNING: SYNTHETIC Engine ran (not Neural ONNX). Check hyperswap_1b_256.onnx & w600k_r50.onnx in Models tab.",
+                        color = Color(0xFF991B1B),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp
                     )
                 }
             }
@@ -1475,13 +1570,13 @@ private fun FrontResultShowcaseCard(
                     }
                     Text(
                         text = if (result != null) {
-                            "Face Swap Completed (${result.stageTimings.totalMs} ms)"
+                            "Engine: ${result.engineUsed} (${result.stageTimings.totalMs} ms)"
                         } else {
-                            "Face Swap Completed"
+                            "Face Swap Ready"
                         },
-                        color = Color(0xFFD0DCF5),
+                        color = Color(0xFF0F172A),
                         fontSize = 11.5.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Bold
                     )
                 }
 
@@ -1492,13 +1587,14 @@ private fun FrontResultShowcaseCard(
                     Icon(
                         imageVector = Icons.Default.Schedule,
                         contentDescription = null,
-                        tint = Color(0xFF60A5FA),
+                        tint = Color(0xFF0284C7),
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
                         text = "Completed • $currentTimeText",
-                        color = Color(0xFF98A8C8),
-                        fontSize = 11.sp
+                        color = Color(0xFF334155),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
                     )
                 }
             }

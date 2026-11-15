@@ -152,7 +152,7 @@ class SwapAuditDatabase private constructor(context: Context) :
     }
 
     /**
-     * Strictly retains only the latest [MAX_HISTORY_RECORDS] (5) results and
+     * Strictly retains only the latest [MAX_HISTORY_RECORDS] (3) results and
      * auto-deletes older records plus their cached thumbnail image files.
      */
     private fun enforceMaxHistoryLimitSync() {
@@ -219,7 +219,7 @@ class SwapAuditDatabase private constructor(context: Context) :
     }
 
     companion object {
-        const val MAX_HISTORY_RECORDS = 5
+        const val MAX_HISTORY_RECORDS = 3
 
         @Volatile
         private var INSTANCE: SwapAuditDatabase? = null

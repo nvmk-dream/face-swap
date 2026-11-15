@@ -39,9 +39,7 @@ import com.example.onnx.SkinToneSourceMode
 import com.example.onnx.SwapStageProgress
 import com.example.onnx.VisualValidationBenchmark
 import com.example.util.ImageGalleryHelper
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -102,7 +100,6 @@ data class HeadAlignmentPreviewState(
 data class FaceSwapUiState(
     val currentTab: AppTab = AppTab.STUDIO,
     val studioSubPage: StudioSubPage = StudioSubPage.FRONT_HOME,
-    val historyReturnSubPage: StudioSubPage? = null,
     val studioMode: StudioMode = StudioMode.FACE_SWAP,
     val qualityLevel: ProcessingQualityLevel = ProcessingQualityLevel.BALANCED,
     val outputResolution: OutputResolutionOption = OutputResolutionOption.ORIGINAL,
@@ -152,7 +149,6 @@ data class FaceSwapUiState(
     val inpaintPrompt: String = "",
     val inpaintNegativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
     val inpaintFastMode: Boolean = true,
-    val inpaintDenoiseSteps: Int = 12,
     val inpaintStrength: Float = 0.70f,
     val inpaintCfgScale: Float = 7.0f,
     val inpaintDepthGuardEnabled: Boolean = false,
@@ -174,7 +170,9 @@ data class FaceSwapUiState(
     val isLamaInpaintReady: Boolean = false,
     val inpaintModelLabel: String = "Coming Soon",
     val statusBannerMessage: String? = null,
-    val errorBannerMessage: String? = null
+    val errorBannerMessage: String? = null,
+    val missingModelPromptSlot: ModelSlot? = null,
+    val missingModelPromptMessage: String? = null
 ) {
     val isDetectorReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.DETECTOR && it.isValidOnnx }
@@ -230,7 +228,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         refreshModelInspections()
         viewModelScope.launch {
             BackgroundProcessingCoordinator.inpaintSync.collect { sync ->
-                if (sync.isRunning || sync.resultBitmap != null || sync.errorMessage != null || _uiState.value.isInpainting) {
+                if (sync.isRunning || sync.resultBitmap != null || sync.errorMessage != null) {
                     _uiState.update { cur ->
                         cur.copy(
                             isInpainting = sync.isRunning,
@@ -320,38 +318,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }.getOrDefault(Triple(false, ProcessingQualityLevel.BALANCED, 6.0f to 2048L))
     }
 
-    fun selectTab(tab: AppTab, preserveSubPage: Boolean = false) {
+    fun selectTab(tab: AppTab) {
         _uiState.update {
-            val targetSubPage = if (tab == AppTab.STUDIO) {
-                if (preserveSubPage) (it.historyReturnSubPage ?: it.studioSubPage) else StudioSubPage.FRONT_HOME
-            } else {
-                it.studioSubPage
-            }
             it.copy(
                 currentTab = tab,
-                studioSubPage = targetSubPage,
-                historyReturnSubPage = if (tab == AppTab.STUDIO) null else it.historyReturnSubPage
-            )
-        }
-    }
-
-    fun openHistoryFromInpaint() {
-        _uiState.update {
-            it.copy(
-                currentTab = AppTab.HISTORY,
-                studioSubPage = StudioSubPage.INPAINT_PAGE,
-                historyReturnSubPage = StudioSubPage.INPAINT_PAGE
-            )
-        }
-    }
-
-    fun returnFromHistoryOrSettings() {
-        _uiState.update {
-            val destSubPage = it.historyReturnSubPage ?: StudioSubPage.FRONT_HOME
-            it.copy(
-                currentTab = AppTab.STUDIO,
-                studioSubPage = destSubPage,
-                historyReturnSubPage = null
+                studioSubPage = if (tab == AppTab.STUDIO) StudioSubPage.FRONT_HOME else it.studioSubPage
             )
         }
     }
@@ -360,8 +331,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 currentTab = AppTab.STUDIO,
-                studioSubPage = subPage,
-                historyReturnSubPage = null
+                studioSubPage = subPage
             )
         }
     }
@@ -380,6 +350,12 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun clearMessages() {
         _uiState.update { it.copy(statusBannerMessage = null, errorBannerMessage = null) }
+    }
+
+    fun dismissMissingModelPrompt() {
+        _uiState.update {
+            it.copy(missingModelPromptSlot = null, missingModelPromptMessage = null)
+        }
     }
 
     fun setConsentConfirmed(confirmed: Boolean) {
@@ -646,6 +622,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             modelInspections = inspections,
                             memoryServiceState = memState,
                             isInspectingModels = false,
+                            missingModelPromptSlot = if (valid) null else it.missingModelPromptSlot,
+                            missingModelPromptMessage = if (valid) null else it.missingModelPromptMessage,
                             statusBannerMessage = if (valid) {
                                 "Installed & loaded ${slot.canonicalFileName} (${formatBytes(file.length())}) into memory"
                             } else {
@@ -735,6 +713,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             inpaintModelOption = defaultOpt,
                             inpaintModelLabel = label,
                             isInspectingModels = false,
+                            missingModelPromptSlot = if (importedNames.isNotEmpty()) null else it.missingModelPromptSlot,
+                            missingModelPromptMessage = if (importedNames.isNotEmpty()) null else it.missingModelPromptMessage,
                             statusBannerMessage = if (importedNames.isNotEmpty()) {
                                 "Auto-imported & verified ${importedNames.size} model(s): ${importedNames.joinToString()}."
                             } else {
@@ -1105,6 +1085,33 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
         if (state.isSwapping) return
         val appCtx = getApplication<Application>()
+
+        // Phase 0: Mandatory neural model file verification before swap execution
+        if (!state.allowTwoModelFallbackForTesting && state.studioMode != StudioMode.IDENTITY_PRESERVED) {
+            val swapFile = OnnxProtobufInspector.resolveModelFile(appCtx, ModelSlot.SWAPPER)
+            if (!swapFile.exists() || swapFile.length() < 1024L) {
+                _uiState.update {
+                    it.copy(
+                        missingModelPromptSlot = ModelSlot.SWAPPER,
+                        missingModelPromptMessage = "மாடல் file இல்ல (${swapFile.name}) — அதை Add பண்ணுங்க (Upload .onnx model).",
+                        errorBannerMessage = "Swap model missing: ${swapFile.name} — please upload it to run neural face swap."
+                    )
+                }
+                return
+            }
+            val recFile = OnnxProtobufInspector.resolveModelFile(appCtx, ModelSlot.RECOGNIZER)
+            if (!recFile.exists() || recFile.length() < 1024L) {
+                _uiState.update {
+                    it.copy(
+                        missingModelPromptSlot = ModelSlot.RECOGNIZER,
+                        missingModelPromptMessage = "மாடல் file இல்ல (${recFile.name}) — 100% Face Identity வர அதை Add பண்ணுங்க.",
+                        errorBannerMessage = "ArcFace model missing: ${recFile.name} — please upload it so identity isn't synthetic."
+                    )
+                }
+                return
+            }
+        }
+
         ProcessingForegroundService.startOrUpdate(
             context = appCtx,
             title = "${state.studioMode.title} Running",
@@ -1250,9 +1257,22 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     )
                 )
 
-                val doneMsg = "${state.studioMode.title} completed in ${execResult.totalMs} ms (${execResult.swappedFacesCount} target(s) replaced)."
+                val isSynthetic = execResult.engineUsed != "NEURAL" ||
+                    execResult.pipelineSummary.contains("engineUsed=SYNTHETIC")
+                val treatSyntheticAsError = isSynthetic && !state.allowTwoModelFallbackForTesting
+                val doneMsg = if (isSynthetic) {
+                    "⚠️ SYNTHETIC FALLBACK USED (${execResult.totalMs} ms) — Check w600k_r50.onnx & hyperswap_1b_256.onnx!"
+                } else {
+                    "${state.studioMode.title} completed (NEURAL) in ${execResult.totalMs} ms (${execResult.swappedFacesCount} target(s) replaced)."
+                }
                 BackgroundProcessingCoordinator.updateSwap {
-                    it.copy(isRunning = false, result = execResult, auditLogId = logId, statusMessage = doneMsg, errorMessage = null)
+                    it.copy(
+                        isRunning = false,
+                        result = execResult,
+                        auditLogId = logId,
+                        statusMessage = if (treatSyntheticAsError) null else doneMsg,
+                        errorMessage = if (treatSyntheticAsError) doneMsg else null
+                    )
                 }
                 _uiState.update {
                     it.copy(
@@ -1261,7 +1281,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         swapResult = execResult,
                         lastAuditLogId = logId,
                         memoryServiceState = modelService.getMemoryState(),
-                        statusBannerMessage = doneMsg
+                        statusBannerMessage = if (treatSyntheticAsError) null else doneMsg,
+                        errorBannerMessage = if (treatSyntheticAsError) doneMsg else it.errorBannerMessage
                     )
                 }
                 ProcessingForegroundService.finishAndNotify(
@@ -1537,16 +1558,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setInpaintFastMode(fastMode: Boolean) {
-        _uiState.update {
-            it.copy(
-                inpaintFastMode = fastMode,
-                inpaintDenoiseSteps = if (fastMode) 12 else 20
-            )
-        }
-    }
-
-    fun setInpaintDenoiseSteps(steps: Int) {
-        _uiState.update { it.copy(inpaintDenoiseSteps = steps.coerceIn(4, 24)) }
+        _uiState.update { it.copy(inpaintFastMode = fastMode) }
     }
 
     fun setInpaintStrength(strength: Float) {
@@ -1923,8 +1935,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         BackgroundProcessingCoordinator.updateInpaint {
             it.copy(isRunning = true, progressText = "Preparing offline inpainting engine...", errorMessage = null, statusMessage = null)
         }
-        var launchedJob: kotlinx.coroutines.Job? = null
-        launchedJob = BackgroundProcessingCoordinator.scope.launch {
+        BackgroundProcessingCoordinator.scope.launch {
             _uiState.update {
                 it.copy(
                     isInpainting = true,
@@ -1935,7 +1946,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             try {
                 val res = withContext(Dispatchers.Default) {
-                    val runningScope = this
                     val ctx = getApplication<Application>()
                     val installedPacks = SdInpaintPackManager.discoverInstalledPacks(ctx)
                     val primaryPack = SdInpaintPackManager.resolvePackForOption(ctx, state.inpaintModelOption)
@@ -1978,9 +1988,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         enableDepthGuard = state.inpaintDepthGuardEnabled,
                         strength = state.inpaintStrength,
                         guidanceScale = state.inpaintCfgScale,
-                        denoiseSteps = state.inpaintDenoiseSteps,
                         onProgress = { progressMsg ->
-                            if (!runningScope.isActive || BackgroundProcessingCoordinator.activeInpaintJob !== launchedJob) return@inpaint
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
                             BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }
                             val stepMatch = Regex("Step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
@@ -2051,29 +2059,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedTitle = "Inpaint Complete! Tap to View",
                     completedBody = doneMsg
                 )
-            } catch (_: CancellationException) {
-                BackgroundProcessingCoordinator.updateInpaint {
-                    it.copy(
-                        isRunning = false,
-                        progressText = null,
-                        errorMessage = null,
-                        statusMessage = "Inpaint generation stopped."
-                    )
-                }
-                _uiState.update {
-                    it.copy(
-                        isInpainting = false,
-                        inpaintProgressText = null,
-                        errorBannerMessage = null,
-                        statusBannerMessage = "Inpaint generation stopped."
-                    )
-                }
-                ProcessingForegroundService.finishAndNotify(
-                    context = appCtx,
-                    showCompletionNotification = false,
-                    completedTitle = "",
-                    completedBody = ""
-                )
             } catch (t: Throwable) {
                 val errMsg = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
                 BackgroundProcessingCoordinator.updateInpaint {
@@ -2092,69 +2077,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedTitle = "Inpaint Failed",
                     completedBody = errMsg
                 )
-            } finally {
-                if (BackgroundProcessingCoordinator.activeInpaintJob === launchedJob) {
-                    BackgroundProcessingCoordinator.activeInpaintJob = null
-                }
             }
-        }
-        BackgroundProcessingCoordinator.activeInpaintJob = launchedJob
-    }
-
-    fun cancelInpaint() {
-        SdInpaintOnnxEngine.requestCancelActiveInference()
-        InteractiveInpaintEngine.requestCancel()
-        BackgroundProcessingCoordinator.cancelInpaintJob()
-        val appCtx = getApplication<Application>()
-        _uiState.update {
-            it.copy(
-                isInpainting = false,
-                inpaintProgressText = null,
-                errorBannerMessage = null,
-                statusBannerMessage = "Inpaint generation stopped."
-            )
-        }
-        ProcessingForegroundService.finishAndNotify(
-            context = appCtx,
-            showCompletionNotification = false,
-            completedTitle = "",
-            completedBody = ""
-        )
-    }
-
-    fun saveBitmapToTreeFolder(
-        treeUri: Uri,
-        bitmap: Bitmap,
-        fileNamePrefix: String = "FaceSwap_Inpaint"
-    ) {
-        viewModelScope.launch {
-            val saved = withContext(Dispatchers.IO) {
-                ImageGalleryHelper.saveBitmapToSavedTreeFolder(
-                    context = getApplication(),
-                    treeUri = treeUri,
-                    bitmap = bitmap,
-                    fileName = "${fileNamePrefix}_${System.currentTimeMillis()}.png"
-                )
-            }
-            saved.fold(
-                onSuccess = { msg ->
-                    _uiState.update {
-                        it.copy(statusBannerMessage = msg, errorBannerMessage = null)
-                    }
-                },
-                onFailure = { err ->
-                    ImageGalleryHelper.clearSavedDownloadTreeUri(getApplication())
-                    _uiState.update {
-                        it.copy(errorBannerMessage = "Folder save failed (${err.message}). Tap Download to pick folder again.")
-                    }
-                }
-            )
-        }
-    }
-
-    fun showStatusMessage(message: String) {
-        _uiState.update {
-            it.copy(statusBannerMessage = message, errorBannerMessage = null)
         }
     }
 

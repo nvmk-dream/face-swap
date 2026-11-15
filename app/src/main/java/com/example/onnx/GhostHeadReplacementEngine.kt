@@ -371,12 +371,17 @@ object GhostHeadReplacementEngine {
             FaceBlender.applyEthicalProvenanceWatermark(finalBitmap)
         }
 
+        val engineUsed = if (hasInswapper && sourceEmbedding?.usedArcFaceModel == true) {
+            "NEURAL"
+        } else {
+            "SYNTHETIC"
+        }
         val totalMs = (System.currentTimeMillis() - tStart).coerceAtLeast(1L)
         val summary = buildString {
             append("GHOST-Android Head Replace: ")
             append(srcMasks.segmentationSourceLabel)
             if (hasInswapper && sourceEmbedding != null) {
-                append(" + inswapper_128 Expression Core")
+                append(" + inswapper/HyperSwap Expression Core")
             }
             if (usedGfpganPass) {
                 append(" + gfpgan_1.4.onnx (512x512 HD)")
@@ -385,6 +390,7 @@ object GhostHeadReplacementEngine {
                 val prefix = if (targetDepthMap != null) " + 3D Depth Bokeh" else " + DSLR Bokeh"
                 append("$prefix ${(portraitBlurStrength * 100).toInt()}%")
             }
+            append(" | engineUsed=$engineUsed")
         }
 
         return FaceSwapExecutionResult(
@@ -400,7 +406,8 @@ object GhostHeadReplacementEngine {
             inswapperMs = totalGenMs.coerceAtLeast(1L),
             blendingMs = totalBlendMs.coerceAtLeast(1L),
             totalMs = totalMs,
-            pipelineSummary = summary
+            pipelineSummary = summary,
+            engineUsed = engineUsed
         )
     }
 
@@ -475,23 +482,37 @@ object GhostHeadReplacementEngine {
                         val outT = res[0] as OnnxTensor
                         val outFloats = FloatArray(3 * hw)
                         outT.floatBuffer.get(outFloats)
-                        var minVal = 0f
-                        for (i in 0 until min(outFloats.size, 512)) {
-                            if (outFloats[i] < minVal) minVal = outFloats[i]
+                        var minVal = Float.MAX_VALUE
+                        var maxVal = -Float.MAX_VALUE
+                        for (v in outFloats) {
+                            if (v.isFinite()) {
+                                if (v < minVal) minVal = v
+                                if (v > maxVal) maxVal = v
+                            }
                         }
-                        val isSigned = isHyperSwap256 && minVal < -0.05f
+                        val isSigned = if (isHyperSwap256) {
+                            minVal < -0.01f || maxVal > 1.05f || minVal == Float.MAX_VALUE
+                        } else {
+                            minVal < -0.05f
+                        }
                         if (isSigned) {
                             for (i in 0 until hw) {
-                                val r = ((outFloats[i] * 0.5f + 0.5f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                                val g = ((outFloats[hw + i] * 255.0f + 0.5f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                                val b = ((outFloats[2 * hw + i] * 0.5f + 0.5f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                                val rRaw = if (outFloats[i].isFinite()) outFloats[i] else 0f
+                                val gRaw = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
+                                val bRaw = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
+                                val r = ((rRaw * 0.5f + 0.5f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                                val g = ((gRaw * 0.5f + 0.5f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                                val b = ((bRaw * 0.5f + 0.5f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
                                 outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                             }
                         } else {
                             for (i in 0 until hw) {
-                                val r = (outFloats[i] * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                                val g = (outFloats[hw + i] * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                                val b = (outFloats[2 * hw + i] * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                                val rRaw = if (outFloats[i].isFinite()) outFloats[i] else 0f
+                                val gRaw = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
+                                val bRaw = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
+                                val r = (rRaw * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                                val g = (gRaw * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                                val b = (bRaw * 255.0f + 0.5f).toInt().coerceIn(0, 255)
                                 outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                             }
                         }

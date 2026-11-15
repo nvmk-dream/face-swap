@@ -42,14 +42,14 @@ class InpaintAndHistoryRobolectricTest {
         get() = ApplicationProvider.getApplicationContext()
 
     @Test
-    fun swapAuditDatabase_retainsOnlyLatestFiveRecordsAndDeletesOldImages() = runBlocking {
+    fun swapAuditDatabase_retainsOnlyLatestThreeRecordsAndDeletesOldImages() = runBlocking {
         val db = SwapAuditDatabase.getInstance(context)
         db.clearAll()
 
         val savedPaths = mutableListOf<String>()
-        for (i in 1..7) {
+        for (i in 1..5) {
             val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply {
-                eraseColor(Color.rgb((20 * i) % 255, (35 * i) % 255, 180))
+                eraseColor(Color.rgb(20 * i, 40 * i, 180))
             }
             val path = ImageGalleryHelper.saveBitmapToHistoryCache(context, bmp)!!
             savedPaths.add(path)
@@ -74,21 +74,17 @@ class InpaintAndHistoryRobolectricTest {
         }
 
         val logs = db.observeAllLogs().first()
-        assertEquals(5, logs.size)
-        assertEquals("Test #7", logs[0].pipelineSummary)
-        assertEquals("Test #6", logs[1].pipelineSummary)
-        assertEquals("Test #5", logs[2].pipelineSummary)
-        assertEquals("Test #4", logs[3].pipelineSummary)
-        assertEquals("Test #3", logs[4].pipelineSummary)
+        assertEquals(3, logs.size)
+        assertEquals("Test #5", logs[0].pipelineSummary)
+        assertEquals("Test #4", logs[1].pipelineSummary)
+        assertEquals("Test #3", logs[2].pipelineSummary)
 
-        // Older files (1 and 2) should be auto-deleted; latest 5 must still exist
+        // Older files (1 and 2) should be auto-deleted; latest 3 must still exist
         assertFalse(File(savedPaths[0]).exists())
         assertFalse(File(savedPaths[1]).exists())
         assertTrue(File(savedPaths[2]).exists())
         assertTrue(File(savedPaths[3]).exists())
         assertTrue(File(savedPaths[4]).exists())
-        assertTrue(File(savedPaths[5]).exists())
-        assertTrue(File(savedPaths[6]).exists())
     }
 
     @Test
@@ -331,11 +327,6 @@ class InpaintAndHistoryRobolectricTest {
         assertEquals(16, fastMin.baseSteps)
         assertEquals(2, fastMin.denoiseSteps)
 
-        val customTen = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.70f, customSteps = 10)
-        assertEquals(10, customTen.baseSteps)
-        assertEquals(7, customTen.denoiseSteps)
-        assertEquals(3, customTen.startStepIndex)
-
         val mask = FloatArray(32 * 32)
         mask[16 * 32 + 16] = 1.0f
         val dilated = SdInpaintOnnxEngine.dilateBinaryMask(mask, 32, 32, radiusPx = 5)
@@ -380,16 +371,6 @@ class InpaintAndHistoryRobolectricTest {
 
         vm.setInpaintStrength(1.20f)
         assertEquals(1.00f, vm.uiState.value.inpaintStrength, 0.001f)
-
-        assertEquals(12, vm.uiState.value.inpaintDenoiseSteps)
-        vm.setInpaintFastMode(false)
-        assertEquals(20, vm.uiState.value.inpaintDenoiseSteps)
-        vm.setInpaintDenoiseSteps(2)
-        assertEquals(4, vm.uiState.value.inpaintDenoiseSteps)
-        vm.setInpaintDenoiseSteps(99)
-        assertEquals(24, vm.uiState.value.inpaintDenoiseSteps)
-        vm.setInpaintFastMode(true)
-        assertEquals(12, vm.uiState.value.inpaintDenoiseSteps)
 
         vm.updateAccessorySelectionAndExpand(setOf(AccessoryTarget.CAP), 6f)
         assertTrue(vm.uiState.value.segformerAutoSelectedForAccessory)

@@ -394,14 +394,21 @@ object DepthEstimationEngine {
         preferHardwareAccel: Boolean
     ): DepthMapResult {
         val t0 = System.currentTimeMillis()
-        OnnxProtobufInspector.clearCachedSessions()
-        System.gc()
-
-        val (depthSession, _) = OnnxProtobufInspector.createSessionWithFallback(
-            ortEnv = ortEnv,
-            modelFile = candidate.file,
-            preferHardwareAcceleration = preferHardwareAccel
-        )
+        val (depthSession, _) = try {
+            OnnxProtobufInspector.createSessionWithFallback(
+                ortEnv = ortEnv,
+                modelFile = candidate.file,
+                preferHardwareAcceleration = preferHardwareAccel
+            )
+        } catch (_: OutOfMemoryError) {
+            OnnxProtobufInspector.clearCachedSessions()
+            System.gc()
+            OnnxProtobufInspector.createSessionWithFallback(
+                ortEnv = ortEnv,
+                modelFile = candidate.file,
+                preferHardwareAcceleration = preferHardwareAccel
+            )
+        }
         depthSession.use { session ->
                 val inputEntry = session.inputInfo.entries.firstOrNull()
                     ?: error("Depth model has no input tensor.")

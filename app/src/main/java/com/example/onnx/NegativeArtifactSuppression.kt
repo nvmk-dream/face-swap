@@ -39,7 +39,8 @@ object NegativeArtifactSuppression {
         swapPx512: IntArray,
         tgtPx512: IntArray,
         geom512: FaceBlender.WarpedFaceGeometry,
-        sensitivity: Float = 0.85f
+        sensitivity: Float = 0.85f,
+        isNeuralSwap: Boolean = true
     ): Boolean {
         val mouthMidX = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
         val mouthMidY = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
@@ -109,10 +110,16 @@ object NegativeArtifactSuppression {
         val teethRatio = teethPixelCount.toFloat() / totalSamples.toFloat()
         val oralRatio = oralCavityCount.toFloat() / totalSamples.toFloat()
 
-        val hasTongueOrOpenMouth = (tongueRatio > 0.04f * (1.1f - sensitivity)) ||
-            (teethRatio > 0.08f) ||
-            (tonguePixelCount >= 24) ||
-            (oralRatio > 0.12f && teethRatio > 0.03f)
+        val hasTongueOrOpenMouth = if (isNeuralSwap) {
+            // For real neural HyperSwap/InSwapper runs, let the model naturally synthesize Source's
+            // teeth and smile matching Target's reaction; only intervene on an actual protruding tongue.
+            (tongueRatio > 0.12f * (1.1f - sensitivity)) || (tonguePixelCount >= 48)
+        } else {
+            (tongueRatio > 0.04f * (1.1f - sensitivity)) ||
+                (teethRatio > 0.08f) ||
+                (tonguePixelCount >= 24) ||
+                (oralRatio > 0.12f && teethRatio > 0.03f)
+        }
 
         if (!hasTongueOrOpenMouth) return false
 
@@ -147,19 +154,16 @@ object NegativeArtifactSuppression {
                 val sG = (sc ushr 8) and 0xFF
                 val sB = sc and 0xFF
 
-                // Determine pixel confidence in tongue / teeth / cavity
-                val isTonguePixel = v > 2f && tR > tG + 14 && tR > tB + 8 && tSat >= 0.14f && tSat <= 0.82f && tLum >= 55f && tLum <= 225f
-                val isTeethPixel = tLum > 160f && tSat < 0.24f
-                val isDarkInterior = tLum < 52f && v < ryDown * 0.6f
+                // Determine pixel confidence in protruding tongue (or teeth/cavity only for non-neural fallback)
+                val isTonguePixel = v > 4f && tR > tG + 16 && tR > tB + 10 && tSat >= 0.16f && tSat <= 0.82f && tLum >= 55f && tLum <= 220f
+                val isTeethPixel = !isNeuralSwap && tLum > 160f && tSat < 0.24f
+                val isDarkInterior = !isNeuralSwap && tLum < 52f && v < ryDown * 0.6f
 
                 val featureConfidence = when {
                     isTonguePixel -> 1.0f
                     isTeethPixel -> 0.96f
                     isDarkInterior -> 0.92f
-                    else -> {
-                        val dist = sqrt(radialDistSq)
-                        if (dist < 0.70f) 0.45f else 0.0f
-                    }
+                    else -> 0.0f
                 }
                 if (featureConfidence <= 0.01f) continue
 
@@ -183,7 +187,8 @@ object NegativeArtifactSuppression {
         swapPx512: IntArray,
         tgtPx512: IntArray,
         geom512: FaceBlender.WarpedFaceGeometry,
-        makeupPreservationStrength: Float = 0.80f
+        makeupPreservationStrength: Float = 0.80f,
+        isNeuralSwap: Boolean = true
     ) {
         val eyeCenters: Array<PointF> = arrayOf(geom512.leftEye, geom512.rightEye)
         val rx = geom512.eyeDist * 0.32f
@@ -225,13 +230,18 @@ object NegativeArtifactSuppression {
                     val sB = sc and 0xFF
                     val sLum = 0.299f * sR + 0.587f * sG + 0.114f * sB
 
-                    val isEyelinerLoss = tLum < 65f && sLum > tLum + 28f
-                    val isCloudyPupil = dSq < 0.40f && tLum < 55f && sLum > tLum + 38f
-                    val isSquintFoldDeformation = v < -2f && abs(sLum - tLum) > 42f
+                    val isEyelinerLoss = if (isNeuralSwap) {
+                        tLum < 42f && sLum > tLum + 55f
+                    } else {
+                        tLum < 65f && sLum > tLum + 28f
+                    }
+                    val isCloudyPupil = dSq < 0.36f && tLum < 48f && sLum > tLum + (if (isNeuralSwap) 68f else 38f)
+                    val isSquintFoldDeformation = !isNeuralSwap && v < -2f && abs(sLum - tLum) > 42f
 
                     if (isEyelinerLoss || isCloudyPupil || isSquintFoldDeformation) {
                         val env = (0.5f * (1.0f + cos(Math.PI * sqrt(dSq)))).toFloat()
-                        val w = (env * makeupPreservationStrength * 0.82f).coerceIn(0f, 0.88f)
+                        val maxCap = if (isNeuralSwap) 0.58f else 0.88f
+                        val w = (env * makeupPreservationStrength * 0.82f).coerceIn(0f, maxCap)
                         val outR = (sR * (1f - w) + tR * w).toInt().coerceIn(0, 255)
                         val outG = (sG * (1f - w) + tG * w).toInt().coerceIn(0, 255)
                         val outB = (sB * (1f - w) + tB * w).toInt().coerceIn(0, 255)

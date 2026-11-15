@@ -2,19 +2,11 @@ package com.example.ui.tabs
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,15 +32,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Diamond
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Visibility
@@ -75,8 +66,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -102,38 +91,22 @@ import com.example.ui.components.DrawMaskEditorDialog
 import java.util.Locale
 import kotlin.math.roundToInt
 
+private val SAFE_FASHION_PRESETS = listOf(
+    "hand on hip-arched back",
+    "over shoulder-direct gaze",
+    "lips parted-hair tuck",
+    "one leg extended-lean forward",
+    "spreading both legs"
+)
+
 private val POSITIVE_BOOSTER_TAGS = listOf(
     "photorealistic",
     "sharp focus",
     "natural skin texture",
     "high detail",
     "clean lighting",
-    "naked",
-    "nude",
-    "nudity",
-    "exposed breasts",
-    "exposed buttocks",
-    "visible genitals",
-    "see through fabric",
-    "sexy",
-    "cleavage",
-    "nipples",
-    "visible nipples",
-    "sitting straddled",
-    "show perky boobs",
-    "huge saggy natural boobs",
-    "boobs",
-    "curvy",
-    "big ass hole",
-    "show ass hole",
-    "gigantic ass",
-    "gaping anus",
-    "gegantic boobs",
-    "skinny voluptuous body",
-    "wide hip",
-    "wide waist",
-    "large giant breasts"
-
+    "sleeveless dress",
+    "red silk saree"
 )
 
 private val NEGATIVE_QUALITY_TAGS = listOf(
@@ -146,12 +119,7 @@ private val NEGATIVE_QUALITY_TAGS = listOf(
     "mutated limbs",
     "watermark",
     "text",
-    "oversaturated",
-    "fully clothed",
-    "cloths",
-    "dress",
-    "covered breasts",
-    "full body coverage"
+    "oversaturated"
 )
 
 /**
@@ -170,7 +138,6 @@ fun InpaintPage(
     onNegativePromptChanged: (String) -> Unit = {},
     onResetNegativePrompt: () -> Unit = {},
     onFastModeChanged: (Boolean) -> Unit,
-    onDenoiseStepsChanged: (Int) -> Unit = {},
     onStrengthChanged: (Float) -> Unit = {},
     onCfgScaleChanged: (Float) -> Unit = {},
     onDepthGuardChanged: (Boolean) -> Unit = {},
@@ -180,11 +147,10 @@ fun InpaintPage(
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onMaskAndPromptUpdated: (Bitmap?, String?) -> Unit = { bmp, _ -> onMaskUpdated(bmp) },
     onCreateInpaint: () -> Unit,
-    onOpenHistory: () -> Unit = {},
-    onDownloadToFolder: (Bitmap) -> Unit = {},
-    onChangeDownloadFolder: (Bitmap) -> Unit = onDownloadToFolder,
+    onSaveToFolder: (Bitmap) -> Unit,
+    onDownloadToGallery: (Bitmap) -> Unit,
     onReuseResult: () -> Unit,
-    onCancelInpaint: () -> Unit = {},
+    onOpenGalleryView: (Bitmap) -> Unit,
     onViewResultFullScreen: (Bitmap) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -195,9 +161,6 @@ fun InpaintPage(
     var showOriginalCompare by remember { mutableStateOf(false) }
     var showPositivePromptScreen by remember { mutableStateOf(false) }
     var showNegativePromptScreen by remember { mutableStateOf(false) }
-    var isPromptCardExpanded by remember { mutableStateOf(false) }
-    var isMaskToolsCardExpanded by remember { mutableStateOf(false) }
-    var isTuningCardExpanded by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -556,450 +519,46 @@ fun InpaintPage(
                 }
             }
 
-            // Collapsible Diffusion Tuning Card (Denoise • Strength • CFG + Simple Tamil Notes + OK)
-            val tuningCardShape = RoundedCornerShape(16.dp)
-            val tuningArrowRotation by animateFloatAsState(
-                targetValue = if (isTuningCardExpanded) 180f else 0f,
-                label = "tuning_card_arrow_rotation"
-            )
-            val strengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
-            val cfgDisplay = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f)
-            val denoiseDisplay = uiState.inpaintDenoiseSteps.coerceIn(4, 24)
-            val isFastCfgActive = cfgDisplay <= 1.05f
+            // Diffusion Tuning Card (Strength 1..10 & CFG 1..15) directly above Prompt
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(tuningCardShape)
+                    .clip(RoundedCornerShape(16.dp))
                     .background(frostedCardBg)
-                    .border(1.2.dp, frostedBorderColor, tuningCardShape)
-                    .testTag("inpaint_tuning_card")
+                    .border(1.2.dp, frostedBorderColor, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .testTag("inpaint_tuning_card"),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { isTuningCardExpanded = !isTuningCardExpanded }
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
-                        .testTag("inpaint_tuning_card_toggle"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Denoise • Strength • CFG",
-                                color = Color(0xFF0284C7),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                            if (isFastCfgActive) {
-                                Text(
-                                    text = "⚡ 2× Speed",
-                                    color = Color(0xFF059669),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                        Text(
-                            text = "Denoise: $denoiseDisplay • Strength: ${String.format(Locale.US, "%.1f", strengthDisplay)} • CFG: ${String.format(Locale.US, "%.1f", cfgDisplay)}",
-                            color = darkSlate,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(Color(0x1A0284C7)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = if (isTuningCardExpanded) "Close Denoise Strength CFG" else "Open Denoise Strength CFG",
-                            tint = Color(0xFF0284C7),
-                            modifier = Modifier
-                                .size(22.dp)
-                                .rotate(tuningArrowRotation)
-                        )
-                    }
-                }
-
-                AnimatedVisibility(
-                    visible = isTuningCardExpanded,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        HorizontalDivider(
-                            color = Color(0x3364748B),
-                            thickness = 1.dp
-                        )
-
-                        // 1. Denoise Steps Slider + Simple Tamil Note
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            CleanTuningSliderRow(
-                                label = "Denoise",
-                                value = denoiseDisplay.toFloat(),
-                                valueRange = 4f..24f,
-                                steps = 19,
-                                onValueChange = { sliderVal ->
-                                    onDenoiseStepsChanged(sliderVal.roundToInt().coerceIn(4, 24))
-                                },
-                                onResetDefault = {
-                                    onDenoiseStepsChanged(if (uiState.inpaintFastMode) 12 else 20)
-                                },
-                                sliderTag = "inpaint_denoise_slider",
-                                valueTag = "inpaint_denoise_value",
-                                labelColor = darkSlate,
-                                isIntegerDisplay = true
-                            )
-                            SimpleTamilNoteBox(
-                                lowTitle = "குறைவு (4 - 10):",
-                                lowDesc = "படம் வேகமாக (Speed-ஆ) வரும்; ஆனால் சின்ன விவரங்கள் சற்று மங்கலாக இருக்கலாம்.",
-                                highTitle = "அதிகம் (16 - 24):",
-                                highDesc = "படம் மிகத் தெளிவாகவும் நேர்த்தியாகவும் வரும்; ஆனால் ரெடியாக அதிக நேரம் எடுக்கும். (10 - 14 சிறந்தது)",
-                                tag = "inpaint_denoise_note"
-                            )
-                        }
-
-                        // 2. Strength Slider + Simple Tamil Note
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            CleanTuningSliderRow(
-                                label = "Strength",
-                                value = strengthDisplay,
-                                valueRange = 1.0f..10.0f,
-                                steps = 17,
-                                onValueChange = { sliderVal ->
-                                    val snapped = (sliderVal * 2f).roundToInt() / 2f
-                                    onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
-                                },
-                                onResetDefault = { onStrengthChanged(0.70f) },
-                                sliderTag = "inpaint_strength_slider",
-                                valueTag = "inpaint_strength_value",
-                                labelColor = darkSlate
-                            )
-                            SimpleTamilNoteBox(
-                                lowTitle = "குறைவு (1.0 - 4.0):",
-                                lowDesc = "பழைய போட்டோவின் சாயல் அதிகம் மாறாமல், லேசாக மட்டும் மாற்றம் செய்யும்.",
-                                highTitle = "அதிகம் (7.5 - 10.0):",
-                                highDesc = "நீங்கள் வரைந்த இடத்தில் பழையதை முழுமையாக நீக்கி, புதிதாகப் படத்தை உருவாக்கும்.",
-                                tag = "inpaint_strength_note"
-                            )
-                        }
-
-                        // 3. CFG Slider + Simple Tamil Note (highlighting <= 1.05 fast mode)
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            CleanTuningSliderRow(
-                                label = "CFG",
-                                value = cfgDisplay,
-                                valueRange = 1.0f..15.0f,
-                                steps = 27,
-                                onValueChange = { sliderVal ->
-                                    val snapped = (sliderVal * 2f).roundToInt() / 2f
-                                    onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
-                                },
-                                onResetDefault = { onCfgScaleChanged(7.0f) },
-                                sliderTag = "inpaint_cfg_slider",
-                                valueTag = "inpaint_cfg_value",
-                                labelColor = darkSlate
-                            )
-                            SimpleTamilNoteBox(
-                                lowTitle = "குறைவு (CFG ≤ 1.0):",
-                                lowDesc = "⚡ 2 மடங்கு வேகம்! இயற்கையாகவும் மென்மையாகவும் வரும்; ஆனால் Prompt-ஐ லேசாகவே எடுத்துக் கொள்ளும்.",
-                                highTitle = "அதிகம் (8.0 - 15.0):",
-                                highDesc = "நீங்கள் எழுதிய Prompt-இல் உள்ளபடியே கண்டிப்பாக மாற்றும்; மிக அதிகமானால் கலர் செயற்கையாகத் தெரியலாம்.",
-                                highlightLow = isFastCfgActive,
-                                tag = "inpaint_cfg_note"
-                            )
-                        }
-
-                        // Premium OK button to confirm & auto-close card
-                        PremiumCardOkButton(
-                            onClick = { isTuningCardExpanded = false },
-                            tag = "inpaint_tuning_ok_btn"
-                        )
-                    }
-                }
-            }
-
-            // Single Collapsible Card above Prompt: Depth Guard + 1-Tap Auto Remove + OK button
-            val maskToolsShape = RoundedCornerShape(16.dp)
-            val maskToolsArrowRotation by animateFloatAsState(
-                targetValue = if (isMaskToolsCardExpanded) 180f else 0f,
-                label = "mask_tools_card_arrow_rotation"
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(maskToolsShape)
-                    .background(frostedCardBg)
-                    .border(1.2.dp, frostedBorderColor, maskToolsShape)
-                    .testTag("inpaint_mask_tools_card")
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { isMaskToolsCardExpanded = !isMaskToolsCardExpanded }
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
-                        .testTag("inpaint_mask_tools_card_toggle"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Depth Guard & 1-Tap Remove",
-                                color = Color(0xFF0284C7),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                            if (uiState.isComputingAccessoryMask) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(12.dp),
-                                    strokeWidth = 1.8.dp,
-                                    color = Color(0xFF0284C7)
-                                )
-                            } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
-                                Text(
-                                    text = "Mask Ready ✓",
-                                    color = Color(0xFF059669),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                        val accSummary = if (uiState.selectedAccessoryTargets.isEmpty()) {
-                            "Auto Remove: None"
-                        } else {
-                            "Remove: " + uiState.selectedAccessoryTargets.joinToString(", ") { it.shortLabel }
-                        }
-                        val depthSummary = if (uiState.isDepthModelReady) {
-                            if (uiState.inpaintDepthGuardEnabled) "Depth Guard: ON • " else "Depth Guard: OFF • "
-                        } else {
-                            ""
-                        }
-                        Text(
-                            text = depthSummary + accSummary,
-                            color = darkSlate,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(Color(0x1A0284C7)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = if (isMaskToolsCardExpanded) "Close Depth Guard & 1-Tap Remove" else "Open Depth Guard & 1-Tap Remove",
-                            tint = Color(0xFF0284C7),
-                            modifier = Modifier
-                                .size(22.dp)
-                                .rotate(maskToolsArrowRotation)
-                        )
-                    }
-                }
-
-                AnimatedVisibility(
-                    visible = isMaskToolsCardExpanded,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        HorizontalDivider(
-                            color = Color(0x3364748B),
-                            thickness = 1.dp
-                        )
-
-                        // Depth Guard Switch Row
-                        if (uiState.isDepthModelReady) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xB3FFFFFF))
-                                    .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Depth Guard (Protect Foreground)",
-                                        color = darkSlate,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 13.5.sp
-                                    )
-                                    Text(
-                                        text = if (uiState.inpaintDepthMap != null) {
-                                            "Depth cached • ${uiState.inpaintDepthMap.modelUsedLabel}"
-                                        } else {
-                                            "Uses Depth Anything V2 / sentis-MiDaS"
-                                        },
-                                        color = mutedSlate,
-                                        fontSize = 11.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Switch(
-                                    checked = uiState.inpaintDepthGuardEnabled,
-                                    onCheckedChange = onDepthGuardChanged,
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = Color.White,
-                                        checkedTrackColor = Color(0xFF059669),
-                                        uncheckedThumbColor = Color.White,
-                                        uncheckedTrackColor = Color(0xFF94A3B8)
-                                    ),
-                                    modifier = Modifier.testTag("inpaint_depth_guard_switch")
-                                )
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0x80FFFFFF))
-                                    .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Depth Guard: Install Depth Anything V2 or sentis-MiDaS in Models tab to enable",
-                                    color = mutedSlate,
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-
-                        // 1-Tap Accessory Removal Chips (Multi-select: Cap, Cooling Glass, Jewels -> Auto Mask + Auto Prompt)
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = "1-Tap Auto Remove (Mask + Prompt)",
-                                    color = darkSlate,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                if (uiState.isComputingAccessoryMask) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(12.dp),
-                                            strokeWidth = 1.8.dp,
-                                            color = Color(0xFF0284C7)
-                                        )
-                                        Text(
-                                            text = "Scanning...",
-                                            color = Color(0xFF0284C7),
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
-                                    Text(
-                                        text = "Mask Ready ✓",
-                                        color = Color(0xFF059669),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                listOf(
-                                    Triple(AccessoryTarget.CAP, Icons.Default.Face, "inpaint_quick_remove_cap"),
-                                    Triple(AccessoryTarget.GLASSES, Icons.Default.Visibility, "inpaint_quick_remove_glasses"),
-                                    Triple(AccessoryTarget.JEWELS, Icons.Default.Diamond, "inpaint_quick_remove_jewels")
-                                ).forEach { (target, iconVec, tag) ->
-                                    val isSelected = target in uiState.selectedAccessoryTargets
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(50))
-                                            .background(if (isSelected) Color(0xFF0284C7) else Color(0xD9FFFFFF))
-                                            .border(
-                                                1.dp,
-                                                if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
-                                                RoundedCornerShape(50)
-                                            )
-                                            .clickable(enabled = !uiState.isComputingAccessoryMask && !uiState.isInpainting) {
-                                                onToggleQuickAccessoryRemoval(target)
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 7.dp)
-                                            .testTag(tag),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = iconVec,
-                                            contentDescription = target.removalButtonLabel,
-                                            tint = if (isSelected) Color.White else Color(0xFF0284C7),
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Text(
-                                            text = target.removalButtonLabel,
-                                            color = if (isSelected) Color.White else darkSlate,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Premium high-contrast OK button to confirm & close card
-                        PremiumCardOkButton(
-                            onClick = { isMaskToolsCardExpanded = false },
-                            tag = "inpaint_mask_tools_ok_btn"
-                        )
-                    }
-                }
+                val strengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
+                CleanTuningSliderRow(
+                    label = "Strength",
+                    value = strengthDisplay,
+                    valueRange = 1.0f..10.0f,
+                    steps = 17,
+                    onValueChange = { sliderVal ->
+                        val snapped = (sliderVal * 2f).roundToInt() / 2f
+                        onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
+                    },
+                    onResetDefault = { onStrengthChanged(0.70f) },
+                    sliderTag = "inpaint_strength_slider",
+                    valueTag = "inpaint_strength_value",
+                    labelColor = darkSlate
+                )
+                CleanTuningSliderRow(
+                    label = "CFG",
+                    value = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f),
+                    valueRange = 1.0f..15.0f,
+                    steps = 27,
+                    onValueChange = { sliderVal ->
+                        val snapped = (sliderVal * 2f).roundToInt() / 2f
+                        onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
+                    },
+                    onResetDefault = { onCfgScaleChanged(7.0f) },
+                    sliderTag = "inpaint_cfg_slider",
+                    valueTag = "inpaint_cfg_value",
+                    labelColor = darkSlate
+                )
             }
 
             // Prompt Header Row: "Prompt" left | "Fast Mode" + Switch right
@@ -1040,186 +599,250 @@ fun InpaintPage(
                     }
                 }
 
-                // Single Collapsible Card combining both Positive Prompt & Negative Prompt
-                val promptShape = RoundedCornerShape(16.dp)
-                val promptArrowRotation by animateFloatAsState(
-                    targetValue = if (isPromptCardExpanded) 180f else 0f,
-                    label = "prompt_card_arrow_rotation"
-                )
-                Column(
+                // Dedicated Positive Prompt Card (tap to open full-screen Positive Prompt editor)
+                val promptShape = RoundedCornerShape(14.dp)
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(promptShape)
                         .background(frostedCardBg)
                         .border(1.2.dp, frostedBorderColor, promptShape)
-                        .testTag("inpaint_combined_prompt_card")
+                        .clickable { showPositivePromptScreen = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .testTag("inpaint_prompt_input"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // Collapsible Header Row with 🔽 open/close toggle
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Positive Prompt",
+                            color = Color(0xFF0284C7),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = uiState.inpaintPrompt.ifBlank { "Tap to open Positive Prompt screen (e.g. Modern dress)..." },
+                            color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.75f) else darkSlate,
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Edit Positive Prompt",
+                        tint = Color(0xFF0284C7),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Dedicated Negative Prompt Card (tap to open full-screen Negative Prompt editor)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(promptShape)
+                        .background(Color(0xD9FFF7F7))
+                        .border(1.2.dp, Color(0xB3FECACA), promptShape)
+                        .clickable { showNegativePromptScreen = true }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .testTag("inpaint_negative_prompt_card"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Negative Prompt",
+                            color = Color(0xFFDC2626),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = uiState.inpaintNegativePrompt.ifBlank { SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT },
+                            color = darkSlate,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Edit Negative Prompt",
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Optional Depth Guard Row (protects foreground subject from background mask bleed)
+                if (uiState.isDepthModelReady) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { isPromptCardExpanded = !isPromptCardExpanded }
-                            .padding(horizontal = 14.dp, vertical = 12.dp)
-                            .testTag("inpaint_prompt_card_toggle"),
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xB3FFFFFF))
+                            .border(1.dp, frostedBorderColor, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Positive & Negative Prompts",
-                                color = Color(0xFF0284C7),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
+                                text = "Depth Guard (Protect Foreground)",
+                                color = darkSlate,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.5.sp
                             )
                             Text(
-                                text = if (uiState.inpaintPrompt.isBlank()) {
-                                    "Tap to open & edit Positive / Negative prompts"
+                                text = if (uiState.inpaintDepthMap != null) {
+                                    "Depth cached • ${uiState.inpaintDepthMap.modelUsedLabel}"
                                 } else {
-                                    uiState.inpaintPrompt
+                                    "Uses Depth Anything V2 / sentis-MiDaS"
                                 },
-                                color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.8f) else darkSlate,
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Medium,
+                                color = mutedSlate,
+                                fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(CircleShape)
-                                .background(Color(0x1A0284C7)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.KeyboardArrowDown,
-                                contentDescription = if (isPromptCardExpanded) "Close Prompts" else "Open Prompts",
-                                tint = Color(0xFF0284C7),
-                                modifier = Modifier
-                                    .size(22.dp)
-                                    .rotate(promptArrowRotation)
+                        Switch(
+                            checked = uiState.inpaintDepthGuardEnabled,
+                            onCheckedChange = onDepthGuardChanged,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF059669),
+                                uncheckedThumbColor = Color.White,
+                                uncheckedTrackColor = Color(0xFF94A3B8)
+                            ),
+                            modifier = Modifier.testTag("inpaint_depth_guard_switch")
+                        )
+                    }
+                }
+
+                // 1-Tap Accessory Removal Chips (Multi-select: Cap, Cooling Glass, Jewels -> Auto Mask + Auto Prompt)
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "1-Tap Auto Remove (Mask + Prompt)",
+                            color = darkSlate,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (uiState.isComputingAccessoryMask) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 1.8.dp,
+                                    color = Color(0xFF0284C7)
+                                )
+                                Text(
+                                    text = "Scanning...",
+                                    color = Color(0xFF0284C7),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else if (uiState.selectedAccessoryTargets.isNotEmpty() && uiState.inpaintMaskBitmap != null) {
+                            Text(
+                                text = "Mask Ready ✓",
+                                color = Color(0xFF059669),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
 
-                    AnimatedVisibility(
-                        visible = isPromptCardExpanded,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            HorizontalDivider(
-                                color = Color(0x3364748B),
-                                thickness = 1.dp,
-                                modifier = Modifier.padding(horizontal = 12.dp)
-                            )
-
-                            // Positive Prompt Row inside the unified card
+                        listOf(
+                            Triple(AccessoryTarget.CAP, Icons.Default.Face, "inpaint_quick_remove_cap"),
+                            Triple(AccessoryTarget.GLASSES, Icons.Default.Visibility, "inpaint_quick_remove_glasses"),
+                            Triple(AccessoryTarget.JEWELS, Icons.Default.Diamond, "inpaint_quick_remove_jewels")
+                        ).forEach { (target, iconVec, tag) ->
+                            val isSelected = target in uiState.selectedAccessoryTargets
                             Row(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { showPositivePromptScreen = true }
-                                    .padding(horizontal = 14.dp, vertical = 11.dp)
-                                    .testTag("inpaint_prompt_input"),
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (isSelected) Color(0xFF0284C7) else Color(0xD9FFFFFF))
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
+                                        RoundedCornerShape(50)
+                                    )
+                                    .clickable(enabled = !uiState.isComputingAccessoryMask && !uiState.isInpainting) {
+                                        onToggleQuickAccessoryRemoval(target)
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                                    .testTag(tag),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = "Positive Prompt",
-                                        color = Color(0xFF0284C7),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp
-                                    )
-                                    Text(
-                                        text = uiState.inpaintPrompt.ifBlank {
-                                            "Tap to open Positive Prompt screen (e.g. Modern dress)..."
-                                        },
-                                        color = if (uiState.inpaintPrompt.isBlank()) mutedSlate.copy(alpha = 0.75f) else darkSlate,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
                                 Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Edit Positive Prompt",
-                                    tint = Color(0xFF0284C7),
-                                    modifier = Modifier.size(18.dp)
+                                    imageVector = iconVec,
+                                    contentDescription = target.removalButtonLabel,
+                                    tint = if (isSelected) Color.White else Color(0xFF0284C7),
+                                    modifier = Modifier.size(15.dp)
                                 )
-                            }
-
-                            HorizontalDivider(
-                                color = Color(0x33EF4444),
-                                thickness = 1.dp,
-                                modifier = Modifier.padding(horizontal = 12.dp)
-                            )
-
-                            // Negative Prompt Row inside the unified card
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0x66FFF7F7))
-                                    .clickable { showNegativePromptScreen = true }
-                                    .padding(horizontal = 14.dp, vertical = 11.dp)
-                                    .testTag("inpaint_negative_prompt_card"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = "Negative Prompt",
-                                        color = Color(0xFFDC2626),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp
-                                    )
-                                    Text(
-                                        text = uiState.inpaintNegativePrompt.ifBlank {
-                                            SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT
-                                        },
-                                        color = darkSlate,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Edit Negative Prompt",
-                                    tint = Color(0xFFDC2626),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 10.dp)
-                            ) {
-                                PremiumCardOkButton(
-                                    onClick = { isPromptCardExpanded = false },
-                                    tag = "inpaint_prompt_ok_btn"
+                                Text(
+                                    text = target.removalButtonLabel,
+                                    color = if (isSelected) Color.White else darkSlate,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
                     }
                 }
 
-
+                // Safe Fashion Design Quick Preset Chips
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SAFE_FASHION_PRESETS.forEach { preset ->
+                        val isSelected = uiState.inpaintPrompt.equals(preset, ignoreCase = true)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(if (isSelected) Color(0xFF0284C7) else Color(0xCCFFFFFF))
+                                .border(
+                                    1.dp,
+                                    if (isSelected) Color(0xFF38BDF8) else frostedBorderColor,
+                                    RoundedCornerShape(50)
+                                )
+                                .clickable { onPromptChanged(preset) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = preset,
+                                color = if (isSelected) Color.White else darkSlate,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
             }
 
             // Large Frosted Result Card
@@ -1405,26 +1028,25 @@ fun InpaintPage(
                 }
             }
 
-            // Bottom 4 Action Buttons: History | Download | Reuse | Cancel
+            // Bottom 4 Action Buttons: Save | Download | Reuse | Gallery
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 InpaintBottomActionButton(
-                    icon = Icons.Default.History,
-                    label = "History",
-                    enabled = true,
-                    onClick = onOpenHistory,
+                    icon = Icons.Default.Save,
+                    label = "Save",
+                    enabled = resultBmp != null,
+                    onClick = { resultBmp?.let(onSaveToFolder) },
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("inpaint_btn_history")
+                        .testTag("inpaint_btn_save")
                 )
                 InpaintBottomActionButton(
                     icon = Icons.Default.Download,
                     label = "Download",
-                    enabled = resultBmp != null && !uiState.isInpainting,
-                    onClick = { resultBmp?.let(onDownloadToFolder) },
-                    onLongClick = { resultBmp?.let(onChangeDownloadFolder) },
+                    enabled = resultBmp != null,
+                    onClick = { resultBmp?.let(onDownloadToGallery) },
                     modifier = Modifier
                         .weight(1f)
                         .testTag("inpaint_btn_download")
@@ -1432,34 +1054,20 @@ fun InpaintPage(
                 InpaintBottomActionButton(
                     icon = Icons.Default.Refresh,
                     label = "Reuse",
-                    enabled = resultBmp != null && !uiState.isInpainting,
+                    enabled = resultBmp != null,
                     onClick = onReuseResult,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("inpaint_btn_reuse")
                 )
                 InpaintBottomActionButton(
-                    icon = Icons.Default.Close,
-                    label = "Cancel",
-                    enabled = uiState.isInpainting,
-                    onClick = onCancelInpaint,
-                    containerColor = if (uiState.isInpainting) Color(0xFFDC2626) else Color(0xFFDCFCE7),
-                    borderColor = if (uiState.isInpainting) Color(0xFFFCA5A5) else Color(0xFF4ADE80),
-                    contentColor = if (uiState.isInpainting) Color.White else Color(0xFF15803D),
+                    icon = Icons.Default.PhotoLibrary,
+                    label = "Gallery",
+                    enabled = resultBmp != null,
+                    onClick = { resultBmp?.let(onOpenGalleryView) },
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("inpaint_btn_cancel")
-                )
-            }
-
-            if (resultBmp != null && !uiState.isInpainting) {
-                Text(
-                    text = "Tip: First Download asks folder once. Long-press Download to change folder.",
-                    color = mutedSlate,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
+                        .testTag("inpaint_btn_gallery")
                 )
             }
 
@@ -1501,7 +1109,7 @@ fun InpaintPage(
             accentColor = Color(0xFF0284C7),
             initialText = uiState.inpaintPrompt,
             placeholderText = "e.g. modern dress, natural skin texture, sharp focus...",
-            quickTags = POSITIVE_BOOSTER_TAGS,
+            quickTags = POSITIVE_BOOSTER_TAGS + SAFE_FASHION_PRESETS,
             showResetDefault = false,
             defaultText = "",
             dialogTag = "positive_prompt_fullscreen_dialog",
@@ -1815,87 +1423,21 @@ private fun ModelDropdownEntry(
 }
 
 @Composable
-private fun PremiumCardOkButton(
-    onClick: () -> Unit,
-    tag: String,
-    modifier: Modifier = Modifier
-) {
-    val okShape = RoundedCornerShape(14.dp)
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(48.dp)
-            .shadow(elevation = 6.dp, shape = okShape)
-            .clip(okShape)
-            .background(
-                Brush.horizontalGradient(
-                    listOf(
-                        Color(0xFF047857),
-                        Color(0xFF0D9488),
-                        Color(0xFF0284C7)
-                    )
-                )
-            )
-            .border(1.3.dp, Color(0xCC6EE7B7), okShape)
-            .clickable(onClick = onClick)
-            .testTag(tag),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.CheckCircle,
-                contentDescription = "Confirm and Close",
-                tint = Color.White,
-                modifier = Modifier.size(20.dp)
-            )
-            Text(
-                text = "OK",
-                color = Color.White,
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 15.sp,
-                letterSpacing = 0.8.sp
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
 private fun InpaintBottomActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    onLongClick: (() -> Unit)? = null,
-    containerColor: Color? = null,
-    borderColor: Color? = null,
-    contentColor: Color? = null
+    modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(12.dp)
-    val resolvedBg = containerColor ?: if (enabled) Color(0xE6FFFFFF) else Color(0x88FFFFFF)
-    val resolvedBorder = borderColor ?: Color(0xB3FFFFFF)
-    val resolvedContent = contentColor ?: if (enabled) Color(0xFF0F172A) else Color(0xFF64748B)
     Row(
         modifier = modifier
             .height(48.dp)
             .clip(shape)
-            .background(resolvedBg)
-            .border(1.2.dp, resolvedBorder, shape)
-            .then(
-                if (onLongClick != null) {
-                    Modifier.combinedClickable(
-                        enabled = enabled,
-                        onClick = onClick,
-                        onLongClick = onLongClick
-                    )
-                } else {
-                    Modifier.clickable(enabled = enabled, onClick = onClick)
-                }
-            )
+            .background(if (enabled) Color(0xE6FFFFFF) else Color(0x88FFFFFF))
+            .border(1.2.dp, Color(0xB3FFFFFF), shape)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -1903,54 +1445,17 @@ private fun InpaintBottomActionButton(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = resolvedContent,
+            tint = if (enabled) Color(0xFF0F172A) else Color(0xFF64748B),
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = label,
-            color = resolvedContent,
-            fontWeight = FontWeight.Bold,
+            color = if (enabled) Color(0xFF0F172A) else Color(0xFF64748B),
+            fontWeight = FontWeight.SemiBold,
             fontSize = 12.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-@Composable
-private fun SimpleTamilNoteBox(
-    lowTitle: String,
-    lowDesc: String,
-    highTitle: String,
-    highDesc: String,
-    highlightLow: Boolean = false,
-    tag: String
-) {
-    val bgColor = if (highlightLow) Color(0x14059669) else Color(0x88F8FAFC)
-    val borderColor = if (highlightLow) Color(0x4D059669) else Color(0x3364748B)
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(bgColor)
-            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 7.dp)
-            .testTag(tag),
-        verticalArrangement = Arrangement.spacedBy(3.dp)
-    ) {
-        Text(
-            text = "• $lowTitle $lowDesc",
-            color = if (highlightLow) Color(0xFF065F46) else Color(0xFF334155),
-            fontSize = 11.2.sp,
-            lineHeight = 15.sp,
-            fontWeight = if (highlightLow) FontWeight.SemiBold else FontWeight.Normal
-        )
-        Text(
-            text = "• $highTitle $highDesc",
-            color = Color(0xFF334155),
-            fontSize = 11.2.sp,
-            lineHeight = 15.sp
         )
     }
 }
@@ -1966,8 +1471,7 @@ private fun CleanTuningSliderRow(
     onResetDefault: () -> Unit,
     sliderTag: String,
     valueTag: String,
-    labelColor: Color,
-    isIntegerDisplay: Boolean = false
+    labelColor: Color
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -2018,13 +1522,8 @@ private fun CleanTuningSliderRow(
                 }
             }
         )
-        val formattedValue = if (isIntegerDisplay) {
-            value.roundToInt().toString()
-        } else {
-            String.format(Locale.US, "%.1f", value)
-        }
         Text(
-            text = "($formattedValue)",
+            text = "(${String.format(Locale.US, "%.1f", value)})",
             color = Color(0xFF475569),
             fontWeight = FontWeight.Medium,
             fontSize = 14.sp,

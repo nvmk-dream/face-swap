@@ -226,16 +226,7 @@ object FaceBlender {
             x, y, rBrowX, rBrowY, browRx, browRy, geom.cosA, geom.sinA
         )
 
-        // Central Glabella / Forehead Bindi (பொட்டு / புள்ளி) Protection Zone between the eyebrows
-        val glabellaX = (lBrowX + rBrowX) * 0.5f
-        val glabellaY = (lBrowY + rBrowY) * 0.5f
-        val glabellaRx = geom.eyeDist * 0.24f
-        val glabellaRy = geom.eyeDist * 0.22f
-        val glabellaDistSq = orientedEllipseDistSq(
-            x, y, glabellaX, glabellaY, glabellaRx, glabellaRy, geom.cosA, geom.sinA
-        )
-
-        val minDistSq = min(min(min(lDistSq, rDistSq), min(lbDistSq, rbDistSq)), glabellaDistSq)
+        val minDistSq = min(min(lDistSq, rDistSq), min(lbDistSq, rbDistSq))
         return when {
             minDistSq <= 0.48f -> 1.0f
             minDistSq >= 1.0f -> 0.0f
@@ -928,7 +919,9 @@ object FaceBlender {
         identityPreservationMode: Boolean = false,
         depthMap: DepthMapResult? = null,
         onStagesCaptured: ((stage1SwapOnly512: Bitmap, stage2SwapRestore512: Bitmap, stage3FinalBlend512: Bitmap) -> Unit)? = null,
-        onSubStageTimings: ((restoration512Ms: Long, upperLipGuardMs: Long, maskGenerationMs: Long, finalBlendingMs: Long) -> Unit)? = null
+        onSubStageTimings: ((restoration512Ms: Long, upperLipGuardMs: Long, maskGenerationMs: Long, finalBlendingMs: Long) -> Unit)? = null,
+        isNeuralSwap: Boolean = true,
+        onGfpganUsed: ((Boolean) -> Unit)? = null
     ): Bitmap {
         val activeSwapCrop = colorCorrected128 ?: swappedCrop128
             ?: throw IllegalArgumentException("Either colorCorrected128 or swappedCrop128 must be provided.")
@@ -993,6 +986,7 @@ object FaceBlender {
                 preloadedGfpganSession = preloadedGfpganSession
             )
         } else null
+        onGfpganUsed?.invoke(gfp512 != null)
 
         val total512 = HD_SIZE * HD_SIZE
         // Upscale swapped crop (128x128 or 256x256) to 512x512 using sharp 4x4 Catmull-Rom Bicubic interpolation
@@ -1016,7 +1010,8 @@ object FaceBlender {
             val gfpPx = IntArray(total512)
             gfp512.getPixels(gfpPx, 0, HD_SIZE, 0, 0, HD_SIZE, HD_SIZE)
             gfp512.recycle()
-            val gfpWeight = (0.35f + 0.65f * clampedEnhance).coerceIn(0f, 1f)
+            // Cap GFPGAN blend at ~68% so 512px restoration sharpens texture without erasing Source identity
+            val gfpWeight = (0.24f + 0.44f * clampedEnhance).coerceIn(0f, 0.68f)
             val invEnh = 1.0f - gfpWeight
             for (i in 0 until total512) {
                 val bc = swapPx512[i]
@@ -1150,12 +1145,13 @@ object FaceBlender {
                 size = HD_SIZE,
                 geom = geom512
             )
-            // Negative Artifact Suppression: Protect squinted/winking eyelids, eyeliner, and makeup integrity
+            // Negative Artifact Suppression: Fix cloudy pupils without erasing Source eye shape
             NegativeArtifactSuppression.suppressOcularAndEyelidArtifacts512(
                 swapPx512 = swapPx512,
                 tgtPx512 = tgtPx512,
                 geom512 = geom512,
-                makeupPreservationStrength = 0.85f
+                makeupPreservationStrength = if (isNeuralSwap) 0.45f else 0.85f,
+                isNeuralSwap = isNeuralSwap
             )
             // Face-Aging & Expression Style Engine
             FaceAgingStyleEngine.applyFaceAgingAndStyle512(
@@ -1175,13 +1171,22 @@ object FaceBlender {
 
         val tBlendStage0 = System.currentTimeMillis()
         if (!identityPreservationMode) {
-            // 6. Face Reaction Synthesis & Protruding Tongue / Oral Cavity Negative Artifact Suppression
+            // 6. Face Reaction Synthesis & Protruding Tongue Negative Artifact Suppression
             when (faceReactionMode) {
                 FaceReactionSourceMode.TARGET_REACTION -> {
-                    preserveTargetMouthTeethAndTongue512(
+                    if (!isNeuralSwap) {
+                        preserveTargetMouthTeethAndTongue512(
+                            swapPx512 = swapPx512,
+                            tgtPx512 = tgtPx512,
+                            geom512 = geom512
+                        )
+                    }
+                    NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
                         swapPx512 = swapPx512,
                         tgtPx512 = tgtPx512,
-                        geom512 = geom512
+                        geom512 = geom512,
+                        sensitivity = 0.85f,
+                        isNeuralSwap = isNeuralSwap
                     )
                 }
                 FaceReactionSourceMode.SOURCE_REACTION -> {
@@ -1195,12 +1200,6 @@ object FaceBlender {
                     }
                 }
             }
-            NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
-                swapPx512 = swapPx512,
-                tgtPx512 = tgtPx512,
-                geom512 = geom512,
-                sensitivity = 0.90f
-            )
         }
 
         // 7. Build 512x512 Target-Aware Biometric Landmark-Fitted Mask
@@ -1949,8 +1948,11 @@ object FaceBlender {
 
                 val eyeProt = computeEyeAndBrowProtectionWeight(xf, yf, geom512)
                 val lum = 0.299f * origR + 0.587f * origG + 0.114f * origB
-                // Protect dark pupil/lash/eyebrow hair cores so dark features stay crisp and rich
-                val darkFeatureProt = if (eyeProt > 0.18f && lum < 72f) eyeProt * 0.85f else 0f
+                val maxCh = max(origR, max(origG, origB))
+                val minCh = min(origR, min(origG, origB))
+                val chroma = maxCh - minCh
+                // Protect only genuine neutral-dark pupil/lash/eyebrow hair cores (never high-chroma colors)
+                val darkFeatureProt = if (eyeProt > 0.18f && lum < 56f && chroma < 42) eyeProt * 0.85f else 0f
                 val blend = strength * (1.0f - darkFeatureProt)
 
                 // Apply horizontal directional lighting gradient (xNorm in [-1, +1])
@@ -2039,12 +2041,7 @@ object FaceBlender {
         if (corePixels < 16) return
         val targetTeethRatio = targetWhiteTeethPixels.toFloat() / corePixels.toFloat()
         val swapTeethRatio = swapWhiteTeethPixels.toFloat() / corePixels.toFloat()
-        val handledByTongueAndOralGuard = NegativeArtifactSuppression.suppressOralAndTongueArtifacts512(
-            swapPx512 = swapPx512,
-            tgtPx512 = tgtPx512,
-            geom512 = geom512
-        )
-        if (handledByTongueAndOralGuard || targetTeethRatio < 0.34f || swapTeethRatio >= 0.15f) {
+        if (targetTeethRatio < 0.34f || swapTeethRatio >= 0.15f) {
             // Keep 100% of the swapped lips/mouth intact — zero double-lip or split-mouth artifacts!
             return
         }
@@ -2312,6 +2309,32 @@ object FaceBlender {
                         val jawMismatch = ((abs(sLum - tLum) - 16f) / 38f).coerceIn(0f, 1f)
                         val chinFade = (((localY / radiusYBottom) - 0.72f) / 0.28f).coerceIn(0f, 1f)
                         alpha *= (1.0f - (jawMismatch * chinFade * 0.85f).coerceIn(0f, 0.85f))
+                    }
+                }
+
+                // Localized Target Bindi / Pottu (பொட்டு) Preservation between eyebrows when Target has a real bindi dot
+                if (enableOcclusionProtection && alpha > 0.05f) {
+                    val browMidOffset = geom512.eyeDist * 0.24f
+                    val bindiCenterX = eyeMidX + geom512.sinA * browMidOffset
+                    val bindiCenterY = eyeMidY - geom512.cosA * browMidOffset
+                    val dBindiSq = orientedEllipseDistSq(
+                        xf, yf,
+                        bindiCenterX, bindiCenterY,
+                        geom512.eyeDist * 0.11f, geom512.eyeDist * 0.14f,
+                        geom512.cosA, geom512.sinA
+                    )
+                    if (dBindiSq < 1.0f) {
+                        val tcB = tgtPx512[idx]
+                        val tbR = (tcB ushr 16) and 0xFF
+                        val tbG = (tcB ushr 8) and 0xFF
+                        val tbB = tcB and 0xFF
+                        val tbLum = 0.299f * tbR + 0.587f * tbG + 0.114f * tbB
+                        val isTargetBindiDot = (tbR > tbG + 24 && tbR > tbB + 16 && tbLum < 165f) ||
+                            (tbLum < 68f && tbR >= tbG)
+                        if (isTargetBindiDot) {
+                            val bindiEnv = (1.0f - sqrt(dBindiSq)).coerceIn(0f, 1f)
+                            alpha *= (1.0f - 0.90f * bindiEnv)
+                        }
                     }
                 }
 

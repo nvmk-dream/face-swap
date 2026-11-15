@@ -791,7 +791,7 @@ object HeadSegmentationAndInpainting {
                             }
                         }
                     }
-            }
+                }
         }
     }
 

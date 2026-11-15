@@ -26,8 +26,6 @@ import kotlin.math.max
 object ImageGalleryHelper {
 
     private const val MAX_IMAGE_DIMENSION = 1600
-    private const val PREFS_NAME = "faceswap_studio_prefs"
-    private const val KEY_DOWNLOAD_TREE_URI = "saved_download_tree_uri"
 
     /**
      * Memory-safely decodes a gallery or document image Uri into a software ARGB_8888 Bitmap,
@@ -616,118 +614,6 @@ object ImageGalleryHelper {
                 }
             }.getOrNull() ?: uri.lastPathSegment ?: "Saved_Image.png"
             "Saved to folder: $displayName (${bitmap.width}×${bitmap.height})"
-        }
-    }
-
-    /**
-     * Persists the user's one-time SAF folder tree Uri so future downloads save directly
-     * into the chosen mobile folder without prompting again.
-     */
-    fun saveDownloadTreeUri(context: Context, treeUri: Uri) {
-        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(treeUri, flags)
-        }
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_DOWNLOAD_TREE_URI, treeUri.toString())
-            .apply()
-    }
-
-    fun clearSavedDownloadTreeUri(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .remove(KEY_DOWNLOAD_TREE_URI)
-            .apply()
-    }
-
-    /**
-     * Returns the stored SAF folder tree Uri if its persistent read/write permission
-     * is still valid and the folder still exists; otherwise returns null so UI prompts once.
-     */
-    fun getSavedDownloadTreeUri(context: Context): Uri? {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_DOWNLOAD_TREE_URI, null)
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: return null
-
-        val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
-        val resolver = context.contentResolver
-        val hasPerm = resolver.persistedUriPermissions.any { perm ->
-            perm.uri == uri && perm.isReadPermission && perm.isWritePermission
-        }
-        if (!hasPerm) {
-            clearSavedDownloadTreeUri(context)
-            return null
-        }
-
-        val folderStillValid = runCatching {
-            val docId = DocumentsContract.getTreeDocumentId(uri)
-            val docUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
-            resolver.query(
-                docUri,
-                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
-                null,
-                null,
-                null
-            )?.use { it.moveToFirst() } ?: false
-        }.getOrDefault(false)
-
-        if (!folderStillValid) {
-            clearSavedDownloadTreeUri(context)
-            return null
-        }
-        return uri
-    }
-
-    fun getSavedDownloadFolderDisplayName(context: Context, treeUri: Uri?): String? {
-        if (treeUri == null) return null
-        return runCatching {
-            val docId = DocumentsContract.getTreeDocumentId(treeUri)
-            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-            context.contentResolver.query(
-                docUri,
-                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                null,
-                null,
-                null
-            )?.use { cursor ->
-                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
-            } ?: docId.substringAfterLast('/').substringAfterLast(':')
-        }.getOrNull()
-    }
-
-    /**
-     * Saves a Bitmap as uncompressed PNG directly inside a previously picked SAF folder [treeUri].
-     */
-    fun saveBitmapToSavedTreeFolder(
-        context: Context,
-        treeUri: Uri,
-        bitmap: Bitmap,
-        fileName: String = "FaceSwap_Inpaint_${System.currentTimeMillis()}.png"
-    ): Result<String> {
-        return runCatching {
-            val resolver = context.contentResolver
-            val parentDocId = DocumentsContract.getTreeDocumentId(treeUri)
-            val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocId)
-            val createdUri = DocumentsContract.createDocument(
-                resolver,
-                parentDocUri,
-                "image/png",
-                fileName
-            ) ?: error("Could not create PNG file in selected folder.")
-
-            val outStream = resolver.openOutputStream(createdUri)
-                ?: error("Could not open write stream for selected folder.")
-            outStream.use { out ->
-                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    error("Failed to compress PNG image.")
-                }
-                out.flush()
-            }
-            val folderName = getSavedDownloadFolderDisplayName(context, treeUri) ?: "Selected Folder"
-            "Downloaded to $folderName/$fileName (${bitmap.width}×${bitmap.height})"
         }
     }
 

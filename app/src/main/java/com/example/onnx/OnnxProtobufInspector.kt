@@ -581,15 +581,14 @@ object OnnxProtobufInspector {
         intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
         useXnnpack: Boolean = !preferHardwareAcceleration,
         useNnapi: Boolean = preferHardwareAcceleration,
-        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT,
-        useArenaAndMemoryPattern: Boolean = false
+        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT
     ): OrtSession.SessionOptions {
         val threads = intraOpThreads.coerceIn(1, 4)
         val (effectiveNnapi, effectiveXnnpack) = resolveEffectiveEpFlags(useNnapi = useNnapi, useXnnpack = useXnnpack)
         val opts = OrtSession.SessionOptions()
         opts.setIntraOpNumThreads(threads)
-        opts.setMemoryPatternOptimization(useArenaAndMemoryPattern)
-        opts.setCPUArenaAllocator(useArenaAndMemoryPattern)
+        opts.setMemoryPatternOptimization(false)
+        opts.setCPUArenaAllocator(false)
         opts.setOptimizationLevel(optLevel)
         if (effectiveNnapi) {
             runCatching { opts.addNnapi() }
@@ -614,8 +613,7 @@ object OnnxProtobufInspector {
         ortEnv: OrtEnvironment,
         modelFile: File,
         preferHardwareAcceleration: Boolean = false,
-        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
-        useArenaAndMemoryPattern: Boolean = false
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     ): Pair<OrtSession, String> {
         val threads = intraOpThreads.coerceIn(1, 4)
         val minSafeRank = getMinSafeRankForFile(modelFile)
@@ -661,8 +659,7 @@ object OnnxProtobufInspector {
                         intraOpThreads = threads,
                         useXnnpack = attempt.xnnpack,
                         useNnapi = attempt.nnapi,
-                        optLevel = attempt.optLevel,
-                        useArenaAndMemoryPattern = useArenaAndMemoryPattern
+                        optLevel = attempt.optLevel
                     ).use { opts ->
                         ortEnv.createSession(modelFile.absolutePath, opts) to attempt.label
                     }

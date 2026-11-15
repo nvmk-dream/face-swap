@@ -189,7 +189,8 @@ object VisualValidationBenchmark {
                 onStagesCaptured = { s1, s2, _ ->
                     s1Bmp = s1
                     s2Bmp = s2
-                }
+                },
+                isNeuralSwap = false
             )
             rawSwapCropNative.recycle()
 

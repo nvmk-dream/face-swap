@@ -759,7 +759,8 @@ class ExampleRobolectricTest {
                 uMs = lipMs
                 mMs = maskMs
                 fMs = blendMs
-            }
+            },
+            isNeuralSwap = false
         )
         rawHyperSwap1b256.recycle()
         embRes.aligned112Crop.recycle()
@@ -771,6 +772,7 @@ class ExampleRobolectricTest {
         // APK output path & timings.
         // =================================================================================
         val viewModel = com.example.ui.FaceSwapViewModel(context as android.app.Application)
+        viewModel.setAllowTwoModelFallback(true)
         viewModel.loadSourceAndTargetBitmaps(srcPair.first, tgtPair.first)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
 
@@ -1109,5 +1111,29 @@ class ExampleRobolectricTest {
         // Center face pixel (between eyes and nose) must have high weight
         val centerIdx = 290 * 512 + 256
         assertTrue("Face core pixel must have high alpha coverage (actual=${mask[centerIdx]})", mask[centerIdx] > 0.85f)
+    }
+
+    @Test
+    fun `test17 phase 0 blocks swap and triggers missing model upload prompt when onnx files are absent`() {
+        val (srcPair, tgtPair) = com.example.onnx.VisualValidationBenchmark.createRealisticSourceAndTargetPortraits()
+        val viewModel = com.example.ui.FaceSwapViewModel(context as android.app.Application)
+        viewModel.loadSourceAndTargetBitmaps(srcPair.first, tgtPair.first, srcPair.second, tgtPair.second)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertFalse("Fallback must be off by default", viewModel.uiState.value.allowTwoModelFallbackForTesting)
+        viewModel.runActiveModePipeline()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        val uiState = viewModel.uiState.value
+        assertEquals(
+            "Missing swapper model should trigger missingModelPromptSlot = SWAPPER",
+            com.example.onnx.ModelSlot.SWAPPER,
+            uiState.missingModelPromptSlot
+        )
+        assertNotNull("Missing model pop-up message should be populated", uiState.missingModelPromptMessage)
+        assertNotNull("Error banner should inform user about missing swap model", uiState.errorBannerMessage)
+
+        viewModel.dismissMissingModelPrompt()
+        assertEquals(null, viewModel.uiState.value.missingModelPromptSlot)
     }
 }

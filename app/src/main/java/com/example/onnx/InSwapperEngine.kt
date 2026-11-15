@@ -127,7 +127,8 @@ data class FaceSwapExecutionResult(
     val stage2UpperLipRatio: Float = 0.94f,
     val stage3UpperLipRatio: Float = 0.94f,
     val stageTimings: ProductionStageTimings = ProductionStageTimings(),
-    val benchmarkReports: List<SwapCandidateBenchmarkReport> = emptyList()
+    val benchmarkReports: List<SwapCandidateBenchmarkReport> = emptyList(),
+    val engineUsed: String = "NEURAL"
 )
 
 /**
@@ -288,6 +289,8 @@ object InSwapperEngine {
         var totalMaskGenerationMs = 0L
         var totalFinalBlendingMs = 0L
         var activeSwapCropSize = DEFAULT_SWAP_SIZE
+        var usedNeuralSwapEngine = false
+        var usedNeuralGfpgan = false
         val srcM256 = FaceAlignment.estimateNorm(sourceFace.landmarks5, DEFAULT_SWAP_SIZE)
         val alignedSource256 = FaceAlignment.warpAffineCrop(sourceBitmap, srcM256, DEFAULT_SWAP_SIZE)
 
@@ -351,9 +354,10 @@ object InSwapperEngine {
                     val m256 = FaceAlignment.estimateNorm(targetFace.landmarks5, DEFAULT_SWAP_SIZE)
                     val alignedTarget256 = FaceAlignment.warpAffineCrop(targetBitmap, m256, DEFAULT_SWAP_SIZE)
 
-                    val rawSwappedCrop = if (swapSession != null && ortEnv != null && sourceTensor != null &&
+                    val isNeuralFaceRun = swapSession != null && ortEnv != null && sourceTensor != null &&
                         (detectedCropSize == 256 || detectedCropSize == 128)
-                    ) {
+                    val rawSwappedCrop = if (isNeuralFaceRun) {
+                        usedNeuralSwapEngine = true
                         val alignedTargetForModel = if (detectedCropSize == 128) {
                             FaceAlignment.warpAffineCrop(targetBitmap, m128, CANONICAL_ALIGN_SIZE)
                         } else {
@@ -457,6 +461,10 @@ object InSwapperEngine {
                             totalUpperLipGuardMs += uMs
                             totalMaskGenerationMs += mMs
                             totalFinalBlendingMs += fMs
+                        },
+                        isNeuralSwap = isNeuralFaceRun,
+                        onGfpganUsed = { gfpRan ->
+                            if (gfpRan) usedNeuralGfpgan = true
                         }
                     )
 
@@ -588,7 +596,16 @@ object InSwapperEngine {
         )
         println(stageTimings.toFormattedReport())
 
-        val gfpTag = " -> 512x512 HD Restore + Upper-Lip Guard"
+        val engineUsed = if (usedNeuralSwapEngine && sourceEmbedding.usedArcFaceModel) {
+            "NEURAL"
+        } else {
+            "SYNTHETIC"
+        }
+        val gfpTag = if (usedNeuralGfpgan) {
+            " -> GFPGAN 512x512 HD Restore + Upper-Lip Guard"
+        } else {
+            " -> 512x512 Bicubic HD + Upper-Lip Guard"
+        }
         val segTag = if (enableOcclusionProtection) {
             if (targetDepthMap != null) " + Depth Occlusion Guard" else " + Target Occlusion Guard"
         } else ""
@@ -610,7 +627,7 @@ object InSwapperEngine {
             inswapperMs = totalSwapMs.coerceAtLeast(1L),
             blendingMs = totalBlendMs.coerceAtLeast(1L),
             totalMs = totalMs,
-            pipelineSummary = "det_10g.onnx -> ${sourceEmbedding.providerSummary} -> ${swapFile.name} (${activeSwapCropSize}px)$gfpTag$segTag$bokehTag",
+            pipelineSummary = "det_10g.onnx -> ${sourceEmbedding.providerSummary} -> ${activeSwapFile.name} (${activeSwapCropSize}px)$gfpTag$segTag$bokehTag | engineUsed=$engineUsed",
             stage1SwapOnly512 = if (captureDiagnostics) firstStage1SwapOnly512 else null,
             stage2SwapRestore512 = if (captureDiagnostics) firstStage2Restore512 else null,
             stage3FinalBlend512 = if (captureDiagnostics) firstRestoredHd512 else null,
@@ -619,7 +636,8 @@ object InSwapperEngine {
             stage2UpperLipRatio = firstStage2Ratio,
             stage3UpperLipRatio = firstStage3Ratio,
             stageTimings = stageTimings,
-            benchmarkReports = benchmarkReports
+            benchmarkReports = benchmarkReports,
+            engineUsed = engineUsed
         )
     }
 
@@ -800,27 +818,41 @@ object InSwapperEngine {
                 val outFloats = FloatArray(3 * hw)
                 outBuf.get(outFloats)
 
-                // Detect whether output tensor is in [-1.0, 1.0] (HyperSwap 256) or [0.0, 1.0] (InSwapper 128)
-                var minVal = 0f
-                for (i in 0 until min(outFloats.size, 512)) {
-                    if (outFloats[i] < minVal) minVal = outFloats[i]
+                // Scan the ENTIRE output tensor (never just the first 512 elements!) to verify [-1.0, 1.0] vs [0.0, 1.0].
+                var minVal = Float.MAX_VALUE
+                var maxVal = -Float.MAX_VALUE
+                for (v in outFloats) {
+                    if (v.isFinite()) {
+                        if (v < minVal) minVal = v
+                        if (v > maxVal) maxVal = v
+                    }
                 }
-                val isSignedOutput = isHyperSwapModel && minVal < -0.05f
+                val isSignedOutput = if (isHyperSwapModel) {
+                    minVal < -0.01f || maxVal > 1.05f || minVal == Float.MAX_VALUE
+                } else {
+                    minVal < -0.05f
+                }
 
                 // Postprocess output [1, 3, cropSize, cropSize] RGB -> ARGB_8888 Bitmap
                 val outPixels = IntArray(hw)
                 if (isSignedOutput) {
                     for (i in 0 until hw) {
-                        val r = ((outFloats[i] * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val g = ((outFloats[hw + i] * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val b = ((outFloats[2 * hw + i] * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                        val rRaw = if (outFloats[i].isFinite()) outFloats[i] else 0f
+                        val gRaw = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
+                        val bRaw = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
+                        val r = ((rRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                        val g = ((gRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                        val b = ((bRaw * 0.5f + 0.5f) * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
                         outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                     }
                 } else {
                     for (i in 0 until hw) {
-                        val r = (outFloats[i] * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val g = (outFloats[hw + i] * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
-                        val b = (outFloats[2 * hw + i] * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                        val rRaw = if (outFloats[i].isFinite()) outFloats[i] else 0f
+                        val gRaw = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
+                        val bRaw = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
+                        val r = (rRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                        val g = (gRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
+                        val b = (bRaw * 255.0f + 0.5f).coerceIn(0f, 255f).toInt()
                         outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                     }
                 }
