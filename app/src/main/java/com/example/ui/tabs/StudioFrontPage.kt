@@ -47,6 +47,8 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -210,6 +212,9 @@ fun StudioFrontPage(
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
     onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
     onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
+    onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
+    onConfirmSwapStrategySelection: () -> Unit = {},
+    onDismissSwapStrategyPopup: () -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     modifier: Modifier = Modifier
@@ -260,7 +265,8 @@ fun StudioFrontPage(
                 onFaceReactionModeChanged = onFaceReactionModeChanged,
                 onOcclusionProtectionChanged = onOcclusionProtectionChanged,
                 onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
-                onHeadPipelineModeChanged = onHeadPipelineModeChanged
+                onHeadPipelineModeChanged = onHeadPipelineModeChanged,
+                onRequestSwapStrategySelection = onRequestSwapStrategySelection
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Download + Save to Gallery + Completed Footer)
@@ -273,6 +279,15 @@ fun StudioFrontPage(
             )
 
             Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        val pendingOption = uiState.pendingStrategyPopupOption
+        if (pendingOption != null) {
+            FaceSwapStrategyConfirmDialog(
+                pendingOption = pendingOption,
+                onConfirm = onConfirmSwapStrategySelection,
+                onCancel = onDismissSwapStrategyPopup
+            )
         }
     }
 }
@@ -731,7 +746,8 @@ private fun FrontMainWorkspaceCard(
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
     onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
-    onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {}
+    onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
+    onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -1025,6 +1041,15 @@ private fun FrontMainWorkspaceCard(
                     )
                 }
 
+                if (uiState.studioMode == StudioMode.FACE_SWAP) {
+                    HorizontalDivider(color = Color(0x260284C7), thickness = 1.dp)
+
+                    FaceSwapStrategySelectorCard(
+                        selectedOption = uiState.swapStrategyOption,
+                        onSelectRequested = onRequestSwapStrategySelection
+                    )
+                }
+
                 if (uiState.studioMode == StudioMode.HEAD_REPLACEMENT) {
                     HorizontalDivider(color = Color(0x260284C7), thickness = 1.dp)
 
@@ -1160,7 +1185,7 @@ private fun FrontMainWorkspaceCard(
                 uiState.isSwapping -> uiState.swapProgress?.stageTitle ?: "Swapping Face..."
                 uiState.studioMode == StudioMode.HEAD_REPLACEMENT -> "Replace Head"
                 uiState.studioMode == StudioMode.IDENTITY_PRESERVED -> "Swap (Preserve Identity)"
-                else -> "Swap Face"
+                else -> "Swap Face (${uiState.swapStrategyOption.shortCode})"
             }
 
             Box(
@@ -1895,4 +1920,162 @@ private fun FrontResultShowcaseCard(
             }
         }
     }
+}
+
+@Composable
+internal fun FaceSwapStrategySelectorCard(
+    selectedOption: com.example.onnx.FaceSwapStrategyOption,
+    onSelectRequested: (com.example.onnx.FaceSwapStrategyOption) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Output Style (A / B / B+C)",
+                color = Color(0xFF0369A1),
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp
+            )
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0x1A0284C7),
+                border = BorderStroke(1.dp, Color(0x660284C7)),
+                modifier = Modifier.testTag("active_strategy_badge")
+            ) {
+                Text(
+                    text = "Active: ${selectedOption.shortCode} • ${selectedOption.badgeSummary}",
+                    color = Color(0xFF0369A1),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            com.example.onnx.FaceSwapStrategyOption.entries.forEach { option ->
+                val selected = selectedOption == option
+                val tag = when (option) {
+                    com.example.onnx.FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY -> "strategy_option_a"
+                    com.example.onnx.FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR -> "strategy_option_b"
+                    com.example.onnx.FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD -> "strategy_option_bc"
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (selected) Color(0xFF0F2C59) else Color(0xFF1E293B)
+                        )
+                        .border(
+                            width = if (selected) 1.8.dp else 1.dp,
+                            color = if (selected) Color(0xFF00E5FF) else Color(0xFF334155),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { onSelectRequested(option) }
+                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                        .testTag(tag),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Option ${option.shortCode}",
+                            color = if (selected) Color(0xFF38BDF8) else Color(0xFFE2E8F0),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.5.sp,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = option.badgeSummary,
+                            color = if (selected) Color.White else Color(0xFF94A3B8),
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            fontSize = 9.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = "தொட்டுப் பார்க்கவும்: ${selectedOption.shortCode} தேர்ந்தெடுக்கப்பட்டது (விளக்கம் பார்க்க A / B / B+C தட்டவும்)",
+            color = Color(0xFF475569),
+            fontSize = 10.sp,
+            lineHeight = 14.sp
+        )
+    }
+}
+
+@Composable
+internal fun FaceSwapStrategyConfirmDialog(
+    pendingOption: com.example.onnx.FaceSwapStrategyOption,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = Color(0xFFF8FAFC),
+        title = {
+            Text(
+                text = pendingOption.tamilPopupTitle,
+                color = Color(0xFF0F172A),
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp
+            )
+        },
+        text = {
+            Text(
+                text = pendingOption.tamilPopupDescription,
+                color = Color(0xFF1E293B),
+                fontSize = 13.5.sp,
+                lineHeight = 20.sp
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("strategy_popup_ok"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF0284C7),
+                    contentColor = Color.White
+                )
+            ) {
+                Text(
+                    text = "OK",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("strategy_popup_cancel")
+            ) {
+                Text(
+                    text = "Cancel",
+                    color = Color(0xFF334155),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    )
 }

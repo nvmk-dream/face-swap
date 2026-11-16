@@ -615,6 +615,9 @@ fun FaceSwapStudioApp(
                     onLcmInpaintingChanged = viewModel::setLcmInpainting,
                     onAutoBodyAgeMatchChanged = viewModel::setAutoBodyAgeMatch,
                     onFaceAgingFactorChanged = viewModel::setFaceAgingFactor,
+                    onRequestSwapStrategySelection = viewModel::requestSwapStrategySelection,
+                    onConfirmSwapStrategySelection = viewModel::confirmSwapStrategySelection,
+                    onDismissSwapStrategyPopup = viewModel::dismissSwapStrategyPopup,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
                     onImportAllFromFolder = {
                         onnxFolderTreePicker.launch(null)

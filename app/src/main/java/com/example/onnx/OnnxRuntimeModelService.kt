@@ -126,6 +126,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         identityPreservationMode: Boolean = false,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
+        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
         captureDiagnostics: Boolean = false,
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
@@ -507,6 +508,7 @@ class OnnxRuntimeModelService(
         identityPreservationMode: Boolean,
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
+        swapStrategyOption: FaceSwapStrategyOption,
         captureDiagnostics: Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -537,6 +539,7 @@ class OnnxRuntimeModelService(
             identityPreservationMode = identityPreservationMode,
             autoBodyAgeMatch = autoBodyAgeMatch,
             faceAgingFactor = faceAgingFactor,
+            swapStrategyOption = swapStrategyOption,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedGfpganSession = null,

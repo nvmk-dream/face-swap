@@ -171,6 +171,9 @@ fun StudioTab(
     onOpenInpaintGallery: (android.graphics.Bitmap) -> Unit = {},
     onViewImageFullScreen: (android.graphics.Bitmap, String) -> Unit = { _, _ -> },
     onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
+    onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
+    onConfirmSwapStrategySelection: () -> Unit = {},
+    onDismissSwapStrategyPopup: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Front Page: Clean, focused UI matching the user's reference design
@@ -203,6 +206,9 @@ fun StudioTab(
             onOcclusionProtectionChanged = onOcclusionProtectionChanged,
             onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
             onHeadPipelineModeChanged = onHeadPipelineModeChanged,
+            onRequestSwapStrategySelection = onRequestSwapStrategySelection,
+            onConfirmSwapStrategySelection = onConfirmSwapStrategySelection,
+            onDismissSwapStrategyPopup = onDismissSwapStrategyPopup,
             onOpenInpaintPage = {
                 onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
             },

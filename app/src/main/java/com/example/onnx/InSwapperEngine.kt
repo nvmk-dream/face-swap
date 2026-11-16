@@ -181,6 +181,7 @@ object InSwapperEngine {
         captureDiagnostics: Boolean = false,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
+        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val tStart = System.currentTimeMillis()
@@ -526,7 +527,8 @@ object InSwapperEngine {
                             if (gfpRan) usedNeuralGfpgan = true
                         },
                         ageMatchPlan = targetAgePlans.getOrNull(idx),
-                        faceReagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null
+                        faceReagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null,
+                        swapStrategyOption = swapStrategyOption
                     )
 
                     rawSwappedCrop.recycle()
@@ -696,7 +698,7 @@ object InSwapperEngine {
             inswapperMs = totalSwapMs.coerceAtLeast(1L),
             blendingMs = totalBlendMs.coerceAtLeast(1L),
             totalMs = totalMs,
-            pipelineSummary = "det_10g.onnx -> ${sourceEmbedding.providerSummary} -> ${activeSwapFile.name} (${activeSwapCropSize}px, EP=$swapEpLabel$graphTag)$gfpTag$segTag$bokehTag | engineUsed=$engineUsed$diagTag",
+            pipelineSummary = "[Opt ${swapStrategyOption.shortCode}] det_10g.onnx -> ${sourceEmbedding.providerSummary} -> ${activeSwapFile.name} (${activeSwapCropSize}px, EP=$swapEpLabel$graphTag)$gfpTag$segTag$bokehTag | engineUsed=$engineUsed$diagTag",
             stage1SwapOnly512 = if (captureDiagnostics) firstStage1SwapOnly512 else null,
             stage2SwapRestore512 = if (captureDiagnostics) firstStage2Restore512 else null,
             stage3FinalBlend512 = if (captureDiagnostics) firstRestoredHd512 else null,
@@ -1168,10 +1170,12 @@ object InSwapperEngine {
             bestStats.collapsedBlackFraction > 0.02f ||
             bestStats.nanFraction > 0.005f ||
             bestStats.lumaCorrelation < 0.10f
-        val isNearIdentityPassthrough = isHyperSwapModel &&
-            !hasCorruption &&
-            bestStats.lumaCorrelation > 0.965f &&
-            bestStats.centerFaceDiff < 12.0f
+        val isNearIdentityPassthrough = shouldRetryNearIdentityPassthrough(
+            isHyperSwapModel = isHyperSwapModel,
+            hasCorruption = hasCorruption,
+            lumaCorrelation = bestStats.lumaCorrelation,
+            centerFaceDiff = bestStats.centerFaceDiff
+        )
         if (isHyperSwapModel && (hasCorruption || isNearIdentityPassthrough)) {
             val candidates = listOf(
                 SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.SIGNED_MINUS1_TO_1),
@@ -1227,5 +1231,19 @@ object InSwapperEngine {
             "corr=${"%.2f".format(bestStats.lumaCorrelation)} " +
             "cdiff=${"%.1f".format(bestStats.centerFaceDiff)}"
         return swappedBitmap to diagSummary
+    }
+
+    internal const val PASSTHROUGH_CENTER_DIFF_THRESHOLD = 7.5f
+
+    internal fun shouldRetryNearIdentityPassthrough(
+        isHyperSwapModel: Boolean,
+        hasCorruption: Boolean,
+        lumaCorrelation: Float,
+        centerFaceDiff: Float
+    ): Boolean {
+        return isHyperSwapModel &&
+            !hasCorruption &&
+            lumaCorrelation > 0.965f &&
+            centerFaceDiff < PASSTHROUGH_CENTER_DIFF_THRESHOLD
     }
 }

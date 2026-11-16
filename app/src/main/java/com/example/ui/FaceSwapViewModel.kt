@@ -15,6 +15,7 @@ import com.example.onnx.CompleteVisualValidationSuite
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceAlignment
 import com.example.onnx.FaceReactionSourceMode
+import com.example.onnx.FaceSwapStrategyOption
 import com.example.onnx.FaceSwapAndRestorationService
 import com.example.onnx.FaceSwapExecutionResult
 import com.example.onnx.HeadReplacementPipelineMode
@@ -102,6 +103,8 @@ data class FaceSwapUiState(
     val currentTab: AppTab = AppTab.STUDIO,
     val studioSubPage: StudioSubPage = StudioSubPage.FRONT_HOME,
     val studioMode: StudioMode = StudioMode.FACE_SWAP,
+    val swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+    val pendingStrategyPopupOption: FaceSwapStrategyOption? = null,
     val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
     val qualityLevel: ProcessingQualityLevel = ProcessingQualityLevel.BALANCED,
     val outputResolution: OutputResolutionOption = OutputResolutionOption.ORIGINAL,
@@ -393,6 +396,25 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun setFaceReactionMode(mode: FaceReactionSourceMode) {
         _uiState.update { it.copy(faceReactionMode = mode) }
+    }
+
+    fun requestSwapStrategySelection(option: FaceSwapStrategyOption) {
+        _uiState.update { it.copy(pendingStrategyPopupOption = option) }
+    }
+
+    fun confirmSwapStrategySelection() {
+        _uiState.update { state ->
+            val chosen = state.pendingStrategyPopupOption ?: return@update state
+            state.copy(
+                swapStrategyOption = chosen,
+                pendingStrategyPopupOption = null,
+                statusBannerMessage = "Option ${chosen.shortCode} (${chosen.badgeSummary}) தேர்ந்தெடுக்கப்பட்டது."
+            )
+        }
+    }
+
+    fun dismissSwapStrategyPopup() {
+        _uiState.update { it.copy(pendingStrategyPopupOption = null) }
     }
 
     fun setHeadPipelineMode(mode: HeadReplacementPipelineMode) {
@@ -1175,7 +1197,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     showOriginalInComparison = false,
                     swapProgress = SwapStageProgress(
                         stepIndex = 1,
-                        totalSteps = if (state.studioMode == StudioMode.HEAD_REPLACEMENT) 6 else 5,
+                        totalSteps = if (state.studioMode == StudioMode.HEAD_REPLACEMENT || (state.studioMode == StudioMode.FACE_SWAP && state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD)) 6 else 5,
                         stageTitle = "Stage 1: Detection",
                         detailMessage = "Preparing in-memory ONNX Runtime sessions...",
                         progressFraction = 0.05f
@@ -1187,37 +1209,73 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 val execResult = withContext(Dispatchers.Default) {
                     SdInpaintOnnxEngine.clearSessionCache()
                     when (state.studioMode) {
-                        StudioMode.FACE_SWAP -> modelService.swapFaces(
-                            sourceBitmap = srcBitmap,
-                            sourceFace = selectedSourceFace,
-                            targetBitmap = tgtBitmap,
-                            targetFacesToReplace = targetsToSwap,
-                            enableColorTransfer = state.enableColorTransfer,
-                            enableProvenanceWatermark = state.enableProvenanceWatermark,
-                            allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
-                            preferHardwareAccel = state.preferHardwareAcceleration,
-                            skinToneMode = state.skinToneMode,
-                            faceReactionMode = state.faceReactionMode,
-                            enableOcclusionProtection = state.enableOcclusionProtection,
-                            portraitBlurStrength = state.portraitBlurStrength,
-                            blendStrength = state.blendStrength,
-                            enhancementStrength = state.enhancementStrength,
-                            offsetX = state.faceOffsetX,
-                            offsetY = state.faceOffsetY,
-                            scaleAdjust = state.faceScaleAdjust,
-                            identityPreservationMode = false,
-                            autoBodyAgeMatch = state.autoBodyAgeMatch,
-                            faceAgingFactor = state.faceAgingFactor,
-                            onProgress = { progress ->
-                                _uiState.update { s -> s.copy(swapProgress = progress) }
-                                ProcessingForegroundService.startOrUpdate(
-                                    context = appCtx,
-                                    title = "${state.studioMode.title} • ${progress.stageTitle}",
-                                    detail = progress.detailMessage,
-                                    progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
-                                )
-                            }
-                        )
+                        StudioMode.FACE_SWAP -> if (state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD) {
+                            modelService.replaceFullHead(
+                                sourceBitmap = srcBitmap,
+                                sourceFace = selectedSourceFace,
+                                targetBitmap = tgtBitmap,
+                                targetFacesToReplace = targetsToSwap,
+                                enableColorTransfer = state.enableColorTransfer,
+                                enableProvenanceWatermark = state.enableProvenanceWatermark,
+                                allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
+                                lowMemoryMode = state.lowMemoryMode || (state.qualityLevel == ProcessingQualityLevel.FAST),
+                                preferHardwareAccel = state.preferHardwareAcceleration,
+                                skinToneMode = state.skinToneMode,
+                                faceReactionMode = state.faceReactionMode,
+                                portraitBlurStrength = state.portraitBlurStrength,
+                                blendStrength = state.blendStrength,
+                                enhancementStrength = state.enhancementStrength,
+                                offsetX = state.faceOffsetX,
+                                offsetY = state.faceOffsetY,
+                                scaleAdjust = state.faceScaleAdjust,
+                                autoBodyAgeMatch = state.autoBodyAgeMatch,
+                                faceAgingFactor = state.faceAgingFactor,
+                                headPipelineMode = state.headPipelineMode,
+                                isCancelled = { swapCancellationRequested.get() },
+                                onProgress = { progress ->
+                                    _uiState.update { s -> s.copy(swapProgress = progress) }
+                                    ProcessingForegroundService.startOrUpdate(
+                                        context = appCtx,
+                                        title = "${state.studioMode.title} (Opt B+C) • ${progress.stageTitle}",
+                                        detail = progress.detailMessage,
+                                        progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                    )
+                                }
+                            )
+                        } else {
+                            modelService.swapFaces(
+                                sourceBitmap = srcBitmap,
+                                sourceFace = selectedSourceFace,
+                                targetBitmap = tgtBitmap,
+                                targetFacesToReplace = targetsToSwap,
+                                enableColorTransfer = state.enableColorTransfer,
+                                enableProvenanceWatermark = state.enableProvenanceWatermark,
+                                allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
+                                preferHardwareAccel = state.preferHardwareAcceleration,
+                                skinToneMode = state.skinToneMode,
+                                faceReactionMode = state.faceReactionMode,
+                                enableOcclusionProtection = state.enableOcclusionProtection,
+                                portraitBlurStrength = state.portraitBlurStrength,
+                                blendStrength = state.blendStrength,
+                                enhancementStrength = state.enhancementStrength,
+                                offsetX = state.faceOffsetX,
+                                offsetY = state.faceOffsetY,
+                                scaleAdjust = state.faceScaleAdjust,
+                                identityPreservationMode = false,
+                                autoBodyAgeMatch = state.autoBodyAgeMatch,
+                                faceAgingFactor = state.faceAgingFactor,
+                                swapStrategyOption = state.swapStrategyOption,
+                                onProgress = { progress ->
+                                    _uiState.update { s -> s.copy(swapProgress = progress) }
+                                    ProcessingForegroundService.startOrUpdate(
+                                        context = appCtx,
+                                        title = "${state.studioMode.title} (Opt ${state.swapStrategyOption.shortCode}) • ${progress.stageTitle}",
+                                        detail = progress.detailMessage,
+                                        progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                    )
+                                }
+                            )
+                        }
 
                         StudioMode.IDENTITY_PRESERVED -> modelService.swapFaces(
                             sourceBitmap = srcBitmap,
@@ -1298,7 +1356,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         sourceResolution = "${srcBitmap.width}x${srcBitmap.height}",
                         targetResolution = "${tgtBitmap.width}x${tgtBitmap.height}",
                         swappedFacesCount = execResult.swappedFacesCount,
-                        pipelineSummary = "[${state.studioMode.title} • ${state.qualityLevel.title}] ${execResult.pipelineSummary}",
+                        pipelineSummary = "[${state.studioMode.title}${if (state.studioMode == StudioMode.FACE_SWAP) " • Opt ${state.swapStrategyOption.shortCode}" else ""} • ${state.qualityLevel.title}] ${execResult.pipelineSummary}",
                         detectionMs = execResult.detectionMs,
                         embeddingMs = execResult.embeddingMs,
                         inswapperMs = execResult.inswapperMs,
