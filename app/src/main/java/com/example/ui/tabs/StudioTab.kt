@@ -72,6 +72,7 @@ import com.example.R
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceReactionSourceMode
 import com.example.onnx.AccessoryTarget
+import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.ModelSlot
 import com.example.onnx.SkinToneSourceMode
@@ -168,6 +169,7 @@ fun StudioTab(
     onDownloadBitmapToGallery: (android.graphics.Bitmap) -> Unit = {},
     onOpenInpaintGallery: (android.graphics.Bitmap) -> Unit = {},
     onViewImageFullScreen: (android.graphics.Bitmap, String) -> Unit = { _, _ -> },
+    onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Front Page: Clean, focused UI matching the user's reference design
@@ -198,6 +200,7 @@ fun StudioTab(
             onFaceReactionModeChanged = onFaceReactionModeChanged,
             onOcclusionProtectionChanged = onOcclusionProtectionChanged,
             onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
+            onHeadPipelineModeChanged = onHeadPipelineModeChanged,
             onOpenInpaintPage = {
                 onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
             },
@@ -804,6 +807,11 @@ private fun HeroPipelineStatusCard(
                                 fileName = "face_reaging.onnx",
                                 isInRam = uiState.memoryServiceState.reagingLoaded,
                                 tamilRole = "சரும வயதுப் பொருத்தம் (Optional FRAN Re-Aging): உடல் வயதுக்கேற்ப முகத் தோல் மற்றும் கழுத்து முதிர்ச்சியை அடையாளம் மாறாமல் சரிசெய்ய."
+                            )
+                            StudioTamilModelRow(
+                                fileName = "facemesh-v2-v1.onnx",
+                                isInRam = uiState.memoryServiceState.faceMeshLoaded,
+                                tamilRole = "3D தலை அமைப்பு (Optional FaceMesh V2 468-Pt): Target கழுத்து & தலையின் 3D கோணத்திற்கு ஏற்ப Source தலையைத் திருப்பிப் பொருத்த."
                             )
                         }
                     }

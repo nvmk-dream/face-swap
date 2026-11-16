@@ -714,7 +714,7 @@ object HeadSegmentationAndInpainting {
         return outBmp
     }
 
-    private fun runLamaInpaintOnnx(
+    internal fun runLamaInpaintOnnx(
         ortEnv: OrtEnvironment,
         lamaFile: File,
         cropBitmap: Bitmap,

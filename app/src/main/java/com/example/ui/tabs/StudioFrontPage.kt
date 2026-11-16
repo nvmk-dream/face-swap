@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -81,6 +82,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.onnx.HeadReplacementPipelineMode
 import com.example.ui.FaceSwapUiState
 import com.example.ui.StudioMode
 import com.example.ui.theme.ElectricCyan
@@ -196,6 +198,7 @@ fun StudioFrontPage(
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
     onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
+    onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     modifier: Modifier = Modifier
@@ -244,7 +247,8 @@ fun StudioFrontPage(
                 onSkinToneModeChanged = onSkinToneModeChanged,
                 onFaceReactionModeChanged = onFaceReactionModeChanged,
                 onOcclusionProtectionChanged = onOcclusionProtectionChanged,
-                onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged
+                onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
+                onHeadPipelineModeChanged = onHeadPipelineModeChanged
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Download + Save to Gallery + Completed Footer)
@@ -713,7 +717,8 @@ private fun FrontMainWorkspaceCard(
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
-    onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {}
+    onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
+    onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -1005,6 +1010,99 @@ private fun FrontMainWorkspaceCard(
                         ),
                         modifier = Modifier.testTag("front_auto_body_age_switch")
                     )
+                }
+
+                if (uiState.studioMode == StudioMode.HEAD_REPLACEMENT) {
+                    HorizontalDivider(color = Color(0x260284C7), thickness = 1.dp)
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Head Replacement Engine (முழுத் தலை மாற்ற முறை)",
+                            color = Color(0xFF0369A1),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            HeadReplacementPipelineMode.entries.forEach { mode ->
+                                val selected = uiState.headPipelineMode == mode
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 48.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (selected) Color(0xFF0F2C59) else Color(0xFF1E293B)
+                                        )
+                                        .border(
+                                            width = if (selected) 1.6.dp else 1.dp,
+                                            color = if (selected) Color(0xFF00E5FF) else Color(0xFF334155),
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable { onHeadPipelineModeChanged(mode) }
+                                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                                        .testTag("head_pipeline_${mode.id}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = mode.title,
+                                        color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 10.5.sp,
+                                        lineHeight = 13.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = uiState.headPipelineMode.tamilSubtitle,
+                            color = Color(0xFF334155),
+                            fontSize = 10.5.sp,
+                            lineHeight = 14.sp
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            val pills = listOf(
+                                "FaceMesh V2" to uiState.isFaceMeshReady,
+                                "Depth V2" to uiState.isDepthModelReady,
+                                "SD 1.5" to uiState.isSdInpaintReady,
+                                "GFPGAN" to uiState.isEnhancerReady
+                            )
+                            pills.forEach { (pillLabel, isReady) ->
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isReady) Color(0x1A059669) else Color(0x1A64748B),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isReady) Color(0x66059669) else Color(0x4D94A3B8)
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = if (isReady) "✓ $pillLabel" else "$pillLabel",
+                                        color = if (isReady) Color(0xFF047857) else Color(0xFF475569),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 9.5.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

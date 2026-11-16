@@ -1,8 +1,10 @@
 package com.example.onnx
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -11,6 +13,7 @@ import android.graphics.PointF
 import android.graphics.RectF
 import java.io.File
 import java.nio.FloatBuffer
+import java.nio.ShortBuffer
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -25,6 +28,32 @@ import kotlin.math.sqrt
  *    while adapting gentle lighting contrast so it blends cleanly without looking flat.
  *  - BALANCED_BLEND: 50% Source identity skin tone + 50% Target scene skin tone.
  */
+enum class HeadReplacementPipelineMode(
+    val id: String,
+    val title: String,
+    val tamilTitle: String,
+    val tamilSubtitle: String
+) {
+    CLEAN_ERASE_3D_DIFFUSION(
+        id = "clean_erase_3d_diffusion",
+        title = "3D Erase + Diffusion",
+        tamilTitle = "1. முழுத் தலை நீக்கம் + 3D + Diffusion (புதியது)",
+        tamilSubtitle = "Target பழைய தலையை முழுமையாக நீக்கி, FaceMesh V2 3D + Depth + SD 1.5 Diffusion வழியாக கழுத்து & முடியை இயற்கையாக இணைக்கும்."
+    ),
+    CLEAN_ERASE_3D_FAST(
+        id = "clean_erase_3d_fast",
+        title = "3D Erase (Fast)",
+        tamilTitle = "2. முழுத் தலை நீக்கம் + 3D Fast (SD இல்லாமல்)",
+        tamilSubtitle = "Target பழைய தலையை முழுமையாக நீக்கி 3D FaceMesh + Depth + LaMa மூலம் மிக வேகமாகப் பொருத்தும்."
+    ),
+    LEGACY_COPY_PASTE(
+        id = "legacy_copy_paste",
+        title = "Classic Copy-Paste",
+        tamilTitle = "3. பழைய Copy-Paste முறை (Optional)",
+        tamilSubtitle = "முன்பு இருந்த 2D affine head replacement முறை — ஒப்பிட்டுப் பார்க்க Optional-ஆக உள்ளது."
+    )
+}
+
 enum class SkinToneSourceMode(
     val title: String,
     val tamilTitle: String,
@@ -823,45 +852,118 @@ object FaceBlender {
         session: OrtSession,
         crop128Or512: Bitmap
     ): Bitmap? {
-        val gfpSize = HD_SIZE
+        val inputEntry = session.inputInfo.entries.firstOrNull() ?: return null
+        val inputName = inputEntry.key
+        val inInfo = inputEntry.value.info as? TensorInfo
+        val inShape = inInfo?.shape ?: longArrayOf(1L, 3L, HD_SIZE.toLong(), HD_SIZE.toLong())
+        val isNhwcIn = inShape.size == 4 && inShape[3] == 3L && inShape[1] != 3L
+        val rawH = if (inShape.size == 4) (if (isNhwcIn) inShape[1] else inShape[2]) else HD_SIZE.toLong()
+        val gfpSize = if (rawH > 0L) rawH.toInt().coerceIn(128, 1024) else HD_SIZE
+
         val hw = gfpSize * gfpSize
-        val pixels = upscaleBitmapBicubicTo512(crop128Or512)
-
-        val inBuf = FloatBuffer.allocate(3 * hw)
-        for (i in 0 until hw) {
-            val c = pixels[i]
-            val r = (((c ushr 16) and 0xFF) / 255.0f - 0.5f) / 0.5f
-            val g = (((c ushr 8) and 0xFF) / 255.0f - 0.5f) / 0.5f
-            val b = ((c and 0xFF) / 255.0f - 0.5f) / 0.5f
-            inBuf.put(i, r)
-            inBuf.put(hw + i, g)
-            inBuf.put(2 * hw + i, b)
+        val pixels = if (gfpSize == HD_SIZE) {
+            upscaleBitmapBicubicTo512(crop128Or512)
+        } else {
+            val scaled = Bitmap.createScaledBitmap(crop128Or512, gfpSize, gfpSize, true)
+            IntArray(hw).also { scaled.getPixels(it, 0, gfpSize, 0, 0, gfpSize, gfpSize); scaled.recycle() }
         }
-        inBuf.rewind()
 
-        val outPixels512 = IntArray(hw)
-        val inputName = session.inputNames.first()
-        val shape = longArrayOf(1L, 3L, gfpSize.toLong(), gfpSize.toLong())
+        val floatInput = FloatArray(3 * hw)
+        if (isNhwcIn) {
+            for (i in 0 until hw) {
+                val c = pixels[i]
+                val base = i * 3
+                floatInput[base] = (((c ushr 16) and 0xFF) / 255.0f - 0.5f) / 0.5f
+                floatInput[base + 1] = (((c ushr 8) and 0xFF) / 255.0f - 0.5f) / 0.5f
+                floatInput[base + 2] = ((c and 0xFF) / 255.0f - 0.5f) / 0.5f
+            }
+        } else {
+            for (i in 0 until hw) {
+                val c = pixels[i]
+                floatInput[i] = (((c ushr 16) and 0xFF) / 255.0f - 0.5f) / 0.5f
+                floatInput[hw + i] = (((c ushr 8) and 0xFF) / 255.0f - 0.5f) / 0.5f
+                floatInput[2 * hw + i] = ((c and 0xFF) / 255.0f - 0.5f) / 0.5f
+            }
+        }
+
+        val tensorShape = if (isNhwcIn) {
+            longArrayOf(1L, gfpSize.toLong(), gfpSize.toLong(), 3L)
+        } else {
+            longArrayOf(1L, 3L, gfpSize.toLong(), gfpSize.toLong())
+        }
+        val inTensor = if (inInfo?.type == OnnxJavaType.FLOAT16) {
+            val shorts = ShortArray(3 * hw) { idx -> DepthEstimationEngine.floatToFloat16(floatInput[idx]) }
+            OnnxTensor.createTensor(ortEnv, ShortBuffer.wrap(shorts), tensorShape, OnnxJavaType.FLOAT16)
+        } else {
+            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floatInput), tensorShape)
+        }
+
+        val outPixels = IntArray(hw)
         var introducedNeonRed = 0
         var introducedBlack = 0
         var nanFloats = 0
-        OnnxTensor.createTensor(ortEnv, inBuf, shape).use { inTensor ->
-            session.run(mapOf(inputName to inTensor)).use { res ->
+        inTensor.use { tensor ->
+            session.run(mapOf(inputName to tensor)).use { res ->
                 val outT = res[0] as OnnxTensor
+                val outInfo = outT.info
+                val outShape = outInfo.shape
+                val isNhwcOut = outShape.size == 4 && outShape[3] == 3L && outShape[1] != 3L
                 val outFloats = FloatArray(3 * hw)
-                outT.floatBuffer.get(outFloats, 0, min(outT.floatBuffer.remaining(), outFloats.size))
+                if (outInfo.type == OnnxJavaType.FLOAT16) {
+                    val sb = outT.shortBuffer
+                    val count = min(sb.remaining(), outFloats.size)
+                    for (i in 0 until count) {
+                        outFloats[i] = DepthEstimationEngine.float16ToFloat(sb.get())
+                    }
+                } else {
+                    val fb = outT.floatBuffer
+                    fb.get(outFloats, 0, min(fb.remaining(), outFloats.size))
+                }
+
+                var minV = Float.MAX_VALUE
+                var maxV = -Float.MAX_VALUE
                 for (v in outFloats) {
-                    if (!v.isFinite()) nanFloats++
+                    if (!v.isFinite()) {
+                        nanFloats++
+                    } else {
+                        if (v < minV) minV = v
+                        if (v > maxV) maxV = v
+                    }
                 }
                 if (nanFloats > hw / 50) return null
+                // Support both [-1, 1] and [0, 1] / [0, 255] output ranges gracefully
+                val isUnsigned01 = minV >= -0.05f && maxV <= 1.25f
+                val is255 = maxV > 2.5f
+
                 for (i in 0 until hw) {
-                    val fr = if (outFloats[i].isFinite()) outFloats[i] else 0f
-                    val fg = if (outFloats[hw + i].isFinite()) outFloats[hw + i] else 0f
-                    val fb = if (outFloats[2 * hw + i].isFinite()) outFloats[2 * hw + i] else 0f
-                    val r = (((fr * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                    val g = (((fg * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                    val b = (((fb * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                    outPixels512[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    val frRaw = if (isNhwcOut) outFloats[i * 3] else outFloats[i]
+                    val fgRaw = if (isNhwcOut) outFloats[i * 3 + 1] else outFloats[hw + i]
+                    val fbRaw = if (isNhwcOut) outFloats[i * 3 + 2] else outFloats[2 * hw + i]
+                    val fr = if (frRaw.isFinite()) frRaw else 0f
+                    val fg = if (fgRaw.isFinite()) fgRaw else 0f
+                    val fb = if (fbRaw.isFinite()) fbRaw else 0f
+
+                    val r: Int
+                    val g: Int
+                    val b: Int
+                    when {
+                        is255 -> {
+                            r = fr.toInt().coerceIn(0, 255)
+                            g = fg.toInt().coerceIn(0, 255)
+                            b = fb.toInt().coerceIn(0, 255)
+                        }
+                        isUnsigned01 -> {
+                            r = (fr.coerceIn(0f, 1f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                            g = (fg.coerceIn(0f, 1f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                            b = (fb.coerceIn(0f, 1f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                        }
+                        else -> {
+                            r = (((fr * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                            g = (((fg * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                            b = (((fb * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
+                        }
+                    }
+                    outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
 
                     val inC = pixels[i]
                     val inR = (inC ushr 16) and 0xFF
@@ -881,9 +983,12 @@ object FaceBlender {
         if ((introducedNeonRed + introducedBlack).toFloat() / hw.toFloat() > 0.025f) {
             return null
         }
-        val restored512 = Bitmap.createBitmap(gfpSize, gfpSize, Bitmap.Config.ARGB_8888)
-        restored512.setPixels(outPixels512, 0, gfpSize, 0, 0, gfpSize, gfpSize)
-        return restored512
+        val restored = Bitmap.createBitmap(gfpSize, gfpSize, Bitmap.Config.ARGB_8888)
+        restored.setPixels(outPixels, 0, gfpSize, 0, 0, gfpSize, gfpSize)
+        if (gfpSize == HD_SIZE) return restored
+        val resized512 = Bitmap.createScaledBitmap(restored, HD_SIZE, HD_SIZE, true)
+        restored.recycle()
+        return resized512
     }
 
     /**

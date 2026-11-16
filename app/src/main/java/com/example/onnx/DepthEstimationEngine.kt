@@ -563,7 +563,7 @@ object DepthEstimationEngine {
         }
     }
 
-    private fun floatToFloat16(value: Float): Short {
+    internal fun floatToFloat16(value: Float): Short {
         val bits = java.lang.Float.floatToRawIntBits(value)
         val sign = (bits ushr 16) and 0x8000
         var valBits = (bits and 0x7FFFFFFF) + 0x1000
@@ -576,7 +576,7 @@ object DepthEstimationEngine {
             }
         }
         if (valBits >= 0x38800000) {
-            return (sign or ((valBits - 0x38000000) ushr 13)).toShort()
+            return (sign or ((valBits - 0x38800000) ushr 13)).toShort()
         }
         if (valBits < 0x33000000) return sign.toShort()
         valBits = (bits and 0x7FFFFFFF) ushr 23
@@ -584,7 +584,7 @@ object DepthEstimationEngine {
         return (sign or ((mantissa + (0x800000 ushr (valBits - 102))) ushr (126 - valBits))).toShort()
     }
 
-    private fun float16ToFloat(h: Short): Float {
+    internal fun float16ToFloat(h: Short): Float {
         val bits = h.toInt() and 0xFFFF
         val sign = (bits and 0x8000) shl 16
         val exp = (bits ushr 10) and 0x1F

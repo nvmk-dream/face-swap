@@ -31,6 +31,7 @@ data class OnnxMemoryServiceState(
     val emapLoaded: Boolean = false,
     val mivoloLoaded: Boolean = false,
     val reagingLoaded: Boolean = false,
+    val faceMeshLoaded: Boolean = false,
     val loadedSessions: Map<ModelSlot, LoadedSessionInfo> = emptyMap(),
     val totalResidentBytes: Long = 0L,
     val totalLoadTimeMs: Long = 0L,
@@ -153,6 +154,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         scaleAdjust: Float = 1.0f,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
+        headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
 
@@ -400,6 +402,7 @@ class OnnxRuntimeModelService(
         val swap = sessionMetadata[ModelSlot.SWAPPER]?.isLoadedInMemory == true
         val mivolo = sessionMetadata[ModelSlot.AGE_ESTIMATOR]?.isLoadedInMemory == true
         val reaging = sessionMetadata[ModelSlot.FACE_REAGING]?.isLoadedInMemory == true
+        val faceMesh = sessionMetadata[ModelSlot.FACE_MESH_3D]?.isLoadedInMemory == true
         val emap = cachedEmap512x512 != null
 
         val residentBytes = sessionMetadata.values
@@ -426,6 +429,7 @@ class OnnxRuntimeModelService(
             emapLoaded = emap,
             mivoloLoaded = mivolo,
             reagingLoaded = reaging,
+            faceMeshLoaded = faceMesh,
             loadedSessions = sessionMetadata.toMap(),
             totalResidentBytes = residentBytes,
             totalLoadTimeMs = totalLoadTimeMs,
@@ -563,6 +567,7 @@ class OnnxRuntimeModelService(
         scaleAdjust: Float,
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
+        headPipelineMode: HeadReplacementPipelineMode,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val emap = getOrLoadInswapperEmap()
@@ -589,6 +594,7 @@ class OnnxRuntimeModelService(
             scaleAdjust = scaleAdjust,
             autoBodyAgeMatch = autoBodyAgeMatch,
             faceAgingFactor = faceAgingFactor,
+            headPipelineMode = headPipelineMode,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedSegformerSession = null,

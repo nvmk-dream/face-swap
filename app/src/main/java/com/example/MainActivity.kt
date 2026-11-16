@@ -560,6 +560,7 @@ fun FaceSwapStudioApp(
                 AppTab.STUDIO -> StudioTab(
                     uiState = uiState,
                     onSelectStudioMode = viewModel::selectStudioMode,
+                    onHeadPipelineModeChanged = viewModel::setHeadPipelineMode,
                     onPickSourcePhoto = {
                         sourcePhotoPicker.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)

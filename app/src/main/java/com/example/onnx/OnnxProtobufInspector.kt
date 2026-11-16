@@ -196,6 +196,22 @@ enum class ModelSlot(
         expectedOutputSignature = "output: FLOAT[1, 3, 512, 512] (Signed residual RGB delta added to input)",
         licenseSummary = "MIT License (Glat0s / timroelofs123 FRAN)",
         downloadSourceUrl = "https://github.com/Glat0s/face_reaging-onnx"
+    ),
+    FACE_MESH_3D(
+        id = "facemesh_v2",
+        subdirectory = "face_mesh",
+        canonicalFileName = "facemesh-v2-v1.onnx",
+        displayName = "facemesh-v2-v1.onnx (3D FaceMesh V2 468-Pt)",
+        categoryTitle = "models/face_mesh/",
+        approximateSizeLabel = "~4.9 MB",
+        requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
+        tamilTitle = "11. 3D முக அமைப்பு மாடல் (FaceMesh V2 468-Pt)",
+        tamilRoleSummary = "Source மற்றும் Target முகங்களில் 468 3D புள்ளிகளைக் (X, Y, Z) கண்டறிந்து, Target கழுத்து & தலையின் 3D கோணத்திற்கு ஏற்ப Source தலையைத் திருப்பிப் பொருத்த உதவுகிறது.",
+        roleSummary = "Optional MediaPipe FaceMesh V2 / 3D landmark ONNX model predicting 468–478 3D facial vertices (x, y, z) for accurate 3D Head Pose rotation, jawline–neck fitting, and inner-face identity masking.",
+        expectedInputSignature = "input: FLOAT[1, 3, 192, 192] (or [1, 192, 192, 3])",
+        expectedOutputSignature = "landmarks: FLOAT[1, 1404+] (468 3D (x, y, z) vertices)",
+        licenseSummary = "Apache-2.0 (MediaPipe / omebly-tools-models)",
+        downloadSourceUrl = "https://huggingface.co/hussain5049/omebly-tools-models"
     )
 }
 
@@ -257,6 +273,7 @@ object OnnxProtobufInspector {
         "depth",
         "age_estimation",
         "re_aging",
+        "face_mesh",
         "head_swap"
     )
 
@@ -809,6 +826,11 @@ object OnnxProtobufInspector {
                         p.contains("sd") || p.contains("inpaint") || p.contains("realvis")
                     }) ->
                 ModelSlot.FACE_REAGING
+            lower.contains("facemesh") || lower.contains("face_mesh") || lower.contains("face-mesh") ||
+                lower.contains("face_landmarks") || lower.contains("1k3d68") ||
+                lower.contains("2d106det") || lower.contains("3ddfa") ||
+                lower.contains("mb1_120x120") ->
+                ModelSlot.FACE_MESH_3D
             else -> null
         }
     }
@@ -996,6 +1018,7 @@ object OnnxProtobufInspector {
                 ModelSlot.SEGMENTATION,
                 ModelSlot.MATTING,
                 ModelSlot.INPAINTING,
+                ModelSlot.FACE_MESH_3D,
                 ModelSlot.AGE_ESTIMATOR,
                 ModelSlot.FACE_REAGING
             )
@@ -1208,6 +1231,13 @@ object OnnxProtobufInspector {
                 "face_reaging.onnx",
                 "face-reaging.onnx",
                 "fran_reaging.onnx"
+            ),
+            ModelSlot.FACE_MESH_3D to listOf(
+                "facemesh-v2-v1.onnx",
+                "facemesh_v2.onnx",
+                "facemesh.onnx",
+                "1k3d68.onnx",
+                "2d106det.onnx"
             )
         )
 
@@ -1462,6 +1492,9 @@ object OnnxProtobufInspector {
             ModelSlot.FACE_REAGING -> listOf(
                 TensorDescriptor("input", "FLOAT", listOf(1, 5, 512, 512))
             )
+            ModelSlot.FACE_MESH_3D -> listOf(
+                TensorDescriptor("input", "FLOAT", listOf(1, 3, 192, 192))
+            )
         }
     }
 
@@ -1481,6 +1514,7 @@ object OnnxProtobufInspector {
             ModelSlot.DEPTH -> listOf(TensorDescriptor("predicted_depth", "FLOAT", listOf(1, 518, 518)))
             ModelSlot.AGE_ESTIMATOR -> listOf(TensorDescriptor("age", "FLOAT", listOf(1, 1)))
             ModelSlot.FACE_REAGING -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
+            ModelSlot.FACE_MESH_3D -> listOf(TensorDescriptor("landmarks", "FLOAT", listOf(1, 1404)))
         }
     }
 

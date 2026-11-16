@@ -169,6 +169,12 @@ fun ModelsInspectorTab(
                             isLoaded = memoryServiceState.reagingLoaded,
                             note = memoryServiceState.loadedSessions[ModelSlot.FACE_REAGING]?.statusNote
                         )
+                        MemorySlotRow(
+                            label = "8. facemesh-v2-v1.onnx (3D FaceMesh V2 468-Pt)",
+                            tamilPurpose = ModelSlot.FACE_MESH_3D.tamilTitle + " — " + ModelSlot.FACE_MESH_3D.tamilRoleSummary,
+                            isLoaded = memoryServiceState.faceMeshLoaded,
+                            note = memoryServiceState.loadedSessions[ModelSlot.FACE_MESH_3D]?.statusNote
+                        )
                     }
 
                     Row(
@@ -318,7 +324,8 @@ fun ModelsInspectorTab(
                                 "├── depth/          (Depth Anything V2 Small [P1] / sentis-MiDaS [P2])\n" +
                                 "├── age_estimation/ (mivolo_v2_age.onnx — MiVOLO v2 Face+Body Age)\n" +
                                 "├── re_aging/       (face_reaging.onnx — FRAN U-Net / CV Fallback)\n" +
-                                "└── enhancement/    (gfpgan_1.4.onnx — or built-in Tiled Unsharp Pass)",
+                                "├── face_mesh/      (facemesh-v2-v1.onnx — 468-Pt 3D Mesh / PnP-106)\n" +
+                                "└── enhancement/    (gfpgan_1.4.onnx / gfpgan-v1.4-w16-v1.onnx)",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )

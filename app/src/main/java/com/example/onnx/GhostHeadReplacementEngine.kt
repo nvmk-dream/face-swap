@@ -5,6 +5,8 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.PointF
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -49,12 +51,45 @@ object GhostHeadReplacementEngine {
         preloadedEmap512x512: FloatArray? = null,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
+        headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
-        val tStart = System.currentTimeMillis()
         require(targetFacesToReplace.isNotEmpty()) {
             "Please select at least one detected target head to replace."
         }
+        if (headPipelineMode != HeadReplacementPipelineMode.LEGACY_COPY_PASTE) {
+            return CleanEraseHeadReplacementEngine.execute(
+                context = context,
+                ortEnv = ortEnv,
+                sourceBitmap = sourceBitmap,
+                sourceFace = sourceFace,
+                targetBitmap = targetBitmap,
+                targetFacesToReplace = targetFacesToReplace,
+                pipelineMode = headPipelineMode,
+                enableColorTransfer = enableColorTransfer,
+                enableProvenanceWatermark = enableProvenanceWatermark,
+                allowTwoModelFallbackForTesting = allowTwoModelFallbackForTesting,
+                lowMemoryMode = lowMemoryMode,
+                preferHardwareAccel = preferHardwareAccel,
+                skinToneMode = skinToneMode,
+                faceReactionMode = faceReactionMode,
+                portraitBlurStrength = portraitBlurStrength,
+                blendStrength = blendStrength,
+                enhancementStrength = enhancementStrength,
+                offsetX = offsetX,
+                offsetY = offsetY,
+                scaleAdjust = scaleAdjust,
+                preloadedArcFaceSession = preloadedArcFaceSession,
+                preloadedSwapSession = preloadedSwapSession,
+                preloadedSegformerSession = preloadedSegformerSession,
+                preloadedGfpganSession = preloadedGfpganSession,
+                preloadedEmap512x512 = preloadedEmap512x512,
+                autoBodyAgeMatch = autoBodyAgeMatch,
+                faceAgingFactor = faceAgingFactor,
+                onProgress = onProgress
+            )
+        }
+        val tStart = System.currentTimeMillis()
 
         val headCropSize = if (lowMemoryMode) 256 else 320
         val recFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.RECOGNIZER)
@@ -151,14 +186,14 @@ object GhostHeadReplacementEngine {
         }
         val alignAndEmbMs = (System.currentTimeMillis() - tAlign0).coerceAtLeast(1L)
 
-        // STAGE 4 (Source Pass): Segment Source Head / Hair / Skull / Neck Matte
+        // STAGE 3/4 Prep (Source Pass): Segment Source Head / Hair / Skull / Neck Matte
         onProgress(
             SwapStageProgress(
-                stepIndex = 4,
+                stepIndex = 3,
                 totalSteps = 6,
-                stageTitle = "Stage 4/6: Segmentation",
+                stageTitle = "Stage 3/6: Source Segmentation",
                 detailMessage = "Segmenting source head, hair strands, ears, and upper neck silhouette...",
-                progressFraction = 0.56f
+                progressFraction = 0.42f
             )
         )
         val srcMasks = HeadSegmentationAndInpainting.segmentHeadHairNeck(
@@ -194,15 +229,15 @@ object GhostHeadReplacementEngine {
                 dstSize = headCropSize
             )
 
-            // STAGE 3: Head Generation (Combine Source Cranial/Hair/Neck with Target Expression/Gaze Core)
+            // STAGE 4: Head Generation (Combine Source Cranial/Hair/Neck with Target Expression/Gaze Core)
             val tGen0 = System.currentTimeMillis()
             onProgress(
                 SwapStageProgress(
-                    stepIndex = 3,
+                    stepIndex = 4,
                     totalSteps = 6,
-                    stageTitle = "Stage 3/6: Head generation (${idx + 1}/${targetFacesToReplace.size})",
+                    stageTitle = "Stage 4/6: Head generation (${idx + 1}/${targetFacesToReplace.size})",
                     detailMessage = "Synthesizing aligned head structure, hair volume, and facial identity...",
-                    progressFraction = 0.44f
+                    progressFraction = 0.58f
                 )
             )
 
@@ -500,7 +535,7 @@ object GhostHeadReplacementEngine {
      * Runs the active swap model (`hyperswap_1b_256.onnx` 256x256 or `inswapper_128.onnx` 128x128)
      * on the target face and blends the reenacted inner facial expression cleanly into the aligned source head.
      */
-    private fun fuseInswapperInnerExpressionIntoSourceHead(
+    internal fun fuseInswapperInnerExpressionIntoSourceHead(
         ortEnv: OrtEnvironment,
         swapFile: java.io.File,
         preloadedSwapSession: OrtSession? = null,
@@ -510,7 +545,8 @@ object GhostHeadReplacementEngine {
         synthesizedHeadCrop: Bitmap,
         headCropSize: Int,
         srcYawRatio: Float,
-        preferHardwareAccel: Boolean
+        preferHardwareAccel: Boolean,
+        overrideHeadLandmarks5: List<PointF>? = null
     ) {
         val m128 = FaceAlignment.estimateNorm(targetFace.landmarks5, 128)
         val targetCrop128 = FaceAlignment.warpAffineCrop(targetBitmap, m128, 128)
@@ -642,8 +678,12 @@ object GhostHeadReplacementEngine {
         eyeRestoredBmp.getPixels(swappedPixels128, 0, 128, 0, 0, 128, 128)
         eyeRestoredBmp.recycle()
 
-        // Map canonical head keypoints (with matching srcYawRatio) to 128x128 coordinates
-        val headPts = HeadSegmentationAndInpainting.getCanonicalHeadTemplate(headCropSize, srcYawRatio).toList()
+        // Map canonical head keypoints (or override canvas landmarks) to 128x128 coordinates
+        val headPts = if (overrideHeadLandmarks5 != null && overrideHeadLandmarks5.size >= 5) {
+            overrideHeadLandmarks5.take(5)
+        } else {
+            HeadSegmentationAndInpainting.getCanonicalHeadTemplate(headCropSize, srcYawRatio).toList()
+        }
         val headTo128 = FaceAlignment.estimateNorm(headPts, 128)
         val featheredMask128 = FaceBlender.createFeatheredFaceMask128()
         val headPixels = IntArray(headCropSize * headCropSize)
@@ -677,11 +717,12 @@ object GhostHeadReplacementEngine {
      * Adapts skin and neck illumination/color statistics to match the target scene while preserving
      * the source hairstyle's natural color and protecting the eye sockets from pupil/sclera washout.
      */
-    private fun adaptHeadSkinAndLightingSelective(
+    internal fun adaptHeadSkinAndLightingSelective(
         sourceHeadCrop: Bitmap,
         targetHeadCrop: Bitmap,
         skinAndNeckWeight: FloatArray,
-        skinToneMode: SkinToneSourceMode = SkinToneSourceMode.TARGET_SCENE
+        skinToneMode: SkinToneSourceMode = SkinToneSourceMode.TARGET_SCENE,
+        overrideLandmarks5: List<PointF>? = null
     ): Bitmap {
         val size = sourceHeadCrop.width
         val total = size * size
@@ -690,7 +731,7 @@ object GhostHeadReplacementEngine {
         sourceHeadCrop.getPixels(srcPx, 0, size, 0, 0, size, size)
         targetHeadCrop.getPixels(tgtPx, 0, size, 0, 0, size, size)
 
-        // Compute mean & std strictly on mid-face skin (cheeks & nose bridge, y in 0.50..0.66, excluding eye row ~0.44)
+        // Compute mean & std strictly on mid-face skin (cheeks & nose bridge, excluding eye row)
         var sRMean = 0.0
         var sGMean = 0.0
         var sBMean = 0.0
@@ -699,10 +740,21 @@ object GhostHeadReplacementEngine {
         var tBMean = 0.0
         var count = 0
 
-        val x0 = (size * 0.38f).toInt()
-        val x1 = (size * 0.62f).toInt()
-        val y0 = (size * 0.50f).toInt()
-        val y1 = (size * 0.66f).toInt()
+        val hasOverride = overrideLandmarks5 != null && overrideLandmarks5.size >= 5
+        val ovEyeDist = if (hasOverride) {
+            hypot(
+                (overrideLandmarks5!![1].x - overrideLandmarks5[0].x).toDouble(),
+                (overrideLandmarks5[1].y - overrideLandmarks5[0].y).toDouble()
+            ).toFloat().coerceAtLeast(10f)
+        } else size * (60f / 256f)
+        val ovEyeMidX = if (hasOverride) (overrideLandmarks5!![0].x + overrideLandmarks5[1].x) * 0.5f else size * 0.5f
+        val ovEyeMidY = if (hasOverride) (overrideLandmarks5!![0].y + overrideLandmarks5[1].y) * 0.5f else size * (114f / 256f)
+        val ovMouthY = if (hasOverride) (overrideLandmarks5!![3].y + overrideLandmarks5[4].y) * 0.5f else size * (178f / 256f)
+
+        val x0 = if (hasOverride) (ovEyeMidX - ovEyeDist * 0.52f).toInt().coerceIn(0, size - 2) else (size * 0.38f).toInt()
+        val x1 = if (hasOverride) (ovEyeMidX + ovEyeDist * 0.52f).toInt().coerceIn(x0 + 1, size - 1) else (size * 0.62f).toInt()
+        val y0 = if (hasOverride) (ovEyeMidY + ovEyeDist * 0.25f).toInt().coerceIn(0, size - 2) else (size * 0.50f).toInt()
+        val y1 = if (hasOverride) (ovMouthY - ovEyeDist * 0.12f).toInt().coerceIn(y0 + 1, size - 1) else (size * 0.66f).toInt()
 
         for (y in y0..y1) {
             for (x in x0..x1) {
@@ -763,11 +815,11 @@ object GhostHeadReplacementEngine {
         val tgtLum = 0.299 * tRMean + 0.587 * tGMean + 0.114 * tBMean
         val hairAmbientScale = (tgtLum / srcLum.coerceAtLeast(15.0)).coerceIn(0.85, 1.18).toFloat()
 
-        val leftEyeX = size * (98.0f / 256.0f)
-        val rightEyeX = size * (158.0f / 256.0f)
-        val eyeY = size * (114.0f / 256.0f)
-        val eyeRx = size * (26.0f / 256.0f)
-        val eyeRy = size * (16.0f / 256.0f)
+        val leftEyeX = if (hasOverride) overrideLandmarks5!![0].x else size * (98.0f / 256.0f)
+        val rightEyeX = if (hasOverride) overrideLandmarks5!![1].x else size * (158.0f / 256.0f)
+        val eyeY = if (hasOverride) ovEyeMidY else size * (114.0f / 256.0f)
+        val eyeRx = ovEyeDist * 0.43f
+        val eyeRy = ovEyeDist * 0.27f
 
         val skinStrength = when (skinToneMode) {
             SkinToneSourceMode.TARGET_SCENE -> 0.76f
@@ -900,7 +952,7 @@ object GhostHeadReplacementEngine {
         return enhanced
     }
 
-    private fun warpHeadCropBackToTarget(
+    internal fun warpHeadCropBackToTarget(
         targetPixels: IntArray,
         targetWidth: Int,
         targetHeight: Int,

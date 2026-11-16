@@ -17,6 +17,7 @@ import com.example.onnx.FaceAlignment
 import com.example.onnx.FaceReactionSourceMode
 import com.example.onnx.FaceSwapAndRestorationService
 import com.example.onnx.FaceSwapExecutionResult
+import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.HeadSegmentationAndInpainting
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.DepthEstimationEngine
@@ -101,6 +102,7 @@ data class FaceSwapUiState(
     val currentTab: AppTab = AppTab.STUDIO,
     val studioSubPage: StudioSubPage = StudioSubPage.FRONT_HOME,
     val studioMode: StudioMode = StudioMode.FACE_SWAP,
+    val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
     val qualityLevel: ProcessingQualityLevel = ProcessingQualityLevel.BALANCED,
     val outputResolution: OutputResolutionOption = OutputResolutionOption.ORIGINAL,
     val deviceTotalRamGb: Float = 6.0f,
@@ -195,6 +197,15 @@ data class FaceSwapUiState(
 
     val isFaceReagingReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.FACE_REAGING && it.isValidOnnx }
+
+    val isFaceMeshReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.FACE_MESH_3D && it.isValidOnnx }
+
+    val isEnhancerReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.ENHANCEMENT && it.isValidOnnx }
+
+    val isSdInpaintReady: Boolean
+        get() = installedSdInpaintPacks.isNotEmpty()
 
     val canExecuteSwap: Boolean
         get() = !isSwapping &&
@@ -379,6 +390,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun setFaceReactionMode(mode: FaceReactionSourceMode) {
         _uiState.update { it.copy(faceReactionMode = mode) }
+    }
+
+    fun setHeadPipelineMode(mode: HeadReplacementPipelineMode) {
+        _uiState.update { it.copy(headPipelineMode = mode) }
     }
 
     fun setQualityLevel(level: ProcessingQualityLevel) {
@@ -1237,6 +1252,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             scaleAdjust = state.faceScaleAdjust,
                             autoBodyAgeMatch = state.autoBodyAgeMatch,
                             faceAgingFactor = state.faceAgingFactor,
+                            headPipelineMode = state.headPipelineMode,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(
