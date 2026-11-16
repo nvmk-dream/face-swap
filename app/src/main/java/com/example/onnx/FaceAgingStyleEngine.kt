@@ -30,7 +30,8 @@ object FaceAgingStyleEngine {
     fun applyFaceAgingAndStyle512(
         pixels512: IntArray,
         geom512: FaceBlender.WarpedFaceGeometry,
-        params: AgingParameters
+        params: AgingParameters,
+        maskWeights: FloatArray? = null
     ) {
         if (params.ageFactor == 0.0f && params.smileStrength == 0.0f) return
 
@@ -40,6 +41,7 @@ object FaceAgingStyleEngine {
         // Forehead horizontal expression / age bands
         val foreheadCenterY = (geom512.leftEye.y + geom512.rightEye.y) * 0.5f - geom512.eyeDist * 0.55f
         val foreheadCenterX = (geom512.leftEye.x + geom512.rightEye.x) * 0.5f
+        val eyeDistSq = geom512.eyeDist * geom512.eyeDist
 
         for (y in 24 until HD_SIZE - 24) {
             val row = y * HD_SIZE
@@ -47,6 +49,9 @@ object FaceAgingStyleEngine {
             for (x in 24 until HD_SIZE - 24) {
                 val xf = x.toFloat()
                 val idx = row + x
+                val maskW = maskWeights?.getOrNull(idx)?.coerceIn(0f, 1f) ?: 1.0f
+                if (maskW <= 0.01f) continue
+
                 val c = copy[idx]
                 val r = (c ushr 16) and 0xFF
                 val g = (c ushr 8) and 0xFF
@@ -55,38 +60,50 @@ object FaceAgingStyleEngine {
                 // Forehead wrinkles / smoothing
                 val dxFh = xf - foreheadCenterX
                 val dyFh = yf - foreheadCenterY
-                val isForeheadZone = dyFh >= -35f && dyFh <= 35f && dxFh >= -geom512.eyeDist * 0.7f && dxFh <= geom512.eyeDist * 0.7f
+                val isForeheadZone = dyFh >= -38f && dyFh <= 35f &&
+                    dxFh >= -geom512.eyeDist * 0.72f && dxFh <= geom512.eyeDist * 0.72f
 
                 // Under-eye & crow's feet
                 val dLeftEyeSq = ((xf - geom512.leftEye.x) * (xf - geom512.leftEye.x) + (yf - geom512.leftEye.y) * (yf - geom512.leftEye.y))
                 val dRightEyeSq = ((xf - geom512.rightEye.x) * (xf - geom512.rightEye.x) + (yf - geom512.rightEye.y) * (yf - geom512.rightEye.y))
-                val eyeDistSq = geom512.eyeDist * geom512.eyeDist
-                val isEyeBagsZone = (dLeftEyeSq < eyeDistSq * 0.22f && yf > geom512.leftEye.y) ||
-                    (dRightEyeSq < eyeDistSq * 0.22f && yf > geom512.rightEye.y)
+                val isEyeBagsZone = (dLeftEyeSq < eyeDistSq * 0.24f && dLeftEyeSq > eyeDistSq * 0.06f && yf > geom512.leftEye.y) ||
+                    (dRightEyeSq < eyeDistSq * 0.24f && dRightEyeSq > eyeDistSq * 0.06f && yf > geom512.rightEye.y)
+
+                // Nasolabial folds (nose alae to mouth corners)
+                val nlLeftX = (geom512.nose.x * 0.52f + geom512.leftMouth.x * 0.48f) - geom512.eyeDist * 0.16f
+                val nlRightX = (geom512.nose.x * 0.52f + geom512.rightMouth.x * 0.48f) + geom512.eyeDist * 0.16f
+                val nlMidY = (geom512.nose.y + geom512.leftMouth.y) * 0.5f
+                val isNasolabialZone = params.nasolabialFoldEnhancement &&
+                    yf in (geom512.nose.y - 6f)..(geom512.leftMouth.y + 18f) &&
+                    (kotlin.math.abs(xf - (nlLeftX + (yf - nlMidY) * 0.16f)) < geom512.eyeDist * 0.09f ||
+                        kotlin.math.abs(xf - (nlRightX - (yf - nlMidY) * 0.16f)) < geom512.eyeDist * 0.09f)
 
                 if (age > 0.05f) {
-                    // Mature / Aging: Add physiological depth to natural micro-wrinkles
-                    val ageScale = age * params.wrinkleIntensity
+                    // Mature / Aging: Add physiological depth to natural micro-wrinkles & nasolabial creases
+                    val ageScale = age * params.wrinkleIntensity * maskW
                     var shadeMod = 0f
 
                     if (isForeheadZone) {
                         val band = cos(dyFh * 0.45f).toFloat()
-                        if (band > 0.3f) shadeMod -= band * 14f * ageScale
+                        if (band > 0.3f) shadeMod -= band * 15f * ageScale
                     }
                     if (isEyeBagsZone) {
+                        shadeMod -= 13f * ageScale
+                    }
+                    if (isNasolabialZone) {
                         shadeMod -= 12f * ageScale
                     }
 
                     if (shadeMod != 0f) {
                         val newR = (r + shadeMod).toInt().coerceIn(0, 255)
-                        val newG = (g + shadeMod * 0.95f).toInt().coerceIn(0, 255)
-                        val newB = (b + shadeMod * 0.85f).toInt().coerceIn(0, 255)
+                        val newG = (g + shadeMod * 0.94f).toInt().coerceIn(0, 255)
+                        val newB = (b + shadeMod * 0.84f).toInt().coerceIn(0, 255)
                         pixels512[idx] = (0xFF shl 24) or (newR shl 16) or (newG shl 8) or newB
                     }
                 } else if (age < -0.05f) {
                     // Youth / Rejuvenation: Gentle bilateral pore & fold smoothing (babyface)
-                    val youthScale = -age
-                    if (isForeheadZone || isEyeBagsZone) {
+                    val youthScale = -age * maskW
+                    if (isForeheadZone || isEyeBagsZone || isNasolabialZone) {
                         val n = copy[(y - 1) * HD_SIZE + x]
                         val s = copy[(y + 1) * HD_SIZE + x]
                         val w = copy[row + x - 1]

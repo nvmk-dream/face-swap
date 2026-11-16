@@ -970,7 +970,9 @@ object FaceBlender {
         onStagesCaptured: ((stage1SwapOnly512: Bitmap, stage2SwapRestore512: Bitmap, stage3FinalBlend512: Bitmap) -> Unit)? = null,
         onSubStageTimings: ((restoration512Ms: Long, upperLipGuardMs: Long, maskGenerationMs: Long, finalBlendingMs: Long) -> Unit)? = null,
         isNeuralSwap: Boolean = true,
-        onGfpganUsed: ((Boolean) -> Unit)? = null
+        onGfpganUsed: ((Boolean) -> Unit)? = null,
+        ageMatchPlan: AgeHarmonyEngine.AgeMatchPlan? = null,
+        faceReagingFile: File? = null
     ): Bitmap {
         val activeSwapCrop = colorCorrected128 ?: swappedCrop128
             ?: throw IllegalArgumentException("Either colorCorrected128 or swappedCrop128 must be provided.")
@@ -1061,11 +1063,13 @@ object FaceBlender {
             gfp512.recycle()
             // For 256px neural models (hyperswap_1b_256), cap GFPGAN at 0.22 so Source identity is strongly preserved
             // while refining micro-pores and ocular clarity; allow up to 0.52 for 128px models.
-            val gfpWeight = if (activeSwapCrop.width >= 256) {
+            // Also scale down GFPGAN weight when aging up so skin texture & wrinkles aren't over-smoothed.
+            val gfpBaseWeight = if (activeSwapCrop.width >= 256) {
                 (0.06f + 0.16f * clampedEnhance).coerceIn(0f, 0.22f)
             } else {
                 (0.18f + 0.34f * clampedEnhance).coerceIn(0f, 0.52f)
             }
+            val gfpWeight = (gfpBaseWeight * (ageMatchPlan?.gfpganWeightScale ?: 1.0f)).coerceIn(0f, 0.52f)
             val invEnh = 1.0f - gfpWeight
             for (i in 0 until total512) {
                 val bc = swapPx512[i]
@@ -1209,12 +1213,23 @@ object FaceBlender {
                 makeupPreservationStrength = if (isNeuralSwap) 0.45f else 0.85f,
                 isNeuralSwap = isNeuralSwap
             )
-            // Face-Aging & Expression Style Engine
-            FaceAgingStyleEngine.applyFaceAgingAndStyle512(
-                pixels512 = swapPx512,
-                geom512 = geom512,
-                params = FaceAgingStyleEngine.AgingParameters(ageFactor = 0.0f)
-            )
+            // Age Harmony / Face Re-Aging (FRAN neural ONNX if present, else FaceAgingStyleEngine CV fallback)
+            if (ageMatchPlan != null && ageMatchPlan.shouldApplyReAging) {
+                AgeHarmonyEngine.reageCrop512(
+                    ortEnv = ortEnv,
+                    reagingFile = faceReagingFile,
+                    pixels512 = swapPx512,
+                    geom512 = geom512,
+                    agePlan = ageMatchPlan,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+            } else {
+                FaceAgingStyleEngine.applyFaceAgingAndStyle512(
+                    pixels512 = swapPx512,
+                    geom512 = geom512,
+                    params = FaceAgingStyleEngine.AgingParameters(ageFactor = 0.0f)
+                )
+            }
             // Perioral / nostril / brow edge guard against non-target out-of-gamut neon-red or black overshoots
             healOutOfGamutRedAndBlackAnomalies512(
                 swapPx512 = swapPx512,

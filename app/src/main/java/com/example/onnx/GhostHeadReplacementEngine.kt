@@ -47,6 +47,8 @@ object GhostHeadReplacementEngine {
         preloadedSegformerSession: OrtSession? = null,
         preloadedGfpganSession: OrtSession? = null,
         preloadedEmap512x512: FloatArray? = null,
+        autoBodyAgeMatch: Boolean = true,
+        faceAgingFactor: Float = 0.0f,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val tStart = System.currentTimeMillis()
@@ -61,6 +63,32 @@ object GhostHeadReplacementEngine {
         val matFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.MATTING)
         val lamaFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.INPAINTING)
         val gfpFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.ENHANCEMENT)
+        val reagingFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_REAGING)
+
+        // Pre-resolve target body age plans with MiVOLO v2 before heavy SegFormer/GFPGAN sessions occupy RAM
+        val ageConfig = AgeHarmonyEngine.AgeHarmonyConfig(
+            autoBodyAgeMatch = autoBodyAgeMatch,
+            manualAgingFactor = faceAgingFactor
+        )
+        val targetAgePlans = if (autoBodyAgeMatch || kotlin.math.abs(faceAgingFactor) >= 0.05f) {
+            targetFacesToReplace.map { tgtFace ->
+                runCatching {
+                    AgeHarmonyEngine.resolveAgePlan(
+                        context = context,
+                        ortEnv = ortEnv,
+                        sourceBitmap = sourceBitmap,
+                        sourceFace = sourceFace,
+                        targetBitmap = targetBitmap,
+                        targetFace = tgtFace,
+                        config = ageConfig,
+                        preferHardwareAccel = preferHardwareAccel
+                    )
+                }.getOrNull()
+            }
+        } else {
+            List(targetFacesToReplace.size) { null }
+        }
+        val firstAgeHarmonySummary = targetAgePlans.firstOrNull()?.summaryLabel
 
         // STAGE 1: Detection & 3D-Aware Cranial Pose Analysis
         val tDet0 = System.currentTimeMillis()
@@ -261,6 +289,7 @@ object GhostHeadReplacementEngine {
                     progressFraction = 0.92f
                 )
             )
+            val headAgePlan = targetAgePlans.getOrNull(idx)
             val clampedEnhance = enhancementStrength.coerceIn(0f, 1f)
             val gfpRestoredHead512 = if (clampedEnhance > 0.05f && ortEnv != null && (preloadedGfpganSession != null || (gfpFile.exists() && gfpFile.length() > 1024L))) {
                 val restored512 = FaceBlender.runOptionalGfpganEnhancement512(
@@ -272,6 +301,25 @@ object GhostHeadReplacementEngine {
                 )
                 if (restored512 != null) {
                     usedGfpganPass = true
+                    val ageScale = (headAgePlan?.gfpganWeightScale ?: 1.0f).coerceIn(0.35f, 1.0f)
+                    if (ageScale < 0.99f) {
+                        val base512 = Bitmap.createScaledBitmap(compositedHeadCrop, 512, 512, true)
+                        val rPx = IntArray(512 * 512)
+                        val bPx = IntArray(512 * 512)
+                        restored512.getPixels(rPx, 0, 512, 0, 0, 512, 512)
+                        base512.getPixels(bPx, 0, 512, 0, 0, 512, 512)
+                        base512.recycle()
+                        val invS = 1f - ageScale
+                        for (i in rPx.indices) {
+                            val rc = rPx[i]
+                            val bc = bPx[i]
+                            val r = (((rc ushr 16) and 0xFF) * ageScale + ((bc ushr 16) and 0xFF) * invS).toInt().coerceIn(0, 255)
+                            val g = (((rc ushr 8) and 0xFF) * ageScale + ((bc ushr 8) and 0xFF) * invS).toInt().coerceIn(0, 255)
+                            val b = ((rc and 0xFF) * ageScale + (bc and 0xFF) * invS).toInt().coerceIn(0, 255)
+                            rPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                        }
+                        restored512.setPixels(rPx, 0, 512, 0, 0, 512, 512)
+                    }
                     restored512
                 } else {
                     null
@@ -280,8 +328,44 @@ object GhostHeadReplacementEngine {
                 null
             }
             // Keep full 512x512 HD resolution if GFPGAN restored at 512x512 (NEVER downscale back to 128x128 or headCropSize!)
-            val enhancedHeadCrop = applyTiledDetailEnhancement(gfpRestoredHead512 ?: compositedHeadCrop)
+            val rawEnhancedHeadCrop = applyTiledDetailEnhancement(gfpRestoredHead512 ?: compositedHeadCrop)
             gfpRestoredHead512?.recycle()
+
+            // Stage 6b: Apply Body-Age Re-Aging onto Face & Neck Skin strictly (protecting Hair/Crown)
+            val enhancedHeadCrop = if (headAgePlan != null && headAgePlan.shouldApplyReAging) {
+                val work512 = if (rawEnhancedHeadCrop.width == 512 && rawEnhancedHeadCrop.height == 512) {
+                    if (rawEnhancedHeadCrop.isMutable) rawEnhancedHeadCrop else rawEnhancedHeadCrop.copy(Bitmap.Config.ARGB_8888, true).also { rawEnhancedHeadCrop.recycle() }
+                } else {
+                    Bitmap.createScaledBitmap(rawEnhancedHeadCrop, 512, 512, true).also { rawEnhancedHeadCrop.recycle() }
+                }
+                val headPx512 = IntArray(512 * 512)
+                work512.getPixels(headPx512, 0, 512, 0, 0, 512, 512)
+                val skinMask512 = FloatArray(512 * 512) { idx512 ->
+                    val y512 = idx512 / 512
+                    val x512 = idx512 % 512
+                    val sy = (y512 * headCropSize / 512).coerceIn(0, headCropSize - 1)
+                    val sx = (x512 * headCropSize / 512).coerceIn(0, headCropSize - 1)
+                    srcMasks.skinAndNeckWeight[sy * headCropSize + sx].coerceIn(0f, 1f)
+                }
+                val headGeom512 = FaceBlender.computeWarpedGeometry(
+                    forwardMatrix128 = FloatArray(6) { i -> tgtHeadMatrix[i] * (512f / headCropSize.toFloat()) },
+                    targetLandmarks5 = targetFace.landmarks5,
+                    scale = 1.0f
+                )
+                AgeHarmonyEngine.reageCrop512(
+                    ortEnv = ortEnv,
+                    reagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null,
+                    pixels512 = headPx512,
+                    geom512 = headGeom512,
+                    agePlan = headAgePlan,
+                    maskWeights512 = skinMask512,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+                work512.setPixels(headPx512, 0, 512, 0, 0, 512, 512)
+                work512
+            } else {
+                rawEnhancedHeadCrop
+            }
 
             // Paste the full head + inpainted disocclusion envelope back onto the full-resolution target photo
             val baseEnvelopeAlpha = FloatArray(headCropSize * headCropSize) { i ->
@@ -407,7 +491,8 @@ object GhostHeadReplacementEngine {
             blendingMs = totalBlendMs.coerceAtLeast(1L),
             totalMs = totalMs,
             pipelineSummary = summary,
-            engineUsed = engineUsed
+            engineUsed = engineUsed,
+            ageHarmonySummary = firstAgeHarmonySummary
         )
     }
 

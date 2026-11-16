@@ -126,6 +126,7 @@ data class FaceSwapUiState(
     val enableOcclusionProtection: Boolean = true,
     val enableNegativeArtifactSuppression: Boolean = true,
     val enableLcmInpainting: Boolean = true,
+    val autoBodyAgeMatch: Boolean = true,
     val faceAgingFactor: Float = 0.0f,
     val portraitBlurStrength: Float = 0.0f,
     val blendStrength: Float = 1.0f,
@@ -188,6 +189,12 @@ data class FaceSwapUiState(
 
     val isDepthModelReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.DEPTH && it.isValidOnnx }
+
+    val isAgeEstimatorReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.AGE_ESTIMATOR && it.isValidOnnx }
+
+    val isFaceReagingReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.FACE_REAGING && it.isValidOnnx }
 
     val canExecuteSwap: Boolean
         get() = !isSwapping &&
@@ -406,6 +413,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun setLcmInpainting(enabled: Boolean) {
         _uiState.update { it.copy(enableLcmInpainting = enabled) }
+    }
+
+    fun setAutoBodyAgeMatch(enabled: Boolean) {
+        _uiState.update { it.copy(autoBodyAgeMatch = enabled) }
     }
 
     fun setFaceAgingFactor(factor: Float) {
@@ -1161,6 +1172,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             offsetY = state.faceOffsetY,
                             scaleAdjust = state.faceScaleAdjust,
                             identityPreservationMode = false,
+                            autoBodyAgeMatch = state.autoBodyAgeMatch,
+                            faceAgingFactor = state.faceAgingFactor,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(
@@ -1191,6 +1204,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             offsetY = state.faceOffsetY,
                             scaleAdjust = state.faceScaleAdjust,
                             identityPreservationMode = true,
+                            autoBodyAgeMatch = false,
+                            faceAgingFactor = 0.0f,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(
@@ -1220,6 +1235,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             offsetX = state.faceOffsetX,
                             offsetY = state.faceOffsetY,
                             scaleAdjust = state.faceScaleAdjust,
+                            autoBodyAgeMatch = state.autoBodyAgeMatch,
+                            faceAgingFactor = state.faceAgingFactor,
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(

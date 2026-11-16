@@ -195,6 +195,7 @@ fun StudioFrontPage(
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
+    onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     modifier: Modifier = Modifier
@@ -242,7 +243,8 @@ fun StudioFrontPage(
                 onRunSwap = onRunSwap,
                 onSkinToneModeChanged = onSkinToneModeChanged,
                 onFaceReactionModeChanged = onFaceReactionModeChanged,
-                onOcclusionProtectionChanged = onOcclusionProtectionChanged
+                onOcclusionProtectionChanged = onOcclusionProtectionChanged,
+                onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Download + Save to Gallery + Completed Footer)
@@ -710,7 +712,8 @@ private fun FrontMainWorkspaceCard(
     onRunSwap: () -> Unit,
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
-    onOcclusionProtectionChanged: (Boolean) -> Unit = {}
+    onOcclusionProtectionChanged: (Boolean) -> Unit = {},
+    onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -928,6 +931,79 @@ private fun FrontMainWorkspaceCard(
                             checkedTrackColor = Color(0xFF0284C7)
                         ),
                         modifier = Modifier.testTag("front_occlusion_protection_switch")
+                    )
+                }
+
+                HorizontalDivider(color = Color(0x260284C7), thickness = 1.dp)
+
+                // 4. Auto Body-Age Match (உடல் வயதுக்கேற்ப முக & கழுத்து வயது பொருத்தம்)
+                val ageBadgeLabel = when {
+                    uiState.isAgeEstimatorReady && uiState.isFaceReagingReady -> "MiVOLO + FRAN Ready"
+                    uiState.isAgeEstimatorReady -> "MiVOLO + CV Aging"
+                    uiState.isFaceReagingReady -> "FRAN Manual Ready"
+                    else -> "Built-in CV Ready"
+                }
+                val ageBadgeColor = when {
+                    uiState.isAgeEstimatorReady && uiState.isFaceReagingReady -> Color(0xFF059669)
+                    uiState.isAgeEstimatorReady || uiState.isFaceReagingReady -> Color(0xFF0284C7)
+                    else -> Color(0xFF6D28D9)
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onAutoBodyAgeMatchChanged(!uiState.autoBodyAgeMatch) }
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(1.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "Auto Body-Age Match",
+                                color = Color(0xFF0F172A),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.5.sp
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = ageBadgeColor.copy(alpha = 0.14f),
+                                border = BorderStroke(1.dp, ageBadgeColor.copy(alpha = 0.4f))
+                            ) {
+                                Text(
+                                    text = ageBadgeLabel,
+                                    color = ageBadgeColor,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 9.sp,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "உடல்/கழுத்து வயதுக்கேற்ப தலை & சரும வயதை மாற்றும்",
+                            color = Color(0xFF475569),
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Switch(
+                        checked = uiState.autoBodyAgeMatch,
+                        onCheckedChange = onAutoBodyAgeMatchChanged,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF059669)
+                        ),
+                        modifier = Modifier.testTag("front_auto_body_age_switch")
                     )
                 }
             }
@@ -1595,6 +1671,27 @@ private fun FrontResultShowcaseCard(
                         color = Color(0xFF334155),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            result?.ageHarmonySummary?.takeIf { it.isNotBlank() }?.let { ageSummary ->
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF065F46).copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, Color(0xFF059669).copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("front_age_harmony_summary_pill")
+                ) {
+                    Text(
+                        text = ageSummary,
+                        color = Color(0xFF065F46),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                     )
                 }
             }

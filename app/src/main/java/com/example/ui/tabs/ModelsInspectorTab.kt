@@ -157,6 +157,18 @@ fun ModelsInspectorTab(
                                 memoryServiceState.loadedSessions[ModelSlot.SWAPPER]?.statusNote
                             }
                         )
+                        MemorySlotRow(
+                            label = "6. mivolo_v2_age.onnx (MiVOLO v2 Age Estimator)",
+                            tamilPurpose = ModelSlot.AGE_ESTIMATOR.tamilTitle + " — " + ModelSlot.AGE_ESTIMATOR.tamilRoleSummary,
+                            isLoaded = memoryServiceState.mivoloLoaded,
+                            note = memoryServiceState.loadedSessions[ModelSlot.AGE_ESTIMATOR]?.statusNote
+                        )
+                        MemorySlotRow(
+                            label = "7. face_reaging.onnx (FRAN Face Re-Aging)",
+                            tamilPurpose = ModelSlot.FACE_REAGING.tamilTitle + " — " + ModelSlot.FACE_REAGING.tamilRoleSummary,
+                            isLoaded = memoryServiceState.reagingLoaded,
+                            note = memoryServiceState.loadedSessions[ModelSlot.FACE_REAGING]?.statusNote
+                        )
                     }
 
                     Row(
@@ -304,6 +316,8 @@ fun ModelsInspectorTab(
                                 "├── matting/        (modnet.onnx — or built-in Joint Bilateral Filter)\n" +
                                 "├── inpainting/     (lama_fp32.onnx — or built-in Boundary Marching)\n" +
                                 "├── depth/          (Depth Anything V2 Small [P1] / sentis-MiDaS [P2])\n" +
+                                "├── age_estimation/ (mivolo_v2_age.onnx — MiVOLO v2 Face+Body Age)\n" +
+                                "├── re_aging/       (face_reaging.onnx — FRAN U-Net / CV Fallback)\n" +
                                 "└── enhancement/    (gfpgan_1.4.onnx — or built-in Tiled Unsharp Pass)",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface

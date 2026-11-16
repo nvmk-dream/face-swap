@@ -545,4 +545,132 @@ class InpaintAndHistoryRobolectricTest {
         val healedG = (healedCenter ushr 8) and 0xFF
         assertTrue("Neon red eye center should be healed (R=$healedR, G=$healedG)", (healedR - healedG) < 60)
     }
+
+    @Test
+    fun ageHarmonyEngine_matchesModelSlots_preparesBodyCrops_resolvesPlan_andBlendsFranOutputs() {
+        val inspector = OnnxProtobufInspector
+        assertEquals(
+            com.example.onnx.ModelSlot.AGE_ESTIMATOR,
+            inspector.matchSlotForFileName("mivolo_v2_age.onnx", "age_estimation")
+        )
+        assertEquals(
+            com.example.onnx.ModelSlot.FACE_REAGING,
+            inspector.matchSlotForFileName("face_reaging.onnx", "re_aging")
+        )
+        assertEquals(
+            com.example.onnx.ModelSlot.FACE_REAGING,
+            inspector.matchSlotForFileName("unet.onnx", "re_aging")
+        )
+        assertEquals(
+            null,
+            inspector.matchSlotForFileName("model.onnx", "sd15_inpaint/unet")
+        )
+        assertEquals(
+            null,
+            inspector.matchSlotForFileName("unet.onnx", "sd15_inpaint")
+        )
+
+        val torsoFace = com.example.onnx.DetectedFace(
+            index = 0,
+            boundingBox = android.graphics.RectF(200f, 80f, 320f, 200f),
+            score = 0.99f,
+            landmarks5 = listOf(
+                android.graphics.PointF(235f, 120f),
+                android.graphics.PointF(285f, 120f),
+                android.graphics.PointF(260f, 150f),
+                android.graphics.PointF(240f, 175f),
+                android.graphics.PointF(280f, 175f)
+            ),
+            detectorSource = "test"
+        )
+        val bodyCrop = com.example.onnx.AgeHarmonyEngine.computeBodyCropRect(torsoFace, 512, 800)
+        assertNotNull(bodyCrop)
+        val belowForehead = com.example.onnx.AgeHarmonyEngine.computeBelowForeheadBodyCropRect(torsoFace, 512, 800)
+        assertNotNull(belowForehead)
+
+        val closeUpFace = torsoFace.copy(boundingBox = android.graphics.RectF(60f, 40f, 440f, 460f))
+        assertEquals(null, com.example.onnx.AgeHarmonyEngine.computeBodyCropRect(closeUpFace, 500, 480))
+
+        val sampleBmp = Bitmap.createBitmap(256, 400, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(180, 140, 110))
+        }
+        val mivoloBuf = FloatArray(6 * 32 * 32)
+        com.example.onnx.AgeHarmonyEngine.letterboxRgbAndNormalizeImageNet(
+            bitmap = sampleBmp,
+            cropRect = com.example.onnx.AgeHarmonyEngine.AgeCropRect(40f, 40f, 200f, 200f),
+            outFloatArray = mivoloBuf,
+            channelOffset = 0,
+            dstSize = 32
+        )
+        com.example.onnx.AgeHarmonyEngine.letterboxRgbAndNormalizeImageNet(
+            bitmap = null,
+            cropRect = null,
+            outFloatArray = mivoloBuf,
+            channelOffset = 3,
+            dstSize = 32
+        )
+        assertTrue(mivoloBuf.all { it.isFinite() })
+        assertEquals(-0.485f / 0.229f, mivoloBuf[3 * 32 * 32], 0.01f)
+
+        val maturePlan = com.example.onnx.AgeHarmonyEngine.resolveAgeMatchPlan(
+            sourceAge = 22f,
+            targetBodyAge = 48f,
+            usedMivoloModel = true,
+            config = com.example.onnx.AgeHarmonyEngine.AgeHarmonyConfig(autoBodyAgeMatch = true, manualAgingFactor = 0f)
+        )
+        assertTrue(maturePlan.shouldApplyReAging)
+        assertEquals(26f, maturePlan.ageDeltaYears, 0.01f)
+        assertEquals(0.72f, maturePlan.gfpganWeightScale, 0.001f)
+
+        val seniorPlan = com.example.onnx.AgeHarmonyEngine.resolveAgeMatchPlan(
+            sourceAge = 24f,
+            targetBodyAge = 60f,
+            usedMivoloModel = true,
+            config = com.example.onnx.AgeHarmonyEngine.AgeHarmonyConfig(autoBodyAgeMatch = true, manualAgingFactor = 0f)
+        )
+        assertEquals(0.50f, seniorPlan.gfpganWeightScale, 0.001f)
+
+        val manualOffAutoPlan = com.example.onnx.AgeHarmonyEngine.resolveAgeMatchPlan(
+            sourceAge = 22f,
+            targetBodyAge = 55f,
+            usedMivoloModel = true,
+            config = com.example.onnx.AgeHarmonyEngine.AgeHarmonyConfig(autoBodyAgeMatch = false, manualAgingFactor = -0.5f)
+        )
+        assertTrue(manualOffAutoPlan.shouldApplyReAging)
+        assertTrue(manualOffAutoPlan.ageDeltaYears < 0f)
+        assertEquals(1.0f, manualOffAutoPlan.gfpganWeightScale, 0.001f)
+
+        val sz = 16
+        val hw = sz * sz
+        val px = IntArray(hw) { Color.rgb(128, 128, 128) }
+        val packed5 = com.example.onnx.AgeHarmonyEngine.packReagingInputTensor(
+            pixels = px,
+            size = sz,
+            channelCount = 5,
+            sourceAge = 22f,
+            targetAge = 52f
+        )
+        assertEquals(5 * hw, packed5.size)
+        assertEquals(0.22f, packed5[3 * hw], 0.005f)
+        assertEquals(0.52f, packed5[4 * hw], 0.005f)
+
+        val residualDeltaOut = FloatArray(3 * hw) { idx -> if (idx < hw) 0.10f else -0.05f }
+        val blendedPx = px.copyOf()
+        com.example.onnx.AgeHarmonyEngine.blendReagingOutput(
+            pixels = blendedPx,
+            size = sz,
+            outputFloats = residualDeltaOut,
+            strength = 1.0f
+        )
+        val centerPixel = blendedPx[8 * sz + 8]
+        assertTrue(Color.red(centerPixel) > 128)
+        assertTrue(Color.green(centerPixel) < 128)
+
+        val vm = FaceSwapViewModel(context.applicationContext as Application)
+        assertTrue(vm.uiState.value.autoBodyAgeMatch)
+        vm.setAutoBodyAgeMatch(false)
+        assertFalse(vm.uiState.value.autoBodyAgeMatch)
+        vm.setAutoBodyAgeMatch(true)
+        assertTrue(vm.uiState.value.autoBodyAgeMatch)
+    }
 }

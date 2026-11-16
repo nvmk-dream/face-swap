@@ -611,6 +611,7 @@ fun FaceSwapStudioApp(
                     onToggleCompareOriginal = viewModel::toggleComparisonMode,
                     onNegativeArtifactSuppressionChanged = viewModel::setNegativeArtifactSuppression,
                     onLcmInpaintingChanged = viewModel::setLcmInpainting,
+                    onAutoBodyAgeMatchChanged = viewModel::setAutoBodyAgeMatch,
                     onFaceAgingFactorChanged = viewModel::setFaceAgingFactor,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
                     onImportAllFromFolder = {

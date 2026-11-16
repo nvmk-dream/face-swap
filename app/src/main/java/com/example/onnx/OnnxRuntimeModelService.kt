@@ -29,6 +29,8 @@ data class OnnxMemoryServiceState(
     val detectorLoaded: Boolean = false,
     val inswapperLoaded: Boolean = false,
     val emapLoaded: Boolean = false,
+    val mivoloLoaded: Boolean = false,
+    val reagingLoaded: Boolean = false,
     val loadedSessions: Map<ModelSlot, LoadedSessionInfo> = emptyMap(),
     val totalResidentBytes: Long = 0L,
     val totalLoadTimeMs: Long = 0L,
@@ -121,6 +123,8 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         offsetY: Float = 0f,
         scaleAdjust: Float = 1.0f,
         identityPreservationMode: Boolean = false,
+        autoBodyAgeMatch: Boolean = true,
+        faceAgingFactor: Float = 0.0f,
         captureDiagnostics: Boolean = false,
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
@@ -147,6 +151,8 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         offsetX: Float = 0f,
         offsetY: Float = 0f,
         scaleAdjust: Float = 1.0f,
+        autoBodyAgeMatch: Boolean = true,
+        faceAgingFactor: Float = 0.0f,
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
 
@@ -392,6 +398,8 @@ class OnnxRuntimeModelService(
         val segformer = sessionMetadata[ModelSlot.SEGMENTATION]?.isLoadedInMemory == true
         val det = sessionMetadata[ModelSlot.DETECTOR]?.isLoadedInMemory == true
         val swap = sessionMetadata[ModelSlot.SWAPPER]?.isLoadedInMemory == true
+        val mivolo = sessionMetadata[ModelSlot.AGE_ESTIMATOR]?.isLoadedInMemory == true
+        val reaging = sessionMetadata[ModelSlot.FACE_REAGING]?.isLoadedInMemory == true
         val emap = cachedEmap512x512 != null
 
         val residentBytes = sessionMetadata.values
@@ -416,6 +424,8 @@ class OnnxRuntimeModelService(
             detectorLoaded = det,
             inswapperLoaded = swap,
             emapLoaded = emap,
+            mivoloLoaded = mivolo,
+            reagingLoaded = reaging,
             loadedSessions = sessionMetadata.toMap(),
             totalResidentBytes = residentBytes,
             totalLoadTimeMs = totalLoadTimeMs,
@@ -490,6 +500,8 @@ class OnnxRuntimeModelService(
         offsetY: Float,
         scaleAdjust: Float,
         identityPreservationMode: Boolean,
+        autoBodyAgeMatch: Boolean,
+        faceAgingFactor: Float,
         captureDiagnostics: Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -518,6 +530,8 @@ class OnnxRuntimeModelService(
             scaleAdjust = scaleAdjust,
             preferHardwareAccel = preferHardwareAccel,
             identityPreservationMode = identityPreservationMode,
+            autoBodyAgeMatch = autoBodyAgeMatch,
+            faceAgingFactor = faceAgingFactor,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedGfpganSession = null,
@@ -547,6 +561,8 @@ class OnnxRuntimeModelService(
         offsetX: Float,
         offsetY: Float,
         scaleAdjust: Float,
+        autoBodyAgeMatch: Boolean,
+        faceAgingFactor: Float,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val emap = getOrLoadInswapperEmap()
@@ -571,6 +587,8 @@ class OnnxRuntimeModelService(
             offsetX = offsetX,
             offsetY = offsetY,
             scaleAdjust = scaleAdjust,
+            autoBodyAgeMatch = autoBodyAgeMatch,
+            faceAgingFactor = faceAgingFactor,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedSegformerSession = null,

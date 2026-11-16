@@ -164,6 +164,38 @@ enum class ModelSlot(
         expectedOutputSignature = "predicted_depth / output_depth: FLOAT[1, 518, 518] or [1, 384, 384]",
         licenseSummary = "Apache-2.0 (Depth Anything V2) / MIT (sentis-MiDaS)",
         downloadSourceUrl = "https://huggingface.co/onnx-community/depth-anything-v2-small"
+    ),
+    AGE_ESTIMATOR(
+        id = "mivolo_v2_age",
+        subdirectory = "age_estimation",
+        canonicalFileName = "mivolo_v2_age.onnx",
+        displayName = "mivolo_v2_age.onnx (MiVOLO v2 Face + Body Age Estimator)",
+        categoryTitle = "models/age_estimation/",
+        approximateSizeLabel = "~118 MB",
+        requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
+        tamilTitle = "9. முகம் & உடல் வயது கணிக்கும் மாடல் (MiVOLO v2 Age Estimator)",
+        tamilRoleSummary = "Source முகம் மற்றும் Target உடல்/கழுத்துப் பகுதியின் வயதைத் தனித்தனியாகக் கணித்து, உடலுக்கு ஏற்ப முகத்தின் வயதைத் தானாகப் பொருத்த உதவுகிறது.",
+        roleSummary = "Optional MiVOLO v2 bimodal vision transformer estimating facial & body/neck age from a 6-channel [1, 6, 384, 384] face+body crop so swapped heads match target body maturity.",
+        expectedInputSignature = "faces_bodies: FLOAT[1, 6, 384, 384] (Ch 0..2 Face RGB, Ch 3..5 Body RGB ImageNet-normalized)",
+        expectedOutputSignature = "age: FLOAT[1, 1] (Estimated age in years)",
+        licenseSummary = "Apache-2.0 License (Layer6 / WildChameleon MiVOLO v2)",
+        downloadSourceUrl = "https://huggingface.co/Sam-Apostel/mivolo-v2-age-onnx"
+    ),
+    FACE_REAGING(
+        id = "face_reaging",
+        subdirectory = "re_aging",
+        canonicalFileName = "face_reaging.onnx",
+        displayName = "face_reaging.onnx (FRAN Face Re-Aging U-Net)",
+        categoryTitle = "models/re_aging/",
+        approximateSizeLabel = "~124 MB",
+        requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
+        tamilTitle = "10. வயது மாற்றும் AI மாடல் (Face Re-Aging FRAN ONNX)",
+        tamilRoleSummary = "முக அடையாளம் மாறாமல் Target உடலின் வயதிற்கு ஏற்ப சரும சுருக்கங்கள், இளமை அல்லது முதிர்ச்சியை 512×512 துல்லியத்தில் இயற்கையாக மாற்றுகிறது. இல்லையெனில் உள்ளமைக்கப்பட்ட CV Aging Engine வேலை செய்யும்.",
+        roleSummary = "Optional 512x512 U-Net Face Re-Aging Network (Glat0s/face_reaging-onnx) taking 5-channel [B, 5, 512, 512] RGB+SourceAge+TargetAge and predicting a residual skin delta. Falls back to built-in FaceAgingStyleEngine if absent.",
+        expectedInputSignature = "input: FLOAT[1, 5, 512, 512] (RGB [0..1] + SourceAge/100 + TargetAge/100)",
+        expectedOutputSignature = "output: FLOAT[1, 3, 512, 512] (Signed residual RGB delta added to input)",
+        licenseSummary = "MIT License (Glat0s / timroelofs123 FRAN)",
+        downloadSourceUrl = "https://github.com/Glat0s/face_reaging-onnx"
     )
 }
 
@@ -223,6 +255,8 @@ object OnnxProtobufInspector {
         "inpainting",
         "enhancement",
         "depth",
+        "age_estimation",
+        "re_aging",
         "head_swap"
     )
 
@@ -765,6 +799,16 @@ object OnnxProtobufInspector {
                 ModelSlot.INPAINTING
             lower.contains("gfpgan") || lower.contains("codeformer") ->
                 ModelSlot.ENHANCEMENT
+            lower.contains("mivolo") || lower.contains("age_est") || lower.contains("age_onnx") ->
+                ModelSlot.AGE_ESTIMATOR
+            lower.contains("face_reaging") || lower.contains("face-reaging") ||
+                lower.contains("reaging") || lower.contains("re_aging") ||
+                lower.contains("fran") ||
+                ((lower == "unet.onnx" || lower == "unet_fp16.onnx") &&
+                    !parentPathHint.lowercase().let { p ->
+                        p.contains("sd") || p.contains("inpaint") || p.contains("realvis")
+                    }) ->
+                ModelSlot.FACE_REAGING
             else -> null
         }
     }
@@ -951,7 +995,9 @@ object OnnxProtobufInspector {
                 ModelSlot.ENHANCEMENT,
                 ModelSlot.SEGMENTATION,
                 ModelSlot.MATTING,
-                ModelSlot.INPAINTING
+                ModelSlot.INPAINTING,
+                ModelSlot.AGE_ESTIMATOR,
+                ModelSlot.FACE_REAGING
             )
             val entriesToImport = buildList {
                 orderedSlots.mapNotNullTo(this) { bestBySlot[it] }
@@ -1152,6 +1198,16 @@ object OnnxProtobufInspector {
                 "depth_anything_v2_fp16.onnx",
                 "dpt_next_vit_large_384.onnx",
                 "dpt_swin2_tiny_256.onnx"
+            ),
+            ModelSlot.AGE_ESTIMATOR to listOf(
+                "mivolo_v2_age.onnx",
+                "mivolo_v2.onnx",
+                "mivolo_age.onnx"
+            ),
+            ModelSlot.FACE_REAGING to listOf(
+                "face_reaging.onnx",
+                "face-reaging.onnx",
+                "fran_reaging.onnx"
             )
         )
 
@@ -1400,6 +1456,12 @@ object OnnxProtobufInspector {
             )
             ModelSlot.ENHANCEMENT -> listOf(TensorDescriptor("input", "FLOAT", listOf(1, 3, 512, 512)))
             ModelSlot.DEPTH -> listOf(TensorDescriptor("pixel_values", "FLOAT", listOf(1, 3, 518, 518)))
+            ModelSlot.AGE_ESTIMATOR -> listOf(
+                TensorDescriptor("faces_bodies", "FLOAT", listOf(1, 6, 384, 384))
+            )
+            ModelSlot.FACE_REAGING -> listOf(
+                TensorDescriptor("input", "FLOAT", listOf(1, 5, 512, 512))
+            )
         }
     }
 
@@ -1417,6 +1479,8 @@ object OnnxProtobufInspector {
             ModelSlot.INPAINTING -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
             ModelSlot.ENHANCEMENT -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
             ModelSlot.DEPTH -> listOf(TensorDescriptor("predicted_depth", "FLOAT", listOf(1, 518, 518)))
+            ModelSlot.AGE_ESTIMATOR -> listOf(TensorDescriptor("age", "FLOAT", listOf(1, 1)))
+            ModelSlot.FACE_REAGING -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
         }
     }
 

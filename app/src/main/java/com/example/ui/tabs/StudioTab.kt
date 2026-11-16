@@ -140,6 +140,7 @@ fun StudioTab(
     onFaceReactionModeChanged: (FaceReactionSourceMode) -> Unit = {},
     onNegativeArtifactSuppressionChanged: (Boolean) -> Unit = {},
     onLcmInpaintingChanged: (Boolean) -> Unit = {},
+    onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
     onFaceAgingFactorChanged: (Float) -> Unit = {},
     onBrowseSourceFile: () -> Unit = onPickSourcePhoto,
     onBrowseTargetFile: () -> Unit = onPickTargetPhoto,
@@ -196,6 +197,7 @@ fun StudioTab(
             onSkinToneModeChanged = onSkinToneModeChanged,
             onFaceReactionModeChanged = onFaceReactionModeChanged,
             onOcclusionProtectionChanged = onOcclusionProtectionChanged,
+            onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
             onOpenInpaintPage = {
                 onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
             },
@@ -336,9 +338,13 @@ fun StudioTab(
                 AdvancedNegativeAndStyleSettingsCard(
                     enableNegativeArtifactSuppression = uiState.enableNegativeArtifactSuppression,
                     enableLcmInpainting = uiState.enableLcmInpainting,
+                    autoBodyAgeMatch = uiState.autoBodyAgeMatch,
+                    isAgeEstimatorReady = uiState.isAgeEstimatorReady,
+                    isFaceReagingReady = uiState.isFaceReagingReady,
                     faceAgingFactor = uiState.faceAgingFactor,
                     onNegativeArtifactSuppressionChanged = onNegativeArtifactSuppressionChanged,
                     onLcmInpaintingChanged = onLcmInpaintingChanged,
+                    onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
                     onFaceAgingFactorChanged = onFaceAgingFactorChanged
                 )
             } else {
@@ -748,7 +754,7 @@ private fun HeroPipelineStatusCard(
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
-                                text = "மெமரியில் (RAM) உள்ள மாடல்கள் (${uiState.memoryServiceState.activeSessionCount}/5) & தமிழ் விளக்கம்",
+                                text = "மெமரியில் (RAM) உள்ள மாடல்கள் (${uiState.memoryServiceState.activeSessionCount}/${ModelSlot.entries.size}) & தமிழ் விளக்கம்",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.Bold,
                                 color = NeonEmerald
@@ -788,6 +794,16 @@ private fun HeroPipelineStatusCard(
                                 fileName = "segformer_B5_ce.onnx",
                                 isInRam = uiState.memoryServiceState.segformerLoaded,
                                 tamilRole = "தலை & முடி பிரிப்பு (Head/Hair Parser): Mode 2-ல் தலை, முடி, காது மற்றும் கழுத்தைத் துல்லியமாகப் பிரித்து முழு தலையையும் மாற்ற."
+                            )
+                            StudioTamilModelRow(
+                                fileName = "mivolo_v2_age.onnx",
+                                isInRam = uiState.memoryServiceState.mivoloLoaded,
+                                tamilRole = "வயதுக் கணிப்பு (Optional Body/Face Age): Target உடல் மற்றும் கழுத்தின் வயதையும் Source முக வயதையும் தானாகக் கணிக்க."
+                            )
+                            StudioTamilModelRow(
+                                fileName = "face_reaging.onnx",
+                                isInRam = uiState.memoryServiceState.reagingLoaded,
+                                tamilRole = "சரும வயதுப் பொருத்தம் (Optional FRAN Re-Aging): உடல் வயதுக்கேற்ப முகத் தோல் மற்றும் கழுத்து முதிர்ச்சியை அடையாளம் மாறாமல் சரிசெய்ய."
                             )
                         }
                     }
@@ -2616,7 +2632,11 @@ fun AdvancedNegativeAndStyleSettingsCard(
     onNegativeArtifactSuppressionChanged: (Boolean) -> Unit,
     onLcmInpaintingChanged: (Boolean) -> Unit,
     onFaceAgingFactorChanged: (Float) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    autoBodyAgeMatch: Boolean = true,
+    isAgeEstimatorReady: Boolean = false,
+    isFaceReagingReady: Boolean = false,
+    onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {}
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -2640,7 +2660,7 @@ fun AdvancedNegativeAndStyleSettingsCard(
                         color = ElectricCyan
                     )
                     Text(
-                        text = "கண்கள், வாய் & நாக்கு பிழைத் தடுப்பு மற்றும் StyleGAN கட்டுப்பாடுகள்",
+                        text = "கண்கள், வாய் & நாக்கு பிழைத் தடுப்பு மற்றும் வயதுப் பொருத்த கட்டுப்பாடுகள்",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2714,15 +2734,68 @@ fun AdvancedNegativeAndStyleSettingsCard(
                 )
             }
 
-            // 3. Face-Aging & Expression StyleGAN
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // 3. Auto Body-Age Match & Face Re-Aging Control
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "3. Auto Body-Age Match",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            val ageEngineStatus = when {
+                                isAgeEstimatorReady && isFaceReagingReady -> "MiVOLO + FRAN Ready"
+                                isAgeEstimatorReady -> "MiVOLO + CV Fallback"
+                                isFaceReagingReady -> "FRAN Ready"
+                                else -> "CV Ready"
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = ElectricCyan.copy(alpha = 0.14f),
+                                border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.4f))
+                            ) {
+                                Text(
+                                    text = ageEngineStatus,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ElectricCyan,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Target உடல் மற்றும் கழுத்து வயதைக் கணித்து Face Swap & Full Head முகம்/கழுத்து வயதைத் தானாகப் பொருத்தும்.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = autoBodyAgeMatch,
+                        onCheckedChange = onAutoBodyAgeMatchChanged,
+                        modifier = Modifier.testTag("settings_auto_body_age_switch")
+                    )
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "3. Face-Aging & Expression (StyleGAN)",
+                        text = "Manual Age Shift (FRAN / CV Aging)",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
@@ -2731,7 +2804,7 @@ fun AdvancedNegativeAndStyleSettingsCard(
                         text = when {
                             faceAgingFactor < -0.15f -> "Youthful / இளமை (${String.format("%.1f", faceAgingFactor)})"
                             faceAgingFactor > 0.15f -> "Mature / முதிர்ச்சி (+${String.format("%.1f", faceAgingFactor)})"
-                            else -> "Natural / இயல்பு (0.0)"
+                            else -> if (autoBodyAgeMatch) "Auto Target (0.0)" else "Natural / இயல்பு (0.0)"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
@@ -2739,7 +2812,11 @@ fun AdvancedNegativeAndStyleSettingsCard(
                     )
                 }
                 Text(
-                    text = "இயற்கையான முகச் சுருக்கங்கள் அல்லது இளமையான மென்மைத் தோற்றத்தைக் கட்டுப்படுத்துகிறது.",
+                    text = if (autoBodyAgeMatch) {
+                        "Auto Body-Age-உடன் சேர்ந்து Target வயதை மேலும் -1.0 (Youthful) ↔ +1.0 (Mature) வரை நுண்ணியமாக மாற்றும்."
+                    } else {
+                        "face_reaging.onnx அல்லது Built-in CV Aging மூலம் -1.0 (இளமை) ↔ +1.0 (முதிர்ச்சி) வரை வயதை நேரடியாக மாற்றும்."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

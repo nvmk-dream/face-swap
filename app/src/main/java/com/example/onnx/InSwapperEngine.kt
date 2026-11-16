@@ -130,7 +130,8 @@ data class FaceSwapExecutionResult(
     val stage3UpperLipRatio: Float = 0.94f,
     val stageTimings: ProductionStageTimings = ProductionStageTimings(),
     val benchmarkReports: List<SwapCandidateBenchmarkReport> = emptyList(),
-    val engineUsed: String = "NEURAL"
+    val engineUsed: String = "NEURAL",
+    val ageHarmonySummary: String? = null
 )
 
 /**
@@ -178,6 +179,8 @@ object InSwapperEngine {
         preloadedEmap512x512: FloatArray? = null,
         modelLoadingMs: Long = 0L,
         captureDiagnostics: Boolean = false,
+        autoBodyAgeMatch: Boolean = true,
+        faceAgingFactor: Float = 0.0f,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val tStart = System.currentTimeMillis()
@@ -186,6 +189,7 @@ object InSwapperEngine {
         val swapFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.SWAPPER)
         val gfpFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.ENHANCEMENT)
         val segFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.SEGMENTATION)
+        val reagingFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_REAGING)
 
         require(targetFacesToReplace.isNotEmpty()) {
             "Please select at least one detected target face to replace."
@@ -245,6 +249,31 @@ object InSwapperEngine {
             preloadedArcFaceSession = preloadedArcFaceSession
         )
         val embMs = (System.currentTimeMillis() - tEmbStart).coerceAtLeast(1L)
+
+        // Stage 3a: Age Harmony Plan (Run MiVOLO v2 before loading heavy Swapper / GFPGAN sessions)
+        val ageConfig = AgeHarmonyEngine.AgeHarmonyConfig(
+            autoBodyAgeMatch = autoBodyAgeMatch,
+            manualAgingFactor = faceAgingFactor
+        )
+        val targetAgePlans = if (!identityPreservationMode && (autoBodyAgeMatch || abs(faceAgingFactor) >= 0.05f)) {
+            targetFacesToReplace.map { tgtFace ->
+                runCatching {
+                    AgeHarmonyEngine.resolveAgePlan(
+                        context = context,
+                        ortEnv = ortEnv,
+                        sourceBitmap = sourceBitmap,
+                        sourceFace = sourceFace,
+                        targetBitmap = targetBitmap,
+                        targetFace = tgtFace,
+                        config = ageConfig,
+                        preferHardwareAccel = preferHardwareAccel
+                    )
+                }.getOrNull()
+            }
+        } else {
+            List(targetFacesToReplace.size) { null }
+        }
+        val firstAgeHarmonySummary = targetAgePlans.firstOrNull()?.summaryLabel
 
         // Optional Stage 3b: Compute 3D Depth Map once for Occlusion Guard & True Depth DSLR Bokeh
         val targetDepthMap = if ((enableOcclusionProtection || portraitBlurStrength > 0.03f) &&
@@ -495,7 +524,9 @@ object InSwapperEngine {
                         isNeuralSwap = isNeuralFaceRun,
                         onGfpganUsed = { gfpRan ->
                             if (gfpRan) usedNeuralGfpgan = true
-                        }
+                        },
+                        ageMatchPlan = targetAgePlans.getOrNull(idx),
+                        faceReagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null
                     )
 
                     rawSwappedCrop.recycle()
@@ -675,7 +706,8 @@ object InSwapperEngine {
             stage3UpperLipRatio = firstStage3Ratio,
             stageTimings = stageTimings,
             benchmarkReports = benchmarkReports,
-            engineUsed = engineUsed
+            engineUsed = engineUsed,
+            ageHarmonySummary = firstAgeHarmonySummary
         )
     }
 
