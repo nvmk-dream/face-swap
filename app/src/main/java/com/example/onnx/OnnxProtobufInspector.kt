@@ -480,9 +480,10 @@ object OnnxProtobufInspector {
 
     internal fun shouldBypassXnnpackForFile(modelFile: File): Boolean {
         val lower = modelFile.name.lowercase()
+        val pathLower = modelFile.absolutePath.lowercase()
         // ONNX Runtime Android 1.20.0 XNNPACK has NCHW<->NHWC repacking & ConvTranspose/Resize
         // layout bugs on UNet/GAN generators & ArcFace backbones that corrupt dark regions into
-        // black blocks & red overflows without throwing exceptions. Run these on pure CPU(ALL_OPT).
+        // black blocks & red overflows or stall/spike 2x RAM on large SD UNet/VAE graphs.
         return lower.contains("hyperswap") ||
             lower.contains("inswapper") ||
             lower.contains("w600k") ||
@@ -493,7 +494,12 @@ object OnnxProtobufInspector {
             lower.contains("segformer") ||
             lower.contains("bisenet") ||
             lower.contains("occluder") ||
-            lower.contains("xseg")
+            lower.contains("xseg") ||
+            lower.contains("unet") ||
+            lower.contains("vae_encoder") ||
+            lower.contains("vae_decoder") ||
+            lower.contains("text_encoder") ||
+            pathLower.contains("sd_inpaint")
     }
 
     fun getCachedExecutionProvider(file: File): String? {

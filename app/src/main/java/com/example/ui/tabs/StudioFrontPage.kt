@@ -1,6 +1,7 @@
 package com.example.ui.tabs
 
 import android.graphics.Bitmap
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Face
@@ -45,16 +47,24 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -190,6 +200,7 @@ fun StudioFrontPage(
     onPreviewAlignmentPage: () -> Unit,
     onOpenSettingsPage: () -> Unit,
     onRunSwap: () -> Unit,
+    onCancelSwap: () -> Unit = {},
     onDownloadHd: () -> Unit,
     onSaveToGallery: () -> Unit,
     onInspectResultDetails: () -> Unit,
@@ -244,6 +255,7 @@ fun StudioFrontPage(
                 onPreviewAlignmentPage = onPreviewAlignmentPage,
                 onOpenSettingsPage = onOpenSettingsPage,
                 onRunSwap = onRunSwap,
+                onCancelSwap = onCancelSwap,
                 onSkinToneModeChanged = onSkinToneModeChanged,
                 onFaceReactionModeChanged = onFaceReactionModeChanged,
                 onOcclusionProtectionChanged = onOcclusionProtectionChanged,
@@ -714,6 +726,7 @@ private fun FrontMainWorkspaceCard(
     onPreviewAlignmentPage: () -> Unit,
     onOpenSettingsPage: () -> Unit,
     onRunSwap: () -> Unit,
+    onCancelSwap: () -> Unit = {},
     onSkinToneModeChanged: (com.example.onnx.SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (com.example.onnx.FaceReactionSourceMode) -> Unit = {},
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
@@ -1220,6 +1233,93 @@ private fun FrontMainWorkspaceCard(
                             tint = Color.White,
                             modifier = Modifier.size(20.dp)
                         )
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = uiState.isSwapping) {
+                var elapsedSec by remember(uiState.isSwapping) { mutableIntStateOf(0) }
+                LaunchedEffect(uiState.isSwapping) {
+                    elapsedSec = 0
+                    while (uiState.isSwapping) {
+                        delay(1000L)
+                        elapsedSec += 1
+                    }
+                }
+                val progressFraction = (uiState.swapProgress?.progressFraction ?: 0.08f).coerceIn(0f, 1f)
+                val detailMessage = uiState.swapProgress?.detailMessage?.takeIf { it.isNotBlank() }
+                    ?: "Running offline ONNX pipeline..."
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xD9F0F9FF))
+                        .border(1.dp, Color(0x660284C7), RoundedCornerShape(14.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = detailMessage,
+                            color = Color(0xFF0F172A),
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp)
+                        )
+                        Text(
+                            text = "${elapsedSec}s",
+                            color = Color(0xFF0369A1),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(999.dp)),
+                        color = Color(0xFF0284C7),
+                        trackColor = Color(0xFFBAE6FD)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(
+                            onClick = onCancelSwap,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("btn_cancel_swap"),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFFDC2626)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color(0xFFB91C1C),
+                                containerColor = Color(0xFFFEF2F2)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel active processing",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Cancel",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                        }
                     }
                 }
             }

@@ -155,6 +155,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
         headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
+        isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
 
@@ -568,6 +569,7 @@ class OnnxRuntimeModelService(
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
         headPipelineMode: HeadReplacementPipelineMode,
+        isCancelled: () -> Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val emap = getOrLoadInswapperEmap()
@@ -600,6 +602,7 @@ class OnnxRuntimeModelService(
             preloadedSegformerSession = null,
             preloadedGfpganSession = null,
             preloadedEmap512x512 = emap,
+            isCancelled = isCancelled,
             onProgress = onProgress
         )
     }

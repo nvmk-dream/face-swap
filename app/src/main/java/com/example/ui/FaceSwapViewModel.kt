@@ -236,6 +236,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     )
     val uiState: StateFlow<FaceSwapUiState> = _uiState.asStateFlow()
 
+    private val swapCancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var activeSwapJob: kotlinx.coroutines.Job? = null
+
     val auditLogs: StateFlow<List<SwapAuditLog>> = auditRepository.allLogs.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
@@ -1060,6 +1063,21 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun cancelActiveSwap() {
+        val state = _uiState.value
+        if (!state.isSwapping) return
+        swapCancellationRequested.set(true)
+        _uiState.update {
+            it.copy(statusBannerMessage = "Cancelling after current ONNX step...")
+        }
+        ProcessingForegroundService.startOrUpdate(
+            context = getApplication(),
+            title = "${state.studioMode.title} Cancelling",
+            detail = "Stopping safely after active ONNX step...",
+            progressPercent = ((state.swapProgress?.progressFraction ?: 0.5f) * 100f).toInt().coerceIn(5, 99)
+        )
+    }
+
     fun runActiveModePipeline() {
         val state = _uiState.value
         val srcBitmap = state.sourceBitmap
@@ -1144,10 +1162,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             detail = "Preparing offline ONNX Runtime...",
             progressPercent = 5
         )
+        swapCancellationRequested.set(false)
         BackgroundProcessingCoordinator.updateSwap {
             it.copy(isRunning = true, stageTitle = "Stage 1: Detection", detailMessage = "Preparing ONNX...", errorMessage = null, statusMessage = null)
         }
-        BackgroundProcessingCoordinator.scope.launch {
+        activeSwapJob = BackgroundProcessingCoordinator.scope.launch {
             _uiState.update {
                 it.copy(
                     isSwapping = true,
@@ -1253,6 +1272,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             autoBodyAgeMatch = state.autoBodyAgeMatch,
                             faceAgingFactor = state.faceAgingFactor,
                             headPipelineMode = state.headPipelineMode,
+                            isCancelled = { swapCancellationRequested.get() },
                             onProgress = { progress ->
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(
@@ -1324,6 +1344,32 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedTitle = "${state.studioMode.title} Ready",
                     completedBody = doneMsg
                 )
+            } catch (_: java.util.concurrent.CancellationException) {
+                SdInpaintOnnxEngine.clearSessionCache()
+                modelService.releaseAllSessions()
+                System.gc()
+                BackgroundProcessingCoordinator.updateSwap {
+                    it.copy(
+                        isRunning = false,
+                        errorMessage = null,
+                        statusMessage = "Processing cancelled."
+                    )
+                }
+                _uiState.update {
+                    it.copy(
+                        isSwapping = false,
+                        swapProgress = null,
+                        memoryServiceState = modelService.getMemoryState(),
+                        statusBannerMessage = "Processing cancelled.",
+                        errorBannerMessage = null
+                    )
+                }
+                ProcessingForegroundService.finishAndNotify(
+                    context = appCtx,
+                    showCompletionNotification = false,
+                    completedTitle = "${state.studioMode.title} Cancelled",
+                    completedBody = "Processing cancelled."
+                )
             } catch (oom: OutOfMemoryError) {
                 modelService.releaseAllSessions()
                 System.gc()
@@ -1365,6 +1411,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedTitle = "${state.studioMode.title} Failed",
                     completedBody = errMsg
                 )
+            } finally {
+                activeSwapJob = null
             }
         }
     }

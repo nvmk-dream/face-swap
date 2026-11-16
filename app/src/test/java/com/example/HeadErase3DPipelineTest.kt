@@ -14,14 +14,19 @@ import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.HeadSegmentationAndInpainting
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxProtobufInspector
+import com.example.onnx.SdInpaintOnnxEngine
 import com.example.ui.FaceSwapUiState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
+import java.util.concurrent.CancellationException
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -244,5 +249,59 @@ class HeadErase3DPipelineTest {
         assertNotNull(res.outputBitmap)
         assertTrue(stages.containsAll(listOf(1, 2, 3, 4, 5, 6)))
         assertEquals(tgtBmp.getPixel(5, 5), res.outputBitmap.getPixel(5, 5))
+    }
+
+    @Test
+    fun `SD 15 Stage 5 components bypass XNNPACK, keep 4-step seam plan, and respect cancellation`() {
+        // 1. Verify XNNPACK bypass for SD 1.5 components (prevents UNet/VAE native stall & RAM doubling)
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("/data/sd_inpaint/sd15_fp16/unet/model.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("/data/sd_inpaint/sd15_fp16/vae_encoder/model.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("/data/sd_inpaint/sd15_fp16/vae_decoder/model.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("/data/sd_inpaint/sd15_fp16/text_encoder/model.onnx")))
+        assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("unet.onnx")))
+        assertFalse(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("det_10g.onnx")))
+
+        // 2. Verify Stage 5 Diffusion Seam Bridge strength (0.25f fastMode) produces a focused 4-step plan
+        val plan = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.25f)
+        assertEquals(4, plan.denoiseSteps)
+
+        // 3. Verify cooperative cancellation exits cleanly without hanging or swallowing CancellationException
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(20, 25, 35),
+            skinColor = Color.rgb(225, 180, 150),
+            hairColor = Color.rgb(30, 20, 20)
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(220, 235, 250),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(45, 30, 20)
+        )
+
+        var cancelled = false
+        try {
+            CleanEraseHeadReplacementEngine.execute(
+                context = context,
+                ortEnv = null,
+                sourceBitmap = srcBmp,
+                sourceFace = srcFace,
+                targetBitmap = tgtBmp,
+                targetFacesToReplace = listOf(tgtFace),
+                pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
+                enableColorTransfer = true,
+                enableProvenanceWatermark = false,
+                allowTwoModelFallbackForTesting = true,
+                lowMemoryMode = true,
+                isCancelled = { true },
+                onProgress = {}
+            )
+            fail("Expected CancellationException when isCancelled returns true")
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
     }
 }

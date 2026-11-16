@@ -594,6 +594,7 @@ fun FaceSwapStudioApp(
                         if (uiState.canExecuteSwap) ensureNotificationPermissionPromptOnce()
                         viewModel.runActiveModePipeline()
                     },
+                    onCancelSwap = viewModel::cancelActiveSwap,
                     onSaveToGallery = { viewModel.saveResultToGallery(isHd = false) },
                     onSaveHdToGallery = { viewModel.saveResultToGallery(isHd = true) },
                     onShareResult = viewModel::shareResultImage,

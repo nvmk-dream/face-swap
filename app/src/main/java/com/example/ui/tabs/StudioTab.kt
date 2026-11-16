@@ -119,6 +119,7 @@ fun StudioTab(
     onHardwareAccelChanged: (Boolean) -> Unit,
     onLowMemoryChanged: (Boolean) -> Unit,
     onRunSwap: () -> Unit,
+    onCancelSwap: () -> Unit = {},
     onSaveToGallery: () -> Unit,
     onSaveHdToGallery: () -> Unit = onSaveToGallery,
     onShareResult: () -> Unit = {},
@@ -190,6 +191,7 @@ fun StudioTab(
                 onOpenModelsTab()
             },
             onRunSwap = onRunSwap,
+            onCancelSwap = onCancelSwap,
             onDownloadHd = onSaveHdToGallery,
             onSaveToGallery = onSaveToGallery,
             onInspectResultDetails = {

@@ -63,6 +63,7 @@ object CleanEraseHeadReplacementEngine {
         preloadedEmap512x512: FloatArray? = null,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
+        isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val tStart = System.currentTimeMillis()
@@ -203,6 +204,7 @@ object CleanEraseHeadReplacementEngine {
         var segLabelSummary = "3D-Clean-Erase"
 
         targetFacesToReplace.forEachIndexed { idx, targetFace ->
+            if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
             val tgtMesh = tgtMeshes3D[idx]
             val tgtYawRatio = (tgtMesh.headPose.yawDeg / 55f).coerceIn(-1f, 1f)
             val tgtCanvasMatrix = estimateWideHeadCanvasMatrix(
@@ -381,17 +383,18 @@ object CleanEraseHeadReplacementEngine {
             // =========================================================================
             // STAGE 5/6: Diffusion Seam & Hair/Neck Bridge (Strict Identity Protection)
             // =========================================================================
+            if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
             onProgress(
                 SwapStageProgress(
                     stepIndex = 5,
                     totalSteps = 6,
                     stageTitle = "Stage 5/6: Diffusion Seam Bridge",
                     detailMessage = if (sdPack != null) {
-                        "Blending hair & neck-collar seam with SD 1.5 Diffusion (inner face locked)..."
+                        "Freeing Stage 1-4 sessions & preparing SD 1.5 (${sdPack.packType.displayLabel})..."
                     } else {
                         "Applying multi-band neck-collar & hair perimeter seam bridge..."
                     },
-                    progressFraction = 0.76f
+                    progressFraction = 0.72f
                 )
             )
 
@@ -405,7 +408,13 @@ object CleanEraseHeadReplacementEngine {
             )
 
             val seamResolvedCanvas = if (sdPack != null && ortEnv != null) {
-                val sdOut = runCatching {
+                // Free all Stage 1-4 ONNX sessions (det_10g, facemesh, arcface, hyperswap, segformer, mivolo)
+                // so SD 1.5 UNet has maximum native RAM and cannot OOM/swap-thrash on mobile devices.
+                OnnxProtobufInspector.clearCachedSessions()
+                SdInpaintOnnxEngine.clearSessionCache()
+                System.gc()
+
+                val sdAttempt = runCatching {
                     runDiffusionSeamBridge(
                         ortEnv = ortEnv,
                         pack = sdPack,
@@ -414,9 +423,43 @@ object CleanEraseHeadReplacementEngine {
                         targetEraseMask = cleanEraseMask,
                         innerFaceProtectMask = innerFaceProtectMask,
                         clothProtectMask = clothProtectMask,
-                        preferHardwareAccel = preferHardwareAccel
+                        preferHardwareAccel = preferHardwareAccel,
+                        isCancelled = isCancelled,
+                        onDetailProgress = { sdMsg ->
+                            val frac = when {
+                                sdMsg.startsWith("1/4") -> 0.74f
+                                sdMsg.startsWith("2/4") -> 0.76f
+                                sdMsg.startsWith("3/4 Diffusion step") -> {
+                                    val m = Regex("step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(sdMsg)
+                                    val cur = m?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 1f
+                                    val tot = (m?.groupValues?.getOrNull(2)?.toFloatOrNull() ?: 4f).coerceAtLeast(1f)
+                                    (0.78f + (cur / tot) * 0.08f).coerceIn(0.78f, 0.86f)
+                                }
+                                sdMsg.startsWith("3/4") -> 0.77f
+                                sdMsg.startsWith("4/4") -> 0.87f
+                                else -> 0.78f
+                            }
+                            onProgress(
+                                SwapStageProgress(
+                                    stepIndex = 5,
+                                    totalSteps = 6,
+                                    stageTitle = "Stage 5/6: Diffusion Seam Bridge",
+                                    detailMessage = sdMsg,
+                                    progressFraction = frac
+                                )
+                            )
+                        }
                     )
-                }.getOrNull()
+                }
+                sdAttempt.exceptionOrNull()?.let { err ->
+                    if (err is java.util.concurrent.CancellationException || isCancelled()) {
+                        SdInpaintOnnxEngine.clearSessionCache()
+                        throw err
+                    }
+                    SdInpaintOnnxEngine.clearSessionCache()
+                    System.gc()
+                }
+                val sdOut = sdAttempt.getOrNull()
                 if (sdOut != null) {
                     usedDiffusionBridge = true
                     sdOut
@@ -434,6 +477,8 @@ object CleanEraseHeadReplacementEngine {
                     innerFaceProtectMask = innerFaceProtectMask
                 )
             }
+
+            if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
 
             // =========================================================================
             // STAGE 6/6: 512x512 HD Enhancement (GFPGAN w16/FP32) + Age Harmony + Composite
@@ -1037,7 +1082,9 @@ object CleanEraseHeadReplacementEngine {
         targetEraseMask: FloatArray,
         innerFaceProtectMask: FloatArray,
         clothProtectMask: FloatArray,
-        preferHardwareAccel: Boolean
+        preferHardwareAccel: Boolean,
+        isCancelled: () -> Boolean = { false },
+        onDetailProgress: (String) -> Unit = {}
     ): Bitmap? {
         val size = stage4Canvas.width
         val total = size * size
@@ -1067,19 +1114,25 @@ object CleanEraseHeadReplacementEngine {
         val maskBmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         maskBmp.setPixels(maskPx, 0, size, 0, 0, size, size)
 
-        val sdRes = SdInpaintOnnxEngine.inpaint(
-            ortEnv = ortEnv,
-            pack = pack,
-            sourceBitmap = stage4Canvas,
-            maskBitmap = maskBmp,
-            prompt = "natural realistic hair strands, seamless skin neck collar transition, photorealistic lighting",
-            negativePrompt = "double face, extra head, blurry hair, artifacts, deformed neck, plastic skin",
-            fastMode = true,
-            preferHardwareAccel = preferHardwareAccel,
-            strength = 0.45f,
-            guidanceScale = 6.5f
-        )
-        maskBmp.recycle()
+        val sdRes = try {
+            SdInpaintOnnxEngine.inpaint(
+                ortEnv = ortEnv,
+                pack = pack,
+                sourceBitmap = stage4Canvas,
+                maskBitmap = maskBmp,
+                prompt = "natural realistic hair strands, seamless skin neck collar transition, photorealistic lighting",
+                negativePrompt = "double face, extra head, blurry hair, artifacts, deformed neck, plastic skin",
+                fastMode = true,
+                preferHardwareAccel = preferHardwareAccel,
+                strength = 0.25f,
+                guidanceScale = 6.0f,
+                releaseEachStageAfterUse = true,
+                isCancelled = isCancelled,
+                onProgress = onDetailProgress
+            )
+        } finally {
+            maskBmp.recycle()
+        }
 
         val diffOut = if (sdRes.outputBitmap.width == size && sdRes.outputBitmap.height == size) {
             sdRes.outputBitmap
