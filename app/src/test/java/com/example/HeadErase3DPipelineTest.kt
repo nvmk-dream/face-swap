@@ -204,6 +204,17 @@ class HeadErase3DPipelineTest {
         assertEquals(256, result.outputBitmap.width)
         assertEquals(256, result.outputBitmap.height)
         assertEquals(listOf(1, 2, 3, 4, 5, 6), stages)
+        assertTrue(
+            "Expected 3-Step Portrait-First pipeline summary, got: ${result.pipelineSummary}",
+            result.pipelineSummary.contains("3-Step Portrait-First")
+        )
+        assertNotNull("Expected Step 1 Headless preview", result.stage1SwapOnly512)
+        assertNotNull("Expected Step 2 Intermediate Portrait preview", result.stage2SwapRestore512)
+        assertNotNull("Expected Step 3 Final 512 preview", result.stage3FinalBlend512)
+        assertEquals(512, result.stage1SwapOnly512!!.width)
+        assertEquals(512, result.stage2SwapRestore512!!.width)
+        assertEquals(512, result.rawSwapped128.width)
+        assertEquals(512, result.stage3FinalBlend512!!.width)
         // Exterior corner must remain untouched
         assertEquals(tgtBmp.getPixel(5, 5), result.outputBitmap.getPixel(5, 5))
         // Upper target hair crown region above narrower source hair should have been cleanly erased toward sky bg
@@ -211,6 +222,68 @@ class HeadErase3DPipelineTest {
         val red = Color.red(erasedCrownPixel)
         val blue = Color.blue(erasedCrownPixel)
         assertTrue("Expected bright sky background after target hair erase (r=$red, b=$blue)", blue > 150)
+    }
+
+    @Test
+    fun `warpSourceHeadToTarget3DPoseWithBounds suppresses out-of-bounds top edge clamping`() {
+        // Build source portrait placed high so crownTop goes above y = 0 (bright magenta strip at y = 0)
+        val w = 256
+        val h = 256
+        val px = IntArray(w * h) { Color.rgb(30, 35, 45) }
+        for (x in 0 until w) {
+            px[x] = Color.rgb(255, 0, 255) // Top border pixel that clamped sampling would smear upward
+        }
+        val cy = 58f
+        val cx = 128f
+        val eyeDist = 48f
+        for (y in 2 until h) {
+            for (x in 0 until w) {
+                val dx = (x - cx) / 56f
+                val dy = (y - cy) / 68f
+                if (dx * dx + dy * dy <= 1f) {
+                    px[y * w + x] = Color.rgb(220, 175, 145)
+                }
+            }
+        }
+        val srcBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setPixels(px, 0, w, 0, 0, w, h)
+        }
+        val srcFace = DetectedFace(
+            index = 0,
+            boundingBox = RectF(cx - 56f, 2f, cx + 56f, cy + 72f),
+            score = 0.99f,
+            landmarks5 = listOf(
+                PointF(cx - eyeDist * 0.5f, cy),
+                PointF(cx + eyeDist * 0.5f, cy),
+                PointF(cx, cy + 26f),
+                PointF(cx - 20f, cy + 48f),
+                PointF(cx + 20f, cy + 48f)
+            ),
+            detectorSource = "TestHighCrop"
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(215, 230, 245),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(40, 30, 25)
+        )
+
+        val srcMesh = FaceMesh3DEngine.extractFaceMesh3D(null, srcBmp, srcFace, null)
+        val tgtMesh = FaceMesh3DEngine.extractFaceMesh3D(null, tgtBmp, tgtFace, null)
+        val mat = HeadSegmentationAndInpainting.estimateHeadAlignmentMatrix(tgtFace.landmarks5, 256, 0f)
+
+        val warped = FaceMesh3DEngine.warpSourceHeadToTarget3DPoseWithBounds(
+            sourceBitmap = srcBmp,
+            sourceMesh = srcMesh,
+            targetMesh = tgtMesh,
+            targetCanvasMatrix2x3 = mat,
+            canvasSize = 256
+        )
+        // Top of target canvas maps far above y = 0 in sourceBitmap -> inBoundsMask must be 0f!
+        assertEquals(0f, warped.inBoundsMask[4 * 256 + 128], 0.01f)
+        // Face center maps well inside sourceBitmap -> inBoundsMask must be 1.0f!
+        assertEquals(1f, warped.inBoundsMask[128 * 256 + 128], 0.01f)
     }
 
     @Test

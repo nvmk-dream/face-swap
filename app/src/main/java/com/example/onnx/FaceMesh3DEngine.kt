@@ -516,6 +516,11 @@ object FaceMesh3DEngine {
         )
     }
 
+    data class WarpedHeadCanvasResult(
+        val bitmap: Bitmap,
+        val inBoundsMask: FloatArray
+    )
+
     /**
      * Maps the 31 control points into target canvas coordinates, applies user fine-tune adjustments
      * (`offsetX`, `offsetY`, `scaleAdjust`), and blends target's 3D jawline/neck pose into the mesh.
@@ -530,10 +535,40 @@ object FaceMesh3DEngine {
         offsetY: Float = 0f,
         scaleAdjust: Float = 1.0f
     ): Bitmap {
+        return warpSourceHeadToTarget3DPoseWithBounds(
+            sourceBitmap = sourceBitmap,
+            sourceMesh = sourceMesh,
+            targetMesh = targetMesh,
+            targetCanvasMatrix2x3 = targetCanvasMatrix2x3,
+            canvasSize = canvasSize,
+            offsetX = offsetX,
+            offsetY = offsetY,
+            scaleAdjust = scaleAdjust
+        ).bitmap
+    }
+
+    /**
+     * Same 3D pose warp as [warpSourceHeadToTarget3DPose], also returning a per-pixel
+     * [WarpedHeadCanvasResult.inBoundsMask] in `[0f, 1f]` that smoothly tapers to `0` near or
+     * outside the source photo edges so clamped background/ceiling strips never leak into the portrait.
+     */
+    fun warpSourceHeadToTarget3DPoseWithBounds(
+        sourceBitmap: Bitmap,
+        sourceMesh: FaceMesh3DResult,
+        targetMesh: FaceMesh3DResult,
+        targetCanvasMatrix2x3: FloatArray,
+        canvasSize: Int,
+        offsetX: Float = 0f,
+        offsetY: Float = 0f,
+        scaleAdjust: Float = 1.0f
+    ): WarpedHeadCanvasResult {
         val srcCtrl = sourceMesh.controlPoints31
         val tgtCtrlRaw = targetMesh.controlPoints31
         if (srcCtrl.size < CONTROL_POINT_COUNT || tgtCtrlRaw.size < CONTROL_POINT_COUNT) {
-            return Bitmap.createBitmap(canvasSize, canvasSize, Bitmap.Config.ARGB_8888)
+            return WarpedHeadCanvasResult(
+                bitmap = Bitmap.createBitmap(canvasSize, canvasSize, Bitmap.Config.ARGB_8888),
+                inBoundsMask = FloatArray(canvasSize * canvasSize)
+            )
         }
 
         // Transform target control points into canvasSize x canvasSize space
@@ -598,7 +633,18 @@ object FaceMesh3DEngine {
         // Fallback global similarity transform for pixels slightly outside the 31-pt cage
         val globalInv = estimateSimilarity2x3(tgtCanvasPts.toList(), srcCtrl)
         val outPixels = IntArray(canvasSize * canvasSize)
+        val inBoundsMask = FloatArray(canvasSize * canvasSize)
         val filled = BooleanArray(canvasSize * canvasSize)
+        val edgeMarginPx = (min(srcW, srcH) * 0.03f).coerceIn(6f, 14f)
+
+        fun computeBoundsAlpha(sx: Float, sy: Float): Float {
+            val edgeDist = min(min(sx, (srcW - 1f) - sx), min(sy, (srcH - 1f) - sy))
+            return when {
+                edgeDist <= 0.5f -> 0f
+                edgeDist >= edgeMarginPx -> 1f
+                else -> ((edgeDist - 0.5f) / (edgeMarginPx - 0.5f)).coerceIn(0f, 1f)
+            }
+        }
 
         // Rasterize each triangle in target canvas space using inverse barycentric coordinates into sourceBitmap
         for (tri in HEAD_MESH_TRIANGLES) {
@@ -633,8 +679,10 @@ object FaceMesh3DEngine {
                     if (w0 >= -0.015f && w1 >= -0.015f && w2 >= -0.015f) {
                         val sx = w0 * s0.x + w1 * s1.x + w2 * s2.x
                         val sy = w0 * s0.y + w1 * s1.y + w2 * s2.y
-                        outPixels[rowOffset + x] = FaceAlignment.sampleBilinearClamped(srcPixels, srcW, srcH, sx, sy)
-                        filled[rowOffset + x] = true
+                        val idx = rowOffset + x
+                        outPixels[idx] = FaceAlignment.sampleBilinearClamped(srcPixels, srcW, srcH, sx, sy)
+                        inBoundsMask[idx] = computeBoundsAlpha(sx, sy)
+                        filled[idx] = true
                     }
                 }
             }
@@ -655,13 +703,17 @@ object FaceMesh3DEngine {
                     val sx = g00 * x + g01 * y + g02
                     val sy = g10 * x + g11 * y + g12
                     outPixels[idx] = FaceAlignment.sampleBilinearClamped(srcPixels, srcW, srcH, sx, sy)
+                    inBoundsMask[idx] = computeBoundsAlpha(sx, sy)
                 }
             }
         }
 
         val outBmp = Bitmap.createBitmap(canvasSize, canvasSize, Bitmap.Config.ARGB_8888)
         outBmp.setPixels(outPixels, 0, canvasSize, 0, 0, canvasSize, canvasSize)
-        return outBmp
+        return WarpedHeadCanvasResult(
+            bitmap = outBmp,
+            inBoundsMask = inBoundsMask
+        )
     }
 
     /**

@@ -5,6 +5,7 @@ import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.PointF
+import android.graphics.RectF
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -13,27 +14,30 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Clean-Erase 3D Head Replacement + Diffusion Seam Bridge Pipeline (`MODE 2 — FULL HEAD REPLACEMENT`).
- *
- * Unlike 2D copy-paste over the target head, this engine executes a strict 6-stage architecture:
- *  Stage 1 — 3D FaceMesh & Age Plan: Extracts 468-pt 3D landmarks (`facemesh-v2-v1.onnx` or PnP-106)
- *            for Source & Target + MiVOLO v2 body-age matching plan.
- *  Stage 2 — Depth & Target Parsing: Depth Anything V2 (`depth-anything-v2-small-fp16-v1.onnx`) +
- *            SegFormer/MODNet segmentation to separate target head/hair from background & clothing.
- *  Stage 3 — Complete Target Head Erasure: Removes 100% of Target's old face, hair & ears using
- *            `lama_fp32.onnx` or Depth-Aware Boundary Marching to build a clean headless canvas
- *            (protecting Target clothing/shoulders).
- *  Stage 4 — 3D Pose Source Head Reconstruction: Warps Source face, hair & neck via 31-pt 3D triangle
- *            mesh (`FaceMesh3DEngine`), fuses optional target expression (`inswapper_128`/`hyperswap`),
- *            adapts skin lighting, and composites onto the headless canvas.
- *  Stage 5 — Diffusion Seam & Neck Bridge: In `CLEAN_ERASE_3D_DIFFUSION`, runs `SdInpaintOnnxEngine`
- *            strictly on the outer hair/neck-to-collar seam while keeping Source inner-face identity 100%
- *            locked via `buildInnerFaceIdentityMask`. (Uses fast multi-scale seam bridge if SD pack is
- *            not installed or `CLEAN_ERASE_3D_FAST` is selected.)
- *  Stage 6 — 512x512 HD Enhancement & Composite: Runs `gfpgan-v1.4-w16-v1.onnx` / `gfpgan_1.4.onnx`
- *            + Age Harmony + Tiled Micro-Contrast + seamless composite onto target body & optional bokeh.
+ * 3-Step Portrait-First Clean-Erase Head Replacement Pipeline (shared by **Option B+C** & **Head Replacement**):
+ *  Step 1 (`Output 1` — Clean Headless Target):
+ *   - Stage 1: Extract 468-pt 3D landmarks (`facemesh-v2-v1.onnx` / PnP-106) for Source & Target.
+ *   - Stage 2: Depth Anything V2 scene depth & SegFormer/MODNet head/hair/neck separation.
+ *   - Stage 3: Remove 100% of Target's old face, skull, hair & ears using `lama_fp32.onnx` or
+ *              2D Multi-Directional Exterior Anchor Inpainting while protecting collar/clothing/jewelry.
+ *  Step 2 (`Intermediate Full Portrait` — Clean Head + Hair + Neck + Lighting):
+ *   - Stage 4: Warp Source head/hair/neck via 31-pt 3D mesh with `inBoundsMask` + border feathering
+ *              (NO zoomed-out center-oval HyperSwap overwrite) & adapt lighting/skin tone smoothly.
+ *   - Stage 5: Diffusion Seam Bridge (`SdInpaintOnnxEngine`) or fast multi-band seam bridge on
+ *              outer hair & neck-to-collar transitions -> yields full `intermediatePortraitBitmap`.
+ *  Step 3 (`Final High-Res Identity Swap` — `Output 3`):
+ *   - Stage 6: Release temporary Step 1/2 ONNX sessions, detect face(s) on `intermediatePortraitBitmap`
+ *              via `det_10g.onnx` (with exact 3D pose landmark fallback), and run `InSwapperEngine`
+ *              (`ArcFace w600k_r50` -> `HyperSwap 256px` -> `GFPGAN 512x512` + eye/brow/lip/skin fusion).
  */
 object CleanEraseHeadReplacementEngine {
+
+    private data class PlacedHeadPose(
+        val targetFaceIndex: Int,
+        val fallbackDetectedFace: DetectedFace,
+        val eyeMidPoint: PointF,
+        val eyeDist: Float
+    )
 
     fun execute(
         context: Context,
@@ -72,13 +76,10 @@ object CleanEraseHeadReplacementEngine {
         }
 
         val canvasSize = if (lowMemoryMode) 320 else 512
-        val recFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.RECOGNIZER)
-        val swapFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.SWAPPER)
+        val detFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.DETECTOR)
         val segFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.SEGMENTATION)
         val matFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.MATTING)
         val lamaFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.INPAINTING)
-        val gfpFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.ENHANCEMENT)
-        val reagingFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_REAGING)
         val faceMeshFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_MESH_3D)
 
         // =========================================================================
@@ -138,15 +139,15 @@ object CleanEraseHeadReplacementEngine {
         val detMs = (System.currentTimeMillis() - tDet0).coerceAtLeast(1L)
 
         // =========================================================================
-        // STAGE 2/6: Depth Anything V2 + Identity Embedding
+        // STAGE 2/6: Depth Anything V2 + Seam Pack Plan
         // =========================================================================
         val tEmb0 = System.currentTimeMillis()
         onProgress(
             SwapStageProgress(
                 stepIndex = 2,
                 totalSteps = 6,
-                stageTitle = "Stage 2/6: Depth & Identity",
-                detailMessage = "Computing Depth Anything V2 foreground/background map & ArcFace identity...",
+                stageTitle = "Stage 2/6: Scene Depth & Portrait Prep",
+                detailMessage = "Computing Depth Anything V2 foreground/background map & preparing headless pass...",
                 progressFraction = 0.28f
             )
         )
@@ -164,24 +165,6 @@ object CleanEraseHeadReplacementEngine {
             null
         }
 
-        val hasInswapper = ortEnv != null && (preloadedSwapSession != null || (swapFile.exists() && swapFile.length() > 1024L))
-        val sourceEmbedding: SourceEmbeddingResult? = if (ortEnv != null && hasInswapper &&
-            (preloadedArcFaceSession != null || (recFile.exists() && recFile.length() > 1024L) || allowTwoModelFallbackForTesting)
-        ) {
-            val emap = preloadedEmap512x512 ?: OnnxProtobufInspector.loadOrExtractInswapperEmap(context, swapFile)
-            ArcFaceRecognizer.extractSourceLatentEmbedding(
-                ortEnv = ortEnv,
-                sourceBitmap = sourceBitmap,
-                sourceLandmarks5 = sourceFace.landmarks5,
-                arcFaceModelFile = if (recFile.exists()) recFile else null,
-                emap512x512 = emap,
-                allowTwoModelFallbackForTesting = allowTwoModelFallbackForTesting,
-                preloadedArcFaceSession = preloadedArcFaceSession
-            )
-        } else {
-            null
-        }
-
         val sdPack = if (pipelineMode == HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION) {
             SdInpaintPackManager.resolvePackForOption(context, InpaintModelOption.AUTO)
         } else {
@@ -193,12 +176,15 @@ object CleanEraseHeadReplacementEngine {
         val targetH = targetBitmap.height
         val compositePixels = IntArray(targetW * targetH)
         targetBitmap.getPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
+        val borderEnvelope = computeCanvasBorderEnvelope(canvasSize)
 
         var firstTargetHeadPreview: Bitmap? = null
-        var firstGeneratedHeadPreview: Bitmap? = null
+        var firstHeadlessPreview512: Bitmap? = null
+        var firstIntermediatePortraitPreview512: Bitmap? = null
+        var firstTgtCanvasMatrix: FloatArray? = null
+        val placedHeadPoses = mutableListOf<PlacedHeadPose>()
         var totalGenMs = 0L
         var totalBlendMs = 0L
-        var usedGfpganPass = false
         var usedDiffusionBridge = false
         var usedLamaErasure = false
         var segLabelSummary = "3D-Clean-Erase"
@@ -270,10 +256,11 @@ object CleanEraseHeadReplacementEngine {
                 targetHeight = targetH
             )
 
-            // Dilate target head mask slightly (radius ~5 px) so zero target hair halo survives
+            // Dilate target head mask slightly (radius ~5 px) so zero target hair halo survives,
+            // and taper cleanly near canvas borders so no rectangular crop boundary ever appears.
             val dilatedTargetEraseMask = dilateAlpha(tgtMasks.fullHeadAlpha, canvasSize, radiusPx = 5)
             val cleanEraseMask = FloatArray(canvasSize * canvasSize) { i ->
-                (dilatedTargetEraseMask[i] * (1f - clothProtectMask[i])).coerceIn(0f, 1f)
+                (dilatedTargetEraseMask[i] * (1f - clothProtectMask[i]) * borderEnvelope[i]).coerceIn(0f, 1f)
             }
 
             val (cleanHeadlessTargetCanvas, lamaSuccess) = eraseTargetHeadCleanly(
@@ -291,20 +278,20 @@ object CleanEraseHeadReplacementEngine {
             if (lamaSuccess) usedLamaErasure = true
 
             // =========================================================================
-            // STAGE 4/6: 3D Pose Source Head Reconstruction & Neck-to-Collar Composite
+            // STAGE 4/6 (Step 2): 3D Pose Source Portrait Reconstruction (No zoomed-out face paste)
             // =========================================================================
             val tGen0 = System.currentTimeMillis()
             onProgress(
                 SwapStageProgress(
                     stepIndex = 4,
                     totalSteps = 6,
-                    stageTitle = "Stage 4/6: 3D Head Reconstruction",
-                    detailMessage = "Warping source head onto target 3D pose (${tgtMesh.sourceLabel})...",
-                    progressFraction = 0.60f
+                    stageTitle = "Stage 4/6: Step 2 Full Portrait Assembly",
+                    detailMessage = "Warping source head, hair & neck onto headless canvas (${tgtMesh.sourceLabel})...",
+                    progressFraction = 0.58f
                 )
             )
 
-            val warpedSourceHead = FaceMesh3DEngine.warpSourceHeadToTarget3DPose(
+            val warpedSrcResult = FaceMesh3DEngine.warpSourceHeadToTarget3DPoseWithBounds(
                 sourceBitmap = sourceBitmap,
                 sourceMesh = srcMesh3D,
                 targetMesh = tgtMesh,
@@ -314,6 +301,8 @@ object CleanEraseHeadReplacementEngine {
                 offsetY = offsetY,
                 scaleAdjust = scaleAdjust
             )
+            val warpedSourceHead = warpedSrcResult.bitmap
+            val srcBoundsMask = warpedSrcResult.inBoundsMask
 
             val rawWarpedSrcMasks = HeadSegmentationAndInpainting.segmentHeadHairNeck(
                 ortEnv = ortEnv,
@@ -323,49 +312,40 @@ object CleanEraseHeadReplacementEngine {
                 preferHardwareAccel = preferHardwareAccel,
                 preloadedSegformerSession = preloadedSegformerSession
             )
-            val adjPts5ForMask = adjustLandmarks5(tgtCanvasPts5, canvasSize, offsetX, offsetY, scaleAdjust)
-            val warpedSrcMasks = if (rawWarpedSrcMasks.usedSegmentationOnnx) {
+            val adjPts5 = adjustLandmarks5(tgtCanvasPts5, canvasSize, offsetX, offsetY, scaleAdjust)
+            val rawOrBoostedSrcMasks = if (rawWarpedSrcMasks.usedSegmentationOnnx) {
                 rawWarpedSrcMasks
             } else {
                 boostMatteForWideHeadCanvas(
                     alignedHeadCrop = warpedSourceHead,
                     baseMasks = rawWarpedSrcMasks,
-                    canvasPts5 = adjPts5ForMask,
+                    canvasPts5 = adjPts5,
                     suppressBgHalo = true
                 )
             }
-
-            if (faceReactionMode == FaceReactionSourceMode.TARGET_REACTION &&
-                ortEnv != null && hasInswapper && sourceEmbedding != null
-            ) {
-                // Adjust canvas 5-pt coordinates with offset/scale for exact inner expression alignment
-                val adjPts5 = adjustLandmarks5(tgtCanvasPts5, canvasSize, offsetX, offsetY, scaleAdjust)
-                runCatching {
-                    GhostHeadReplacementEngine.fuseInswapperInnerExpressionIntoSourceHead(
-                        ortEnv = ortEnv,
-                        swapFile = swapFile,
-                        preloadedSwapSession = preloadedSwapSession,
-                        sourceEmbedding = sourceEmbedding,
-                        targetBitmap = targetBitmap,
-                        targetFace = targetFace,
-                        synthesizedHeadCrop = warpedSourceHead,
-                        headCropSize = canvasSize,
-                        srcYawRatio = tgtYawRatio,
-                        preferHardwareAccel = preferHardwareAccel,
-                        overrideHeadLandmarks5 = adjPts5
-                    )
-                }
+            // Clamp out-of-bounds top/side clamped source pixels and outer canvas borders cleanly to 0
+            val filteredFullHeadAlpha = FloatArray(canvasSize * canvasSize) { i ->
+                (rawOrBoostedSrcMasks.fullHeadAlpha[i] * srcBoundsMask[i] * borderEnvelope[i]).coerceIn(0f, 1f)
+            }
+            val filteredSkinAndNeckWeight = FloatArray(canvasSize * canvasSize) { i ->
+                (rawOrBoostedSrcMasks.skinAndNeckWeight[i] * srcBoundsMask[i]).coerceIn(0f, 1f)
             }
             totalGenMs += (System.currentTimeMillis() - tGen0).coerceAtLeast(1L)
 
             val tBlend0 = System.currentTimeMillis()
-            val adjPts5 = adjustLandmarks5(tgtCanvasPts5, canvasSize, offsetX, offsetY, scaleAdjust)
+            // Harmonize hair, neck & ambient scene lighting on the intermediate portrait cleanly;
+            // final exact facial skin tone & ArcFace identity come from Step 3 at high resolution.
+            val step2ToneMode = if (skinToneMode == SkinToneSourceMode.SOURCE_IDENTITY) {
+                SkinToneSourceMode.BALANCED_BLEND
+            } else {
+                skinToneMode
+            }
             val litSourceHead = if (enableColorTransfer) {
                 GhostHeadReplacementEngine.adaptHeadSkinAndLightingSelective(
                     sourceHeadCrop = warpedSourceHead,
                     targetHeadCrop = alignedTargetHead,
-                    skinAndNeckWeight = warpedSrcMasks.skinAndNeckWeight,
-                    skinToneMode = skinToneMode,
+                    skinAndNeckWeight = filteredSkinAndNeckWeight,
+                    skinToneMode = step2ToneMode,
                     overrideLandmarks5 = adjPts5
                 )
             } else {
@@ -376,7 +356,7 @@ object CleanEraseHeadReplacementEngine {
             val stage4Composited = compositeSourceOverHeadlessCanvas(
                 sourceHead = litSourceHead,
                 headlessTarget = cleanHeadlessTargetCanvas,
-                sourceAlpha = warpedSrcMasks.fullHeadAlpha,
+                sourceAlpha = filteredFullHeadAlpha,
                 clothProtectMask = clothProtectMask
             )
 
@@ -419,7 +399,7 @@ object CleanEraseHeadReplacementEngine {
                         ortEnv = ortEnv,
                         pack = sdPack,
                         stage4Canvas = stage4Composited,
-                        sourceAlpha = warpedSrcMasks.fullHeadAlpha,
+                        sourceAlpha = filteredFullHeadAlpha,
                         targetEraseMask = cleanEraseMask,
                         innerFaceProtectMask = innerFaceProtectMask,
                         clothProtectMask = clothProtectMask,
@@ -427,17 +407,17 @@ object CleanEraseHeadReplacementEngine {
                         isCancelled = isCancelled,
                         onDetailProgress = { sdMsg ->
                             val frac = when {
-                                sdMsg.startsWith("1/4") -> 0.74f
-                                sdMsg.startsWith("2/4") -> 0.76f
+                                sdMsg.startsWith("1/4") -> 0.72f
+                                sdMsg.startsWith("2/4") -> 0.74f
                                 sdMsg.startsWith("3/4 Diffusion step") -> {
                                     val m = Regex("step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(sdMsg)
                                     val cur = m?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 1f
                                     val tot = (m?.groupValues?.getOrNull(2)?.toFloatOrNull() ?: 4f).coerceAtLeast(1f)
-                                    (0.78f + (cur / tot) * 0.08f).coerceIn(0.78f, 0.86f)
+                                    (0.75f + (cur / tot) * 0.08f).coerceIn(0.75f, 0.83f)
                                 }
-                                sdMsg.startsWith("3/4") -> 0.77f
-                                sdMsg.startsWith("4/4") -> 0.87f
-                                else -> 0.78f
+                                sdMsg.startsWith("3/4") -> 0.75f
+                                sdMsg.startsWith("4/4") -> 0.84f
+                                else -> 0.76f
                             }
                             onProgress(
                                 SwapStageProgress(
@@ -466,157 +446,98 @@ object CleanEraseHeadReplacementEngine {
                 } else {
                     applyFastSeamFeatherBridge(
                         composited = stage4Composited,
-                        sourceAlpha = warpedSrcMasks.fullHeadAlpha,
-                        innerFaceProtectMask = innerFaceProtectMask
+                        sourceAlpha = filteredFullHeadAlpha,
+                        innerFaceProtectMask = innerFaceProtectMask,
+                        clothProtectMask = clothProtectMask
                     )
                 }
             } else {
                 applyFastSeamFeatherBridge(
                     composited = stage4Composited,
-                    sourceAlpha = warpedSrcMasks.fullHeadAlpha,
-                    innerFaceProtectMask = innerFaceProtectMask
+                    sourceAlpha = filteredFullHeadAlpha,
+                    innerFaceProtectMask = innerFaceProtectMask,
+                    clothProtectMask = clothProtectMask
                 )
             }
 
             if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
 
-            // =========================================================================
-            // STAGE 6/6: 512x512 HD Enhancement (GFPGAN w16/FP32) + Age Harmony + Composite
-            // =========================================================================
-            onProgress(
-                SwapStageProgress(
-                    stepIndex = 6,
-                    totalSteps = 6,
-                    stageTitle = "Stage 6/6: HD Enhancement & Composite",
-                    detailMessage = "Enhancing 512px facial & hair detail (GFPGAN) and compositing onto target...",
-                    progressFraction = 0.92f
-                )
+            // Mild hair/neck crispness before warping into Intermediate Full Portrait (NO zoomed-out GFPGAN!)
+            val step2PortraitHeadCanvas = GhostHeadReplacementEngine.applyTiledDetailEnhancement(
+                bitmap = seamResolvedCanvas,
+                amount = 0.16f
             )
 
-            val headAgePlan = targetAgePlans.getOrNull(idx)
-            val clampedEnhance = enhancementStrength.coerceIn(0f, 1f)
-            val gfpRestored512 = if (clampedEnhance > 0.05f && ortEnv != null &&
-                (preloadedGfpganSession != null || (gfpFile.exists() && gfpFile.length() > 1024L))
-            ) {
-                val restored512 = FaceBlender.runOptionalGfpganEnhancement512(
-                    ortEnv = ortEnv,
-                    gfpganFile = if (gfpFile.exists()) gfpFile else null,
-                    crop128Or512 = seamResolvedCanvas,
-                    preferHardwareAccel = preferHardwareAccel,
-                    preloadedGfpganSession = preloadedGfpganSession
-                )
-                if (restored512 != null) {
-                    usedGfpganPass = true
-                    val ageScale = (headAgePlan?.gfpganWeightScale ?: 1.0f).coerceIn(0.35f, 1.0f)
-                    if (ageScale < 0.99f) {
-                        val base512 = Bitmap.createScaledBitmap(seamResolvedCanvas, 512, 512, true)
-                        val rPx = IntArray(512 * 512)
-                        val bPx = IntArray(512 * 512)
-                        restored512.getPixels(rPx, 0, 512, 0, 0, 512, 512)
-                        base512.getPixels(bPx, 0, 512, 0, 0, 512, 512)
-                        base512.recycle()
-                        val invS = 1f - ageScale
-                        for (i in rPx.indices) {
-                            val rc = rPx[i]
-                            val bc = bPx[i]
-                            val r = (((rc ushr 16) and 0xFF) * ageScale + ((bc ushr 16) and 0xFF) * invS).toInt().coerceIn(0, 255)
-                            val g = (((rc ushr 8) and 0xFF) * ageScale + ((bc ushr 8) and 0xFF) * invS).toInt().coerceIn(0, 255)
-                            val b = ((rc and 0xFF) * ageScale + (bc and 0xFF) * invS).toInt().coerceIn(0, 255)
-                            rPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                        }
-                        restored512.setPixels(rPx, 0, 512, 0, 0, 512, 512)
-                    }
-                    restored512
-                } else {
-                    null
-                }
-            } else {
-                null
-            }
-
-            val rawEnhancedHead = GhostHeadReplacementEngine.applyTiledDetailEnhancement(
-                gfpRestored512 ?: seamResolvedCanvas
-            )
-            gfpRestored512?.recycle()
-
-            val finalHeadCanvas = if (headAgePlan != null && headAgePlan.shouldApplyReAging) {
-                val work512 = if (rawEnhancedHead.width == 512 && rawEnhancedHead.height == 512) {
-                    if (rawEnhancedHead.isMutable) rawEnhancedHead else rawEnhancedHead.copy(Bitmap.Config.ARGB_8888, true).also { rawEnhancedHead.recycle() }
-                } else {
-                    Bitmap.createScaledBitmap(rawEnhancedHead, 512, 512, true).also { rawEnhancedHead.recycle() }
-                }
-                val headPx512 = IntArray(512 * 512)
-                work512.getPixels(headPx512, 0, 512, 0, 0, 512, 512)
-                val skinMask512 = FloatArray(512 * 512) { idx512 ->
-                    val y512 = idx512 / 512
-                    val x512 = idx512 % 512
-                    val sy = (y512 * canvasSize / 512).coerceIn(0, canvasSize - 1)
-                    val sx = (x512 * canvasSize / 512).coerceIn(0, canvasSize - 1)
-                    warpedSrcMasks.skinAndNeckWeight[sy * canvasSize + sx].coerceIn(0f, 1f)
-                }
-                val headGeom512 = FaceBlender.computeWarpedGeometry(
-                    forwardMatrix128 = FloatArray(6) { i -> tgtCanvasMatrix[i] * (512f / canvasSize.toFloat()) },
-                    targetLandmarks5 = targetFace.landmarks5,
-                    scale = 1.0f
-                )
-                AgeHarmonyEngine.reageCrop512(
-                    ortEnv = ortEnv,
-                    reagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null,
-                    pixels512 = headPx512,
-                    geom512 = headGeom512,
-                    agePlan = headAgePlan,
-                    maskWeights512 = skinMask512,
-                    preferHardwareAccel = preferHardwareAccel
-                )
-                work512.setPixels(headPx512, 0, 512, 0, 0, 512, 512)
-                work512
-            } else {
-                rawEnhancedHead
-            }
-
-            // Union envelope covers both the erased old target head & the new 3D source head while preserving exterior background & torso
+            // Union envelope covers both the erased old target head & the new 3D source head while
+            // strictly feathering canvas borders and protecting target collar/clothing.
             val baseEnvelopeAlpha = FloatArray(canvasSize * canvasSize) { i ->
-                val rawUnion = max(warpedSrcMasks.fullHeadAlpha[i], cleanEraseMask[i] * 0.96f)
-                val protected = rawUnion * (1f - clothProtectMask[i] * 0.88f)
+                val rawUnion = max(filteredFullHeadAlpha[i], cleanEraseMask[i] * 0.96f)
+                val protected = rawUnion * (1f - clothProtectMask[i] * 0.90f) * borderEnvelope[i]
                 protected.coerceIn(0f, 1f)
             }
-            val warpSize = finalHeadCanvas.width
-            val warpScale = warpSize.toFloat() / canvasSize.toFloat()
-            val warpMatrix2x3 = if (warpSize == canvasSize) {
-                tgtCanvasMatrix
-            } else {
-                FloatArray(6) { i -> tgtCanvasMatrix[i] * warpScale }
-            }
-            val warpEnvelopeAlpha = if (warpSize == canvasSize) {
-                baseEnvelopeAlpha
-            } else {
-                FloatArray(warpSize * warpSize) { idxW ->
-                    val yW = idxW / warpSize
-                    val xW = idxW % warpSize
-                    val sy = (yW * canvasSize / warpSize).coerceIn(0, canvasSize - 1)
-                    val sx = (xW * canvasSize / warpSize).coerceIn(0, canvasSize - 1)
-                    baseEnvelopeAlpha[sy * canvasSize + sx]
-                }
-            }
 
-            // Note: because Source head was already shifted inside stage 4 mesh warp, keep composite warp offset=0, scale=1
-            // so the clean erased background & warped head stay locked to target coordinates.
+            // Warp Step 2 intermediate portrait onto compositePixels
             GhostHeadReplacementEngine.warpHeadCropBackToTarget(
                 targetPixels = compositePixels,
                 targetWidth = targetW,
                 targetHeight = targetH,
-                headCrop = finalHeadCanvas,
-                forwardHeadMatrix2x3 = warpMatrix2x3,
-                envelopeAlpha = warpEnvelopeAlpha,
+                headCrop = step2PortraitHeadCanvas,
+                forwardHeadMatrix2x3 = tgtCanvasMatrix,
+                envelopeAlpha = baseEnvelopeAlpha,
                 blendStrength = blendStrength,
                 offsetX = 0f,
                 offsetY = 0f,
                 scaleAdjust = 1.0f
             )
 
+            // Record exact facial landmarks of the placed Step 2 head in target image coordinates
+            val invTgtCanvas = FaceAlignment.invertAffine2x3(tgtCanvasMatrix)
+            val placedLandmarks5 = adjPts5.map { p ->
+                PointF(
+                    invTgtCanvas[0] * p.x + invTgtCanvas[1] * p.y + invTgtCanvas[2],
+                    invTgtCanvas[3] * p.x + invTgtCanvas[4] * p.y + invTgtCanvas[5]
+                )
+            }
+            val placedEyeMidX = (placedLandmarks5[0].x + placedLandmarks5[1].x) * 0.5f
+            val placedEyeMidY = (placedLandmarks5[0].y + placedLandmarks5[1].y) * 0.5f
+            val placedEyeDist = hypot(
+                (placedLandmarks5[1].x - placedLandmarks5[0].x).toDouble(),
+                (placedLandmarks5[1].y - placedLandmarks5[0].y).toDouble()
+            ).toFloat().coerceAtLeast(10f)
+            val fallbackBbox = RectF(
+                (placedEyeMidX - placedEyeDist * 1.15f).coerceIn(0f, targetW.toFloat()),
+                (placedEyeMidY - placedEyeDist * 0.95f).coerceIn(0f, targetH.toFloat()),
+                (placedEyeMidX + placedEyeDist * 1.15f).coerceIn(0f, targetW.toFloat()),
+                (placedEyeMidY + placedEyeDist * 1.45f).coerceIn(0f, targetH.toFloat())
+            )
+            placedHeadPoses.add(
+                PlacedHeadPose(
+                    targetFaceIndex = targetFace.index,
+                    fallbackDetectedFace = DetectedFace(
+                        index = targetFace.index,
+                        boundingBox = fallbackBbox,
+                        score = 0.98f,
+                        landmarks5 = placedLandmarks5,
+                        detectorSource = "Step2PortraitPose"
+                    ),
+                    eyeMidPoint = PointF(placedEyeMidX, placedEyeMidY),
+                    eyeDist = placedEyeDist
+                )
+            )
+
             if (firstTargetHeadPreview == null) {
                 firstTargetHeadPreview = alignedTargetHead.copy(Bitmap.Config.ARGB_8888, false)
-                firstGeneratedHeadPreview = finalHeadCanvas.copy(Bitmap.Config.ARGB_8888, false)
+                firstTgtCanvasMatrix = tgtCanvasMatrix.copyOf()
+                firstHeadlessPreview512 = if (cleanHeadlessTargetCanvas.width == 512) {
+                    cleanHeadlessTargetCanvas.copy(Bitmap.Config.ARGB_8888, false)
+                } else {
+                    Bitmap.createScaledBitmap(cleanHeadlessTargetCanvas, 512, 512, true)
+                }
+                firstIntermediatePortraitPreview512 = if (step2PortraitHeadCanvas.width == 512) {
+                    step2PortraitHeadCanvas.copy(Bitmap.Config.ARGB_8888, false)
+                } else {
+                    Bitmap.createScaledBitmap(step2PortraitHeadCanvas, 512, 512, true)
+                }
             }
 
             if (litSourceHead !== warpedSourceHead) litSourceHead.recycle()
@@ -624,70 +545,186 @@ object CleanEraseHeadReplacementEngine {
             cleanHeadlessTargetCanvas.recycle()
             if (stage4Composited !== seamResolvedCanvas) stage4Composited.recycle()
             seamResolvedCanvas.recycle()
+            if (step2PortraitHeadCanvas !== seamResolvedCanvas) step2PortraitHeadCanvas.recycle()
             alignedTargetHead.recycle()
-            finalHeadCanvas.recycle()
 
             totalBlendMs += (System.currentTimeMillis() - tBlend0).coerceAtLeast(1L)
         }
 
-        val srcThumb112 = sourceEmbedding?.aligned112Crop ?: run {
-            val m112 = FaceAlignment.estimateNorm(sourceFace.landmarks5, 112)
-            FaceAlignment.warpAffineCrop(sourceBitmap, m112, 112)
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
+
+        // =========================================================================
+        // STAGE 6/6 (Step 3): High-Res Face Swap (`ArcFace` -> `HyperSwap 256px` -> `GFPGAN 512`)
+        // on the Step 2 Intermediate Full Portrait
+        // =========================================================================
+        val intermediatePortraitBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        intermediatePortraitBitmap.setPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
+
+        // Release heavy Step 1/2 temporary ONNX sessions (LaMa/Depth/FaceMesh/SD) so Step 3 has full RAM
+        if (ortEnv != null && preloadedArcFaceSession == null && preloadedSwapSession == null && preloadedGfpganSession == null) {
+            SdInpaintOnnxEngine.clearSessionCache()
+            OnnxProtobufInspector.clearCachedSessions()
+            if (lowMemoryMode) System.gc()
         }
 
-        if (lowMemoryMode) {
-            System.gc()
-        }
-
-        val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        finalBitmap.setPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
-
-        if (portraitBlurStrength > 0.03f) {
-            HeadSegmentationAndInpainting.applyPortraitModeBackgroundBokeh(
-                bitmap = finalBitmap,
-                faces = targetFacesToReplace,
-                blurStrength = portraitBlurStrength,
-                depthMap = targetDepthMap
+        onProgress(
+            SwapStageProgress(
+                stepIndex = 6,
+                totalSteps = 6,
+                stageTitle = "Stage 6/6: Step 3 Final Identity Swap",
+                detailMessage = "Running SCRFD -> ArcFace -> HyperSwap 256px -> GFPGAN 512px on Step 2 portrait...",
+                progressFraction = 0.88f
             )
-        }
+        )
 
-        if (enableProvenanceWatermark) {
-            FaceBlender.applyEthicalProvenanceWatermark(finalBitmap)
-        }
-
-        val engineUsed = if (hasInswapper && sourceEmbedding?.usedArcFaceModel == true) {
-            "NEURAL"
+        val detectedOnIntermediate = if (ortEnv != null && detFile.exists() && detFile.length() > 1024L) {
+            runCatching {
+                ScrfdFaceDetector.detectFacesOnnx(
+                    ortEnv = ortEnv,
+                    detModelFile = detFile,
+                    bitmap = intermediatePortraitBitmap,
+                    confThreshold = 0.22f,
+                    nmsThreshold = 0.40f
+                )
+            }.getOrNull().orEmpty()
         } else {
-            "SYNTHETIC"
+            emptyList()
         }
+
+        val resolvedFacesOnIntermediate = placedHeadPoses.map { pose ->
+            val maxDist = pose.eyeDist * 1.85f
+            val bestMatch = detectedOnIntermediate
+                .filter { cand -> cand.landmarks5.size >= 5 }
+                .minByOrNull { cand ->
+                    val cx = (cand.landmarks5[0].x + cand.landmarks5[1].x) * 0.5f
+                    val cy = (cand.landmarks5[0].y + cand.landmarks5[1].y) * 0.5f
+                    hypot((cx - pose.eyeMidPoint.x).toDouble(), (cy - pose.eyeMidPoint.y).toDouble()).toFloat()
+                }
+            val matchedDist = bestMatch?.let { cand ->
+                val cx = (cand.landmarks5[0].x + cand.landmarks5[1].x) * 0.5f
+                val cy = (cand.landmarks5[0].y + cand.landmarks5[1].y) * 0.5f
+                hypot((cx - pose.eyeMidPoint.x).toDouble(), (cy - pose.eyeMidPoint.y).toDouble()).toFloat()
+            } ?: Float.MAX_VALUE
+            if (bestMatch != null && matchedDist <= maxDist) {
+                bestMatch.copy(index = pose.targetFaceIndex)
+            } else {
+                pose.fallbackDetectedFace
+            }
+        }
+
+        val step3Res = InSwapperEngine.executeFaceSwap(
+            context = context,
+            ortEnv = ortEnv,
+            sourceBitmap = sourceBitmap,
+            sourceFace = sourceFace,
+            targetBitmap = intermediatePortraitBitmap,
+            targetFacesToReplace = resolvedFacesOnIntermediate,
+            enableColorTransfer = enableColorTransfer,
+            enableProvenanceWatermark = enableProvenanceWatermark,
+            allowTwoModelFallbackForTesting = allowTwoModelFallbackForTesting,
+            skinToneMode = skinToneMode,
+            faceReactionMode = faceReactionMode,
+            enableOcclusionProtection = true,
+            portraitBlurStrength = portraitBlurStrength,
+            blendStrength = blendStrength,
+            enhancementStrength = enhancementStrength.coerceAtLeast(0.85f),
+            offsetX = 0f,
+            offsetY = 0f,
+            scaleAdjust = 1.0f,
+            preferHardwareAccel = preferHardwareAccel,
+            identityPreservationMode = false,
+            preloadedArcFaceSession = preloadedArcFaceSession,
+            preloadedSwapSession = preloadedSwapSession,
+            preloadedGfpganSession = preloadedGfpganSession,
+            preloadedSegformerSession = preloadedSegformerSession,
+            preloadedEmap512x512 = preloadedEmap512x512,
+            captureDiagnostics = true,
+            autoBodyAgeMatch = autoBodyAgeMatch,
+            faceAgingFactor = faceAgingFactor,
+            swapStrategyOption = FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY,
+            onProgress = { sub ->
+                if (ortEnv != null) {
+                    onProgress(
+                        SwapStageProgress(
+                            stepIndex = 6,
+                            totalSteps = 6,
+                            stageTitle = "Stage 6/6: ${sub.stageTitle}",
+                            detailMessage = sub.detailMessage,
+                            progressFraction = (0.88f + sub.progressFraction * 0.11f).coerceIn(0.88f, 0.99f)
+                        )
+                    )
+                }
+            }
+        )
+
+        val step3Canvas512 = firstTgtCanvasMatrix?.let { mCanvas ->
+            val m512 = FloatArray(6) { i -> mCanvas[i] * (512f / canvasSize.toFloat()) }
+            FaceAlignment.warpAffineCrop(step3Res.outputBitmap, m512, 512)
+        } ?: step3Res.stage3FinalBlend512?.let { it.copy(Bitmap.Config.ARGB_8888, false) }
+
+        intermediatePortraitBitmap.recycle()
+        step3Res.alignedTarget128.recycle()
+        step3Res.stage1SwapOnly512?.takeIf { it !== step3Res.rawSwapped128 }?.recycle()
+        step3Res.stage2SwapRestore512?.takeIf { it !== step3Res.rawSwapped128 }?.recycle()
+        step3Res.stage3FinalBlend512?.takeIf { it !== step3Res.rawSwapped128 }?.recycle()
+
         val totalMs = (System.currentTimeMillis() - tStart).coerceAtLeast(1L)
         val summary = buildString {
-            append("Clean-Erase 3D Head Replace (${pipelineMode.title}): ")
-            append(srcMesh3D.sourceLabel)
-            append(" + $segLabelSummary")
-            if (targetDepthMap != null) append(" + ${targetDepthMap.modelUsedLabel}")
-            if (usedLamaErasure) append(" + LaMa Clean Erase")
-            if (usedDiffusionBridge) append(" + SD 1.5 Diffusion Seam Bridge")
-            if (usedGfpganPass) append(" + GFPGAN 512px HD")
-            if (portraitBlurStrength > 0.03f) append(" + Depth Bokeh ${(portraitBlurStrength * 100).toInt()}%")
-            append(" | engineUsed=$engineUsed")
+            append("3-Step Portrait-First (${pipelineMode.title}): ")
+            append("Step1(")
+            append(if (usedLamaErasure) "LaMa Headless" else "2D Exterior Headless")
+            append("+$segLabelSummary")
+            if (targetDepthMap != null) append("+${targetDepthMap.modelUsedLabel}")
+            append(") -> Step2(3D Portrait")
+            if (usedDiffusionBridge) append("+SD1.5 Seam") else append("+SeamBridge")
+            append(") -> Step3(${step3Res.engineUsed} ArcFace+HyperSwap+GFPGAN512)")
+            if (portraitBlurStrength > 0.03f) append(" + Bokeh ${(portraitBlurStrength * 100).toInt()}%")
+            append(" | engineUsed=${step3Res.engineUsed}")
         }
 
         return FaceSwapExecutionResult(
-            outputBitmap = finalBitmap,
-            alignedSource112 = srcThumb112,
+            outputBitmap = step3Res.outputBitmap,
+            alignedSource112 = step3Res.alignedSource112,
             alignedTarget128 = firstTargetHeadPreview ?: Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888),
-            rawSwapped128 = firstGeneratedHeadPreview ?: Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888),
-            swappedFacesCount = targetFacesToReplace.size,
-            detectionMs = detMs,
-            embeddingMs = embMs,
-            inswapperMs = totalGenMs.coerceAtLeast(1L),
-            blendingMs = totalBlendMs.coerceAtLeast(1L),
+            rawSwapped128 = step3Res.rawSwapped128,
+            swappedFacesCount = step3Res.swappedFacesCount,
+            detectionMs = (detMs + step3Res.detectionMs).coerceAtLeast(1L),
+            embeddingMs = (embMs + step3Res.embeddingMs).coerceAtLeast(1L),
+            inswapperMs = (totalGenMs + step3Res.inswapperMs).coerceAtLeast(1L),
+            blendingMs = (totalBlendMs + step3Res.blendingMs).coerceAtLeast(1L),
             totalMs = totalMs,
             pipelineSummary = summary,
-            engineUsed = engineUsed,
-            ageHarmonySummary = firstAgeHarmonySummary
+            stage1SwapOnly512 = firstHeadlessPreview512,
+            stage2SwapRestore512 = firstIntermediatePortraitPreview512,
+            stage3FinalBlend512 = step3Canvas512,
+            stageTimings = step3Res.stageTimings.copy(totalMs = totalMs),
+            benchmarkReports = step3Res.benchmarkReports,
+            engineUsed = step3Res.engineUsed,
+            ageHarmonySummary = step3Res.ageHarmonySummary ?: firstAgeHarmonySummary
         )
+    }
+
+    private fun computeCanvasBorderEnvelope(canvasSize: Int): FloatArray {
+        val margin = max(4, (canvasSize * 0.02f).toInt())
+        val featherSpan = max(12, (canvasSize * 0.055f).toInt()).toFloat()
+        val env = FloatArray(canvasSize * canvasSize)
+        for (y in 0 until canvasSize) {
+            val dy = min(y, canvasSize - 1 - y)
+            val row = y * canvasSize
+            for (x in 0 until canvasSize) {
+                val dx = min(x, canvasSize - 1 - x)
+                val edgeDist = min(dx, dy)
+                env[row + x] = when {
+                    edgeDist < margin -> 0f
+                    edgeDist >= margin + featherSpan -> 1f
+                    else -> {
+                        val t = ((edgeDist - margin) / featherSpan).coerceIn(0f, 1f)
+                        t * t * (3f - 2f * t)
+                    }
+                }
+            }
+        }
+        return env
     }
 
     private fun estimateWideHeadCanvasMatrix(
@@ -969,72 +1006,121 @@ object CleanEraseHeadReplacementEngine {
             }
         }
 
-        // Depth-aware multi-directional exterior boundary marching across the entire erased head & upper neck
+        // 2D Multi-directional exterior anchor interpolation + gentle local smoothing (eliminates 1D bands)
         val pixels = IntArray(total)
         targetCanvas.getPixels(pixels, 0, size, 0, 0, size, size)
         val inpainted = pixels.copyOf()
+        val isCleanAnchor = BooleanArray(total) { i ->
+            eraseMask[i] < 0.08f && clothProtectMask[i] < 0.30f
+        }
+        val invTgt = if (targetDepthMap != null) FaceAlignment.invertAffine2x3(tgtCanvasMatrix) else null
+        val dirDx = intArrayOf(-1, 1, 0, -1, 1, -1, 1)
+        val dirDy = intArrayOf(0, 0, -1, -1, -1, 1, 1)
 
         for (y in 0 until size) {
             val rowOffset = y * size
-            var leftAnchorX = 2
-            for (x in 2 until size / 2) {
-                val idx = rowOffset + x
-                if (eraseMask[idx] < 0.10f && clothProtectMask[idx] < 0.35f) {
-                    leftAnchorX = x
-                } else if (eraseMask[idx] >= 0.10f) {
-                    break
-                }
-            }
-            val leftColor = pixels[rowOffset + leftAnchorX]
-
-            var rightAnchorX = size - 3
-            for (x in (size - 3) downTo size / 2) {
-                val idx = rowOffset + x
-                if (eraseMask[idx] < 0.10f && clothProtectMask[idx] < 0.35f) {
-                    rightAnchorX = x
-                } else if (eraseMask[idx] >= 0.10f) {
-                    break
-                }
-            }
-            val rightColor = pixels[rowOffset + rightAnchorX]
-            val span = (rightAnchorX - leftAnchorX).coerceAtLeast(1).toFloat()
-
-            for (x in leftAnchorX..rightAnchorX) {
+            for (x in 0 until size) {
                 val idx = rowOffset + x
                 val eAlpha = eraseMask[idx]
-                if (eAlpha > 0.04f) {
-                    val tHoriz = ((x - leftAnchorX) / span).coerceIn(0f, 1f)
-                    val topIdx = min(y, 4) * size + x
-                    val hasCleanTop = eraseMask[topIdx] < 0.10f && clothProtectMask[topIdx] < 0.35f
+                if (eAlpha <= 0.04f) continue
 
-                    val hR = (leftColor ushr 16 and 0xFF) * (1f - tHoriz) + (rightColor ushr 16 and 0xFF) * tHoriz
-                    val hG = (leftColor ushr 8 and 0xFF) * (1f - tHoriz) + (rightColor ushr 8 and 0xFF) * tHoriz
-                    val hB = (leftColor and 0xFF) * (1f - tHoriz) + (rightColor and 0xFF) * tHoriz
+                val centerDepth = if (targetDepthMap != null && invTgt != null) {
+                    val tx = invTgt[0] * x + invTgt[1] * y + invTgt[2]
+                    val ty = invTgt[3] * x + invTgt[4] * y + invTgt[5]
+                    targetDepthMap.sampleBilinear(tx / targetWidth, ty / targetHeight)
+                } else {
+                    0.5f
+                }
 
-                    val bgR: Int
-                    val bgG: Int
-                    val bgB: Int
-                    if (hasCleanTop) {
-                        val topColor = pixels[topIdx]
-                        bgR = (0.76f * hR + 0.24f * (topColor ushr 16 and 0xFF)).toInt().coerceIn(0, 255)
-                        bgG = (0.76f * hG + 0.24f * (topColor ushr 8 and 0xFF)).toInt().coerceIn(0, 255)
-                        bgB = (0.76f * hB + 0.24f * (topColor and 0xFF)).toInt().coerceIn(0, 255)
-                    } else {
-                        bgR = hR.toInt().coerceIn(0, 255)
-                        bgG = hG.toInt().coerceIn(0, 255)
-                        bgB = hB.toInt().coerceIn(0, 255)
+                var wSum = 0f
+                var rSum = 0f
+                var gSum = 0f
+                var bSum = 0f
+
+                for (d in dirDx.indices) {
+                    val stepX = dirDx[d]
+                    val stepY = dirDy[d]
+                    var cx = x + stepX
+                    var cy = y + stepY
+                    var steps = 1
+                    var foundIdx = -1
+                    while (cx in 2 until (size - 2) && cy in 2 until (size - 2)) {
+                        val cIdx = cy * size + cx
+                        if (isCleanAnchor[cIdx]) {
+                            foundIdx = cIdx
+                            break
+                        }
+                        cx += stepX
+                        cy += stepY
+                        steps++
                     }
+                    if (foundIdx >= 0) {
+                        val dist = steps.toFloat() * if (stepX != 0 && stepY != 0) 1.414f else 1.0f
+                        var w = 1f / ((dist + 4f) * sqrt(dist + 4f))
+                        if (targetDepthMap != null && invTgt != null) {
+                            val ax = foundIdx % size
+                            val ay = foundIdx / size
+                            val tx = invTgt[0] * ax + invTgt[1] * ay + invTgt[2]
+                            val ty = invTgt[3] * ax + invTgt[4] * ay + invTgt[5]
+                            val aDepth = targetDepthMap.sampleBilinear(tx / targetWidth, ty / targetHeight)
+                            if (abs(aDepth - centerDepth) > 0.25f) w *= 0.45f
+                        }
+                        val col = pixels[foundIdx]
+                        rSum += ((col ushr 16) and 0xFF) * w
+                        gSum += ((col ushr 8) and 0xFF) * w
+                        bSum += (col and 0xFF) * w
+                        wSum += w
+                    }
+                }
 
-                    val orig = pixels[idx]
-                    val oR = (orig ushr 16) and 0xFF
-                    val oG = (orig ushr 8) and 0xFF
-                    val oB = orig and 0xFF
+                if (wSum <= 1e-6f) {
+                    val fallbackPts = arrayOf(
+                        pixels[min(y, 4) * size + 4],
+                        pixels[min(y, 4) * size + (size - 5)]
+                    )
+                    for (col in fallbackPts) {
+                        rSum += (col ushr 16) and 0xFF
+                        gSum += (col ushr 8) and 0xFF
+                        bSum += col and 0xFF
+                        wSum += 1f
+                    }
+                }
 
-                    val blend = ((eAlpha - 0.04f) / 0.38f).coerceIn(0f, 1f)
-                    val fR = (oR * (1f - blend) + bgR * blend).toInt().coerceIn(0, 255)
-                    val fG = (oG * (1f - blend) + bgG * blend).toInt().coerceIn(0, 255)
-                    val fB = (oB * (1f - blend) + bgB * blend).toInt().coerceIn(0, 255)
-                    inpainted[idx] = (0xFF shl 24) or (fR shl 16) or (fG shl 8) or fB
+                val bgR = (rSum / wSum).coerceIn(0f, 255f)
+                val bgG = (gSum / wSum).coerceIn(0f, 255f)
+                val bgB = (bSum / wSum).coerceIn(0f, 255f)
+
+                val orig = pixels[idx]
+                val oR = (orig ushr 16) and 0xFF
+                val oG = (orig ushr 8) and 0xFF
+                val oB = orig and 0xFF
+
+                val blend = ((eAlpha - 0.04f) / 0.34f).coerceIn(0f, 1f)
+                val fR = (oR * (1f - blend) + bgR * blend).toInt().coerceIn(0, 255)
+                val fG = (oG * (1f - blend) + bgG * blend).toInt().coerceIn(0, 255)
+                val fB = (oB * (1f - blend) + bgB * blend).toInt().coerceIn(0, 255)
+                inpainted[idx] = (0xFF shl 24) or (fR shl 16) or (fG shl 8) or fB
+            }
+        }
+
+        // Gentle 2-pass 3x3 smoothing strictly inside erased zone to eliminate any ray transitions
+        repeat(2) {
+            val prev = inpainted.copyOf()
+            for (y in 2 until size - 2) {
+                val row = y * size
+                for (x in 2 until size - 2) {
+                    val idx = row + x
+                    if (eraseMask[idx] > 0.12f && clothProtectMask[idx] < 0.35f) {
+                        val c = prev[idx]
+                        val n = prev[(y - 1) * size + x]
+                        val s = prev[(y + 1) * size + x]
+                        val l = prev[row + x - 1]
+                        val r = prev[row + x + 1]
+                        val sr = (((c ushr 16 and 0xFF) * 2 + (n ushr 16 and 0xFF) + (s ushr 16 and 0xFF) + (l ushr 16 and 0xFF) + (r ushr 16 and 0xFF)) / 6)
+                        val sg = (((c ushr 8 and 0xFF) * 2 + (n ushr 8 and 0xFF) + (s ushr 8 and 0xFF) + (l ushr 8 and 0xFF) + (r ushr 8 and 0xFF)) / 6)
+                        val sb = (((c and 0xFF) * 2 + (n and 0xFF) + (s and 0xFF) + (l and 0xFF) + (r and 0xFF)) / 6)
+                        inpainted[idx] = (0xFF shl 24) or (sr.coerceIn(0, 255) shl 16) or (sg.coerceIn(0, 255) shl 8) or sb.coerceIn(0, 255)
+                    }
                 }
             }
         }
@@ -1167,7 +1253,8 @@ object CleanEraseHeadReplacementEngine {
     private fun applyFastSeamFeatherBridge(
         composited: Bitmap,
         sourceAlpha: FloatArray,
-        innerFaceProtectMask: FloatArray
+        innerFaceProtectMask: FloatArray,
+        clothProtectMask: FloatArray? = null
     ): Bitmap {
         val size = composited.width
         val total = size * size
@@ -1180,8 +1267,9 @@ object CleanEraseHeadReplacementEngine {
             for (x in 1 until size - 1) {
                 val idx = row + x
                 val a = sourceAlpha[idx]
-                // Smooth only along the outer hair/neck transition ring (never inside inner face)
-                if (a in 0.06f..0.75f && innerFaceProtectMask[idx] < 0.25f) {
+                val clothLocked = (clothProtectMask?.getOrNull(idx) ?: 0f) > 0.45f
+                // Smooth only along the outer hair/neck transition ring (never inside inner face or protected collar/jewelry)
+                if (a in 0.06f..0.75f && innerFaceProtectMask[idx] < 0.25f && !clothLocked) {
                     val n = px[(y - 1) * size + x]
                     val s = px[(y + 1) * size + x]
                     val l = px[row + x - 1]

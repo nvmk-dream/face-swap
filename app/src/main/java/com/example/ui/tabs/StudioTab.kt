@@ -1433,12 +1433,22 @@ private fun SwapResultCard(
             // Interactive Before | After & Multi-Stage Split-Screen Comparison
             var splitPosition by remember { mutableFloatStateOf(0.50f) }
             var selectedSplitModeIndex by remember { mutableStateOf(0) }
-            val splitModeOptions = listOf(
-                "Final vs Target",
-                "Stage 2 (Restore) vs Stage 1 (Swap-Only)",
-                "Stage 3 (Final) vs Stage 2 (Restore)",
-                "Stage 3 (512px) vs Target Crop"
-            )
+            val isThreeStepPortrait = result.pipelineSummary.contains("3-Step Portrait-First")
+            val splitModeOptions = if (isThreeStepPortrait) {
+                listOf(
+                    "Final vs Target",
+                    "Step 2 (Portrait) vs Step 1 (Headless)",
+                    "Step 3 (Final) vs Step 2 (Portrait)",
+                    "Step 3 (512px) vs Target Crop"
+                )
+            } else {
+                listOf(
+                    "Final vs Target",
+                    "Stage 2 (Restore) vs Stage 1 (Swap-Only)",
+                    "Stage 3 (Final) vs Stage 2 (Restore)",
+                    "Stage 3 (512px) vs Target Crop"
+                )
+            }
 
             if (result.stage1SwapOnly512 != null && result.stage2SwapRestore512 != null && result.stage3FinalBlend512 != null) {
                 FlowRow(
@@ -1684,10 +1694,10 @@ private fun SwapResultCard(
                 AlignedCropThumb(bitmap = result.alignedSource112, label = "Source Crop")
                 AlignedCropThumb(bitmap = result.alignedTarget128, label = "Target Crop")
                 result.stage1SwapOnly512?.let {
-                    AlignedCropThumb(bitmap = it, label = "1. Swap-Only")
+                    AlignedCropThumb(bitmap = it, label = if (isThreeStepPortrait) "1. Headless" else "1. Swap-Only")
                 }
                 result.stage2SwapRestore512?.let {
-                    AlignedCropThumb(bitmap = it, label = "2. Restore")
+                    AlignedCropThumb(bitmap = it, label = if (isThreeStepPortrait) "2. Portrait" else "2. Restore")
                 }
                 AlignedCropThumb(bitmap = result.rawSwapped128, label = "3. Final 512")
             }
