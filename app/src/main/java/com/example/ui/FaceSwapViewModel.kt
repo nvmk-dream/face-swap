@@ -105,7 +105,7 @@ data class FaceSwapUiState(
     val studioMode: StudioMode = StudioMode.FACE_SWAP,
     val swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
     val pendingStrategyPopupOption: FaceSwapStrategyOption? = null,
-    val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
+    val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
     val qualityLevel: ProcessingQualityLevel = ProcessingQualityLevel.BALANCED,
     val outputResolution: OutputResolutionOption = OutputResolutionOption.ORIGINAL,
     val deviceTotalRamGb: Float = 6.0f,
@@ -1441,6 +1441,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         swapProgress = null,
                         lowMemoryMode = true,
                         qualityLevel = ProcessingQualityLevel.FAST,
+                        headPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
                         memoryServiceState = modelService.getMemoryState(),
                         errorBannerMessage = errMsg
                     )

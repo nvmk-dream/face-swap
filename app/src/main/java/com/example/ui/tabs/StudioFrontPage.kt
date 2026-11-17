@@ -94,6 +94,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.onnx.FaceSwapStrategyOption
 import com.example.onnx.HeadReplacementPipelineMode
 import com.example.ui.FaceSwapUiState
 import com.example.ui.StudioMode
@@ -1050,7 +1051,10 @@ private fun FrontMainWorkspaceCard(
                     )
                 }
 
-                if (uiState.studioMode == StudioMode.HEAD_REPLACEMENT) {
+                if (uiState.studioMode == StudioMode.HEAD_REPLACEMENT ||
+                    (uiState.studioMode == StudioMode.FACE_SWAP &&
+                        uiState.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD)
+                ) {
                     HorizontalDivider(color = Color(0x260284C7), thickness = 1.dp)
 
                     Column(
@@ -1058,7 +1062,11 @@ private fun FrontMainWorkspaceCard(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "Head Replacement Engine (முழுத் தலை மாற்ற முறை)",
+                            text = if (uiState.studioMode == StudioMode.FACE_SWAP) {
+                                "Option B+C Head & Seam Engine (தலை & ஓரம் இணைக்கும் முறை)"
+                            } else {
+                                "Head Replacement Engine (முழுத் தலை மாற்ற முறை)"
+                            },
                             color = Color(0xFF0369A1),
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp

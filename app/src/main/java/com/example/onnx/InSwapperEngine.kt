@@ -182,6 +182,7 @@ object InSwapperEngine {
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
         swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+        precomputedTargetDepthMap: DepthMapResult? = null,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
         val tStart = System.currentTimeMillis()
@@ -277,7 +278,7 @@ object InSwapperEngine {
         val firstAgeHarmonySummary = targetAgePlans.firstOrNull()?.summaryLabel
 
         // Optional Stage 3b: Compute 3D Depth Map once for Occlusion Guard & True Depth DSLR Bokeh
-        val targetDepthMap = if ((enableOcclusionProtection || portraitBlurStrength > 0.03f) &&
+        val targetDepthMap = precomputedTargetDepthMap ?: if ((enableOcclusionProtection || portraitBlurStrength > 0.03f) &&
             DepthEstimationEngine.hasInstalledDepthModel(context)
         ) {
             onProgress(

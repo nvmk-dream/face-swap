@@ -118,9 +118,9 @@ class HeadErase3DPipelineTest {
     }
 
     @Test
-    fun `default FaceSwapUiState selects CLEAN_ERASE_3D_DIFFUSION`() {
+    fun `default FaceSwapUiState selects CLEAN_ERASE_3D_FAST`() {
         val state = FaceSwapUiState()
-        assertEquals(HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION, state.headPipelineMode)
+        assertEquals(HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST, state.headPipelineMode)
     }
 
     @Test
@@ -376,5 +376,41 @@ class HeadErase3DPipelineTest {
             cancelled = true
         }
         assertTrue(cancelled)
+    }
+
+    @Test
+    fun `SeamBridge prioritizes INT8 over FP16 and FP32 and caps portrait resolution safely`() {
+        val root = com.example.onnx.SdInpaintPackManager.getSdInpaintRootDir(context)
+        root.deleteRecursively()
+        root.mkdirs()
+
+        listOf(
+            com.example.onnx.SdInpaintPackType.SD15_FP32,
+            com.example.onnx.SdInpaintPackType.SD15_FP16,
+            com.example.onnx.SdInpaintPackType.REALVIS_INT8
+        ).forEach { packType ->
+            val dir = File(root, packType.id)
+            listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
+                val compDir = File(dir, comp).apply { mkdirs() }
+                File(compDir, "model.onnx").writeBytes(ByteArray(2048) { 7 })
+            }
+        }
+
+        val chosen = com.example.onnx.SdInpaintPackManager.resolvePackForSeamBridge(context)
+        assertEquals(com.example.onnx.SdInpaintPackType.REALVIS_INT8, chosen?.packType)
+
+        // Portrait image capped at 384 or 512 does NOT inflate to 512x768 on memory-constrained fast runs
+        val dims384 = SdInpaintOnnxEngine.computeAspectMatchedTargetResolution(720, 1280, true, maxDimensionPx = 384)
+        assertEquals(384, dims384.width)
+        assertEquals(384, dims384.height)
+
+        val dims512 = SdInpaintOnnxEngine.computeAspectMatchedTargetResolution(720, 1280, true, maxDimensionPx = 512)
+        assertEquals(512, dims512.width)
+        assertEquals(512, dims512.height)
+
+        val dims768 = SdInpaintOnnxEngine.computeAspectMatchedTargetResolution(720, 1280, true, maxDimensionPx = 768)
+        assertEquals(512, dims768.width)
+        assertEquals(768, dims768.height)
+        root.deleteRecursively()
     }
 }

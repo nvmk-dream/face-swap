@@ -158,6 +158,22 @@ object SdInpaintPackManager {
     }
 
     /**
+     * Resolves an installed SD 1.5 pack optimized for mobile Stage 5 Head/Neck Seam Bridge:
+     * prioritizes smaller/faster `REALVIS_INT8` first, then `SD15_FP16`, `CUSTOM_SD`, and finally `SD15_FP32`.
+     */
+    fun resolvePackForSeamBridge(context: Context): InstalledSdInpaintPack? {
+        val installed = discoverInstalledPacks(context)
+        if (installed.isEmpty()) return null
+        val seamPriority = mapOf(
+            SdInpaintPackType.REALVIS_INT8 to 1,
+            SdInpaintPackType.SD15_FP16 to 2,
+            SdInpaintPackType.CUSTOM_SD to 3,
+            SdInpaintPackType.SD15_FP32 to 4
+        )
+        return installed.minByOrNull { seamPriority[it.packType] ?: 99 }
+    }
+
+    /**
      * Computes the default model option prioritizing CPU speed & accuracy:
      * Priority 1: SD 1.5 FP32 -> Priority 2: RealVis 5.1 INT8 -> Custom -> Secondary: SD 1.5 FP16 -> LaMa
      */

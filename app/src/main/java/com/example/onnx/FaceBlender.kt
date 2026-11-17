@@ -34,17 +34,17 @@ enum class HeadReplacementPipelineMode(
     val tamilTitle: String,
     val tamilSubtitle: String
 ) {
-    CLEAN_ERASE_3D_DIFFUSION(
-        id = "clean_erase_3d_diffusion",
-        title = "3D Erase + Diffusion",
-        tamilTitle = "1. முழுத் தலை நீக்கம் + 3D + Diffusion (புதியது)",
-        tamilSubtitle = "Target பழைய தலையை முழுமையாக நீக்கி, FaceMesh V2 3D + Depth + SD 1.5 Diffusion வழியாக கழுத்து & முடியை இயற்கையாக இணைக்கும்."
-    ),
     CLEAN_ERASE_3D_FAST(
         id = "clean_erase_3d_fast",
         title = "3D Erase (Fast)",
-        tamilTitle = "2. முழுத் தலை நீக்கம் + 3D Fast (SD இல்லாமல்)",
-        tamilSubtitle = "Target பழைய தலையை முழுமையாக நீக்கி 3D FaceMesh + Depth + LaMa மூலம் மிக வேகமாகப் பொருத்தும்."
+        tamilTitle = "1. முழுத் தலை நீக்கம் + 3D Fast (Recommended)",
+        tamilSubtitle = "Target பழைய தலையை முழுமையாக நீக்கி 3D FaceMesh + Depth + LaMa + Multi-Band Seam வழியாக ~15-25 வினாடிகளில் வேகமாகவும் crash இன்றியும் பொருத்தும்."
+    ),
+    CLEAN_ERASE_3D_DIFFUSION(
+        id = "clean_erase_3d_diffusion",
+        title = "3D Erase + SD 1.5",
+        tamilTitle = "2. முழுத் தலை நீக்கம் + 3D + SD 1.5 Diffusion (Heavy)",
+        tamilSubtitle = "கூடுதலாக SD 1.5 Diffusion வழியாக முடி/கழுத்து ஓரங்களை வரைந்து இணைக்கும் (அதிக RAM & 2-5 நிமிடம் எடுக்கும்; RAM குறைந்தால் தானாக Fast-க்கு மாறும்)."
     ),
     LEGACY_COPY_PASTE(
         id = "legacy_copy_paste",

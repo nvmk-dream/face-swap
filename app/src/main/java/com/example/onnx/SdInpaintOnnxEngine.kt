@@ -5,6 +5,8 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import android.app.ActivityManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -46,6 +48,19 @@ object SdInpaintOnnxEngine {
     const val DEFAULT_GUIDANCE_SCALE = 7.0f
     const val DEFAULT_NEGATIVE_PROMPT =
         "blurry, low quality, deformed hands, extra fingers"
+
+    class InsufficientNativeRamException(message: String) : RuntimeException(message)
+
+    internal fun queryAvailableRamInfo(context: Context?): Pair<Long, Boolean>? {
+        val ctx = context?.applicationContext ?: context ?: return null
+        return runCatching {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
+            val info = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(info)
+            val availMb = if (info.availMem > 0L) info.availMem / (1024L * 1024L) else Long.MAX_VALUE
+            availMb to info.lowMemory
+        }.getOrNull()
+    }
 
     internal data class TargetDimensions(
         val width: Int,
@@ -156,9 +171,12 @@ object SdInpaintOnnxEngine {
     internal fun computeAspectMatchedTargetResolution(
         origW: Int,
         origH: Int,
-        supportsDynamicShapes: Boolean
+        supportsDynamicShapes: Boolean,
+        maxDimensionPx: Int = 768
     ): TargetDimensions {
         if (!supportsDynamicShapes) return TargetDimensions(BASE_SD_RES, BASE_SD_RES)
+        if (maxDimensionPx <= 384) return TargetDimensions(384, 384)
+        if (maxDimensionPx <= BASE_SD_RES) return TargetDimensions(BASE_SD_RES, BASE_SD_RES)
         val aspect = origW.coerceAtLeast(1).toFloat() / origH.coerceAtLeast(1).toFloat()
         return when {
             aspect <= 0.80f -> TargetDimensions(512, 768)
@@ -212,6 +230,8 @@ object SdInpaintOnnxEngine {
         skipCompositeDebug: Boolean = false,
         seed: Long = System.currentTimeMillis(),
         releaseEachStageAfterUse: Boolean = true,
+        context: Context? = null,
+        maxPreferredResolutionPx: Int = 768,
         isCancelled: () -> Boolean = { false },
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
@@ -221,6 +241,13 @@ object SdInpaintOnnxEngine {
         val origH = sourceBitmap.height
         val plan = computeDenoisePlan(fastMode = fastMode, strength = strength)
         val clampedCfg = guidanceScale.coerceIn(1.0f, 15.0f)
+        val initialRamInfo = queryAvailableRamInfo(context)
+        val effectiveMaxDimPx = when {
+            initialRamInfo != null && (initialRamInfo.second || initialRamInfo.first < 2200L) ->
+                min(maxPreferredResolutionPx, 384)
+            fastMode -> min(maxPreferredResolutionPx, BASE_SD_RES)
+            else -> maxPreferredResolutionPx
+        }
 
         // Align mask to source resolution
         val alignedMask = if (maskBitmap.width == origW && maskBitmap.height == origH) {
@@ -276,190 +303,235 @@ object SdInpaintOnnxEngine {
         }
 
         checkCancel()
-        val effectivePrompt = prompt.trim().ifEmpty { "clean natural texture, high quality photo" }
-        val effectiveNegative = negativePrompt.trim().ifEmpty { DEFAULT_NEGATIVE_PROMPT }
-        onProgress("1/4 Encoding positive & negative prompts (${pack.packType.displayLabel})...")
+        fun encodeAndDenoiseToLatent(): Triple<AspectRoi, TargetDimensions, FloatArray> {
+            val effectivePrompt = prompt.trim().ifEmpty { "clean natural texture, high quality photo" }
+            val effectiveNegative = negativePrompt.trim().ifEmpty { DEFAULT_NEGATIVE_PROMPT }
+            onProgress("1/4 Encoding positive & negative prompts (${pack.packType.displayLabel})...")
 
-        // 1. CLIP Text Encoder -> uncond & cond embeddings [77, 768] (close immediately after use to save RAM)
-        val tokenizer = ClipBpeTokenizer.loadFromDirectory(pack.tokenizerDir)
-        val condIds = tokenizer.tokenizeTo77(effectivePrompt)
-        val uncondIds = tokenizer.tokenizeTo77(effectiveNegative)
-        logDebug(
-            "tokenizerLoaded=${tokenizer.isLoaded()} vocabSize=${tokenizer.vocabSize} " +
-                "tokDir=${pack.tokenizerDir?.absolutePath} neg=\"$effectiveNegative\""
-        )
-        val (textEncSession, _) = getOrCreatePackSession(
-            ortEnv = ortEnv,
-            pack = pack,
-            componentName = "text_encoder",
-            modelFile = pack.textEncoderOnnx,
-            preferHardwareAccel = preferHardwareAccel
-        )
-        val (uncondEmbed, condEmbed) = runTextEncoder(
-            ortEnv = ortEnv,
-            session = textEncSession,
-            uncondIds = uncondIds,
-            condIds = condIds
-        )
-        if (releaseEachStageAfterUse) {
-            closeComponentSession("text_encoder")
-        }
-        checkCancel()
-
-        // 2. Sequential VAE Encoder (closed before loading heavy UNet)
-        onProgress("2/4 Loading VAE Encoder...")
-        val (vaeEncSession, _) = getOrCreatePackSession(
-            ortEnv = ortEnv,
-            pack = pack,
-            componentName = "vae_encoder",
-            modelFile = pack.vaeEncoderOnnx,
-            preferHardwareAccel = preferHardwareAccel
-        )
-        val candidateDims = computeAspectMatchedTargetResolution(origW, origH, supportsDynamicShapes = true)
-        val vaeEncInfo = vaeEncSession.inputInfo[vaeEncSession.inputNames.first()]?.info as? TensorInfo
-        val vaeSupportsCandidate = supportsSpatialShape(vaeEncInfo, candidateDims.height, candidateDims.width)
-        var targetDims = if (vaeSupportsCandidate) candidateDims else TargetDimensions(BASE_SD_RES, BASE_SD_RES)
-
-        fun encodeLatentsAt(dims: TargetDimensions): Triple<AspectRoi, FloatArray, Pair<FloatArray, FloatArray>> {
-            val r = computeAspectRoi(origW, origH, minX, minY, maxX, maxY, dims.width, dims.height)
-            val (cropBmpTarget, rawMaskTarget) = extractTargetCropAndMask(
-                source = sourceBitmap,
-                fullMaskAlpha = fullMaskAlpha,
-                origW = origW,
-                origH = origH,
-                roi = r,
-                targetW = dims.width,
-                targetH = dims.height
+            // 1. CLIP Text Encoder -> uncond & cond embeddings [77, 768] (close immediately after use to save RAM)
+            val tokenizer = ClipBpeTokenizer.loadFromDirectory(pack.tokenizerDir)
+            val condIds = tokenizer.tokenizeTo77(effectivePrompt)
+            val uncondIds = tokenizer.tokenizeTo77(effectiveNegative)
+            logDebug(
+                "tokenizerLoaded=${tokenizer.isLoaded()} vocabSize=${tokenizer.vocabSize} " +
+                    "tokDir=${pack.tokenizerDir?.absolutePath} neg=\"$effectiveNegative\""
             )
-            val maskTarget = dilateBinaryMask(rawMaskTarget, dims.width, dims.height, radiusPx = 5)
-            onProgress("2/4 Encoding ${dims.width}×${dims.height} (${dims.latentW}×${dims.latentH} latent)...")
-            val mLatent = runVaeEncoder(
+            val (textEncSession, _) = getOrCreatePackSession(
                 ortEnv = ortEnv,
-                session = vaeEncSession,
-                cropBmp = cropBmpTarget,
-                maskTarget = maskTarget,
-                targetW = dims.width,
-                targetH = dims.height,
-                applyZeroMask = true
+                pack = pack,
+                componentName = "text_encoder",
+                modelFile = pack.textEncoderOnnx,
+                preferHardwareAccel = preferHardwareAccel
             )
-            val iLatent = runVaeEncoder(
+            val (uncondEmbed, condEmbed) = runTextEncoder(
                 ortEnv = ortEnv,
-                session = vaeEncSession,
-                cropBmp = cropBmpTarget,
-                maskTarget = maskTarget,
-                targetW = dims.width,
-                targetH = dims.height,
-                applyZeroMask = false
+                session = textEncSession,
+                uncondIds = uncondIds,
+                condIds = condIds
             )
-            cropBmpTarget.recycle()
-            val latMask = downsampleMaskToLatent(
-                mask = maskTarget,
-                targetW = dims.width,
-                targetH = dims.height,
-                latentW = dims.latentW,
-                latentH = dims.latentH
-            )
-            return Triple(r, latMask, mLatent to iLatent)
-        }
-
-        var encodedTriple = encodeLatentsAt(targetDims)
-        if (releaseEachStageAfterUse) {
-            closeComponentSession("vae_encoder")
-        }
-        checkCancel()
-
-        // 3. Load UNet alone in RAM and verify spatial dimensions before denoising
-        onProgress("3/4 Loading UNet (${pack.packType.displayLabel})...")
-        var (unetSession, unetEpLabel) = getOrCreatePackSession(
-            ortEnv = ortEnv,
-            pack = pack,
-            componentName = "unet",
-            modelFile = pack.unetOnnx,
-            preferHardwareAccel = preferHardwareAccel
-        )
-        val unetSampleName = unetSession.inputNames.firstOrNull { it.contains("sample", ignoreCase = true) }
-            ?: unetSession.inputNames.first()
-        val unetInfo = unetSession.inputInfo[unetSampleName]?.info as? TensorInfo
-        val unetSupportsCurrent = supportsSpatialShape(unetInfo, targetDims.latentH, targetDims.latentW)
-        if (!unetSupportsCurrent && (targetDims.width != BASE_SD_RES || targetDims.height != BASE_SD_RES)) {
-            targetDims = TargetDimensions(BASE_SD_RES, BASE_SD_RES)
             if (releaseEachStageAfterUse) {
-                closeComponentSession("unet")
+                closeComponentSession("text_encoder")
             }
-            val (reEncSession, _) = getOrCreatePackSession(
+            checkCancel()
+
+            queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
+                if (isLowMem || availMb < 600L) {
+                    clearSessionCache()
+                    System.gc()
+                    throw InsufficientNativeRamException(
+                        "Insufficient free RAM before VAE encoding (${availMb}MB available)."
+                    )
+                }
+            }
+
+            // 2. Sequential VAE Encoder (closed before loading heavy UNet)
+            onProgress("2/4 Loading VAE Encoder...")
+            val (vaeEncSession, _) = getOrCreatePackSession(
                 ortEnv = ortEnv,
                 pack = pack,
                 componentName = "vae_encoder",
                 modelFile = pack.vaeEncoderOnnx,
                 preferHardwareAccel = preferHardwareAccel
             )
-            val r = computeAspectRoi(origW, origH, minX, minY, maxX, maxY, targetDims.width, targetDims.height)
-            val (cropBmpTarget, rawMaskTarget) = extractTargetCropAndMask(
-                source = sourceBitmap,
-                fullMaskAlpha = fullMaskAlpha,
+            val candidateDims = computeAspectMatchedTargetResolution(
                 origW = origW,
                 origH = origH,
-                roi = r,
-                targetW = targetDims.width,
-                targetH = targetDims.height
+                supportsDynamicShapes = true,
+                maxDimensionPx = effectiveMaxDimPx
             )
-            val maskTarget = dilateBinaryMask(rawMaskTarget, targetDims.width, targetDims.height, radiusPx = 5)
-            val mLat = runVaeEncoder(ortEnv, reEncSession, cropBmpTarget, maskTarget, targetDims.width, targetDims.height, true)
-            val iLat = runVaeEncoder(ortEnv, reEncSession, cropBmpTarget, maskTarget, targetDims.width, targetDims.height, false)
-            cropBmpTarget.recycle()
-            val latMask = downsampleMaskToLatent(maskTarget, targetDims.width, targetDims.height, targetDims.latentW, targetDims.latentH)
-            encodedTriple = Triple(r, latMask, mLat to iLat)
+            val vaeEncInfo = vaeEncSession.inputInfo[vaeEncSession.inputNames.first()]?.info as? TensorInfo
+            val vaeSupportsCandidate = supportsSpatialShape(vaeEncInfo, candidateDims.height, candidateDims.width)
+            var targetDims = if (vaeSupportsCandidate) candidateDims else TargetDimensions(BASE_SD_RES, BASE_SD_RES)
+
+            fun encodeLatentsAt(dims: TargetDimensions): Triple<AspectRoi, FloatArray, Pair<FloatArray, FloatArray>> {
+                val r = computeAspectRoi(origW, origH, minX, minY, maxX, maxY, dims.width, dims.height)
+                val (cropBmpTarget, rawMaskTarget) = extractTargetCropAndMask(
+                    source = sourceBitmap,
+                    fullMaskAlpha = fullMaskAlpha,
+                    origW = origW,
+                    origH = origH,
+                    roi = r,
+                    targetW = dims.width,
+                    targetH = dims.height
+                )
+                val maskTarget = dilateBinaryMask(rawMaskTarget, dims.width, dims.height, radiusPx = 5)
+                onProgress("2/4 Encoding ${dims.width}×${dims.height} (${dims.latentW}×${dims.latentH} latent)...")
+                val mLatent = runVaeEncoder(
+                    ortEnv = ortEnv,
+                    session = vaeEncSession,
+                    cropBmp = cropBmpTarget,
+                    maskTarget = maskTarget,
+                    targetW = dims.width,
+                    targetH = dims.height,
+                    applyZeroMask = true
+                )
+                val iLatent = runVaeEncoder(
+                    ortEnv = ortEnv,
+                    session = vaeEncSession,
+                    cropBmp = cropBmpTarget,
+                    maskTarget = maskTarget,
+                    targetW = dims.width,
+                    targetH = dims.height,
+                    applyZeroMask = false
+                )
+                cropBmpTarget.recycle()
+                val latMask = downsampleMaskToLatent(
+                    mask = maskTarget,
+                    targetW = dims.width,
+                    targetH = dims.height,
+                    latentW = dims.latentW,
+                    latentH = dims.latentH
+                )
+                return Triple(r, latMask, mLatent to iLatent)
+            }
+
+            var encodedTriple = encodeLatentsAt(targetDims)
             if (releaseEachStageAfterUse) {
                 closeComponentSession("vae_encoder")
             }
-            val reloadedUnet = getOrCreatePackSession(
+            checkCancel()
+
+            queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
+                if (isLowMem || availMb < 650L) {
+                    clearSessionCache()
+                    System.gc()
+                    throw InsufficientNativeRamException(
+                        "Insufficient free RAM before UNet denoising (${availMb}MB available)."
+                    )
+                }
+            }
+
+            // 3. Load UNet alone in RAM and verify spatial dimensions before denoising
+            onProgress("3/4 Loading UNet (${pack.packType.displayLabel})...")
+            var (unetSession, unetEpLabel) = getOrCreatePackSession(
                 ortEnv = ortEnv,
                 pack = pack,
                 componentName = "unet",
                 modelFile = pack.unetOnnx,
                 preferHardwareAccel = preferHardwareAccel
             )
-            unetSession = reloadedUnet.first
-            unetEpLabel = reloadedUnet.second
+            val unetSampleName = unetSession.inputNames.firstOrNull { it.contains("sample", ignoreCase = true) }
+                ?: unetSession.inputNames.first()
+            val unetInfo = unetSession.inputInfo[unetSampleName]?.info as? TensorInfo
+            val unetSupportsCurrent = supportsSpatialShape(unetInfo, targetDims.latentH, targetDims.latentW)
+            if (!unetSupportsCurrent && (targetDims.width != BASE_SD_RES || targetDims.height != BASE_SD_RES)) {
+                targetDims = TargetDimensions(BASE_SD_RES, BASE_SD_RES)
+                if (releaseEachStageAfterUse) {
+                    closeComponentSession("unet")
+                }
+                val (reEncSession, _) = getOrCreatePackSession(
+                    ortEnv = ortEnv,
+                    pack = pack,
+                    componentName = "vae_encoder",
+                    modelFile = pack.vaeEncoderOnnx,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+                val r = computeAspectRoi(origW, origH, minX, minY, maxX, maxY, targetDims.width, targetDims.height)
+                val (cropBmpTarget, rawMaskTarget) = extractTargetCropAndMask(
+                    source = sourceBitmap,
+                    fullMaskAlpha = fullMaskAlpha,
+                    origW = origW,
+                    origH = origH,
+                    roi = r,
+                    targetW = targetDims.width,
+                    targetH = targetDims.height
+                )
+                val maskTarget = dilateBinaryMask(rawMaskTarget, targetDims.width, targetDims.height, radiusPx = 5)
+                val mLat = runVaeEncoder(ortEnv, reEncSession, cropBmpTarget, maskTarget, targetDims.width, targetDims.height, true)
+                val iLat = runVaeEncoder(ortEnv, reEncSession, cropBmpTarget, maskTarget, targetDims.width, targetDims.height, false)
+                cropBmpTarget.recycle()
+                val latMask = downsampleMaskToLatent(maskTarget, targetDims.width, targetDims.height, targetDims.latentW, targetDims.latentH)
+                encodedTriple = Triple(r, latMask, mLat to iLat)
+                if (releaseEachStageAfterUse) {
+                    closeComponentSession("vae_encoder")
+                }
+                val reloadedUnet = getOrCreatePackSession(
+                    ortEnv = ortEnv,
+                    pack = pack,
+                    componentName = "unet",
+                    modelFile = pack.unetOnnx,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+                unetSession = reloadedUnet.first
+                unetEpLabel = reloadedUnet.second
+            }
+
+            val roi = encodedTriple.first
+            val maskLatent = encodedTriple.second
+            val maskedLatent = encodedTriple.third.first
+            val initLatent = encodedTriple.third.second
+
+            logDebug(
+                "targetDims=${targetDims.width}x${targetDims.height} latent=${targetDims.latentW}x${targetDims.latentH} " +
+                    "ep=$unetEpLabel sequential=$releaseEachStageAfterUse roi=[${roi.left},${roi.top},${roi.width}x${roi.height}]"
+            )
+
+            // 4. UNet Denoising Loop (Euler Discrete Scheduler)
+            val denoisedLatent = try {
+                runUnetDenoisingLoop(
+                    ortEnv = ortEnv,
+                    session = unetSession,
+                    uncondEmbed = uncondEmbed,
+                    condEmbed = condEmbed,
+                    maskedLatent = maskedLatent,
+                    initLatent = initLatent,
+                    maskLatent = maskLatent,
+                    latentW = targetDims.latentW,
+                    latentH = targetDims.latentH,
+                    plan = plan,
+                    guidanceScale = clampedCfg,
+                    seed = seed,
+                    isCancelled = isCancelled,
+                    onStep = { step, total ->
+                        onProgress("3/4 Diffusion step $step/$total (${targetDims.width}×${targetDims.height} • $unetEpLabel)...")
+                    }
+                )
+            } finally {
+                if (releaseEachStageAfterUse) {
+                    closeComponentSession("unet")
+                    System.gc()
+                }
+            }
+            return Triple(roi, targetDims, denoisedLatent)
         }
 
-        val roi = encodedTriple.first
-        val maskLatent = encodedTriple.second
-        val maskedLatent = encodedTriple.third.first
-        val initLatent = encodedTriple.third.second
-
-        logDebug(
-            "targetDims=${targetDims.width}x${targetDims.height} latent=${targetDims.latentW}x${targetDims.latentH} " +
-                "ep=$unetEpLabel sequential=$releaseEachStageAfterUse roi=[${roi.left},${roi.top},${roi.width}x${roi.height}]"
-        )
-
-        // 4. UNet Denoising Loop (Euler Discrete Scheduler)
-        val denoisedLatent = try {
-            runUnetDenoisingLoop(
-                ortEnv = ortEnv,
-                session = unetSession,
-                uncondEmbed = uncondEmbed,
-                condEmbed = condEmbed,
-                maskedLatent = maskedLatent,
-                initLatent = initLatent,
-                maskLatent = maskLatent,
-                latentW = targetDims.latentW,
-                latentH = targetDims.latentH,
-                plan = plan,
-                guidanceScale = clampedCfg,
-                seed = seed,
-                isCancelled = isCancelled,
-                onStep = { step, total ->
-                    onProgress("3/4 Diffusion step $step/$total (${targetDims.width}×${targetDims.height} • $unetEpLabel)...")
-                }
-            )
-        } finally {
-            if (releaseEachStageAfterUse) {
-                closeComponentSession("unet")
-                System.gc()
-            }
+        val (roi, targetDims, denoisedLatent) = encodeAndDenoiseToLatent()
+        val unetEpLabel = "CPU/ORT"
+        if (releaseEachStageAfterUse) {
+            // Ensure prompt embeddings & UNet tensors are out of scope and reclaimed before 512x512 VAE Decode
+            System.gc()
         }
         checkCancel()
+
+        queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
+            if (isLowMem || availMb < 550L) {
+                clearSessionCache()
+                System.gc()
+                throw InsufficientNativeRamException(
+                    "Insufficient free RAM before 4/4 VAE Decoding (${availMb}MB available)."
+                )
+            }
+        }
 
         // 5. Sequential VAE Decoder -> targetDims RGB Bitmap (closed immediately after decoding)
         onProgress("4/4 Decoding ${targetDims.width}×${targetDims.height} to ${origW}×${origH}...")
@@ -481,6 +553,7 @@ object SdInpaintOnnxEngine {
         } finally {
             if (releaseEachStageAfterUse) {
                 closeComponentSession("vae_decoder")
+                System.gc()
             }
         }
 
@@ -1023,21 +1096,21 @@ object SdInpaintOnnxEngine {
         val inputType = (session.inputInfo[inputName]?.info as? TensorInfo)?.type ?: OnnxJavaType.FLOAT
         val shape = longArrayOf(1L, LATENT_CHANNELS.toLong(), latentH.toLong(), latentW.toLong())
 
-        return createFloatOrHalfTensor(ortEnv, scaledLatent, shape, inputType).use { lTensor ->
+        val hw = targetW * targetH
+        val pixels = IntArray(hw)
+        createFloatOrHalfTensor(ortEnv, scaledLatent, shape, inputType).use { lTensor ->
             session.run(mapOf(inputName to lTensor)).use { res ->
                 val rgbFloats = readTensorAsFloats(res[0] as OnnxTensor)
-                val hw = targetW * targetH
-                val pixels = IntArray(hw)
                 for (i in 0 until hw) {
                     val r = ((rgbFloats[i] * 0.5f + 0.5f).coerceIn(0f, 1f) * 255f).roundToInt()
                     val g = ((rgbFloats[hw + i] * 0.5f + 0.5f).coerceIn(0f, 1f) * 255f).roundToInt()
                     val b = ((rgbFloats[2 * hw + i] * 0.5f + 0.5f).coerceIn(0f, 1f) * 255f).roundToInt()
                     pixels[i] = Color.rgb(r, g, b)
                 }
-                Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888).apply {
-                    setPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
-                }
             }
+        }
+        return Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888).apply {
+            setPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
         }
     }
 

@@ -46,7 +46,7 @@ object CleanEraseHeadReplacementEngine {
         sourceFace: DetectedFace,
         targetBitmap: Bitmap,
         targetFacesToReplace: List<DetectedFace>,
-        pipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
+        pipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
         enableColorTransfer: Boolean,
         enableProvenanceWatermark: Boolean,
         allowTwoModelFallbackForTesting: Boolean,
@@ -166,7 +166,7 @@ object CleanEraseHeadReplacementEngine {
         }
 
         val sdPack = if (pipelineMode == HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION) {
-            SdInpaintPackManager.resolvePackForOption(context, InpaintModelOption.AUTO)
+            SdInpaintPackManager.resolvePackForSeamBridge(context)
         } else {
             null
         }
@@ -360,17 +360,37 @@ object CleanEraseHeadReplacementEngine {
                 clothProtectMask = clothProtectMask
             )
 
+            // Capture Step 1 previews BEFORE recycling Stage 1-4 bitmaps so Stage 5 SD 1.5 has max free RAM
+            if (firstTargetHeadPreview == null) {
+                firstTargetHeadPreview = alignedTargetHead.copy(Bitmap.Config.ARGB_8888, false)
+                firstTgtCanvasMatrix = tgtCanvasMatrix.copyOf()
+                firstHeadlessPreview512 = if (cleanHeadlessTargetCanvas.width == 512) {
+                    cleanHeadlessTargetCanvas.copy(Bitmap.Config.ARGB_8888, false)
+                } else {
+                    Bitmap.createScaledBitmap(cleanHeadlessTargetCanvas, 512, 512, true)
+                }
+            }
+            if (litSourceHead !== warpedSourceHead) litSourceHead.recycle()
+            warpedSourceHead.recycle()
+            cleanHeadlessTargetCanvas.recycle()
+            alignedTargetHead.recycle()
+
             // =========================================================================
             // STAGE 5/6: Diffusion Seam & Hair/Neck Bridge (Strict Identity Protection)
             // =========================================================================
             if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
+            val ramInfoBeforeStage5 = SdInpaintOnnxEngine.queryAvailableRamInfo(context)
+            val canRunSdSafely = !lowMemoryMode &&
+                (ramInfoBeforeStage5 == null || (!ramInfoBeforeStage5.second && ramInfoBeforeStage5.first >= 1100L))
+            val useSdBridgeNow = sdPack != null && ortEnv != null && canRunSdSafely
+
             onProgress(
                 SwapStageProgress(
                     stepIndex = 5,
                     totalSteps = 6,
-                    stageTitle = "Stage 5/6: Diffusion Seam Bridge",
-                    detailMessage = if (sdPack != null) {
-                        "Freeing Stage 1-4 sessions & preparing SD 1.5 (${sdPack.packType.displayLabel})..."
+                    stageTitle = "Stage 5/6: ${if (useSdBridgeNow) "Diffusion Seam Bridge" else "Fast 3D Seam Bridge"}",
+                    detailMessage = if (useSdBridgeNow) {
+                        "Freeing Stage 1-4 sessions & preparing SD 1.5 (${sdPack!!.packType.displayLabel})..."
                     } else {
                         "Applying multi-band neck-collar & hair perimeter seam bridge..."
                     },
@@ -387,23 +407,26 @@ object CleanEraseHeadReplacementEngine {
                 scaleAdjust = scaleAdjust
             )
 
-            val seamResolvedCanvas = if (sdPack != null && ortEnv != null) {
+            val seamResolvedCanvas = if (useSdBridgeNow) {
                 // Free all Stage 1-4 ONNX sessions (det_10g, facemesh, arcface, hyperswap, segformer, mivolo)
-                // so SD 1.5 UNet has maximum native RAM and cannot OOM/swap-thrash on mobile devices.
+                // so SD 1.5 UNet/VAE has maximum native RAM and cannot OOM/lmkd-kill on mobile devices.
                 OnnxProtobufInspector.clearCachedSessions()
                 SdInpaintOnnxEngine.clearSessionCache()
                 System.gc()
 
+                val sdMaxDimPx = if ((ramInfoBeforeStage5?.first ?: 4096L) < 2400L) 384 else 512
                 val sdAttempt = runCatching {
                     runDiffusionSeamBridge(
-                        ortEnv = ortEnv,
-                        pack = sdPack,
+                        context = context,
+                        ortEnv = ortEnv!!,
+                        pack = sdPack!!,
                         stage4Canvas = stage4Composited,
                         sourceAlpha = filteredFullHeadAlpha,
                         targetEraseMask = cleanEraseMask,
                         innerFaceProtectMask = innerFaceProtectMask,
                         clothProtectMask = clothProtectMask,
                         preferHardwareAccel = preferHardwareAccel,
+                        maxPreferredResolutionPx = sdMaxDimPx,
                         isCancelled = isCancelled,
                         onDetailProgress = { sdMsg ->
                             val frac = when {
@@ -525,14 +548,7 @@ object CleanEraseHeadReplacementEngine {
                 )
             )
 
-            if (firstTargetHeadPreview == null) {
-                firstTargetHeadPreview = alignedTargetHead.copy(Bitmap.Config.ARGB_8888, false)
-                firstTgtCanvasMatrix = tgtCanvasMatrix.copyOf()
-                firstHeadlessPreview512 = if (cleanHeadlessTargetCanvas.width == 512) {
-                    cleanHeadlessTargetCanvas.copy(Bitmap.Config.ARGB_8888, false)
-                } else {
-                    Bitmap.createScaledBitmap(cleanHeadlessTargetCanvas, 512, 512, true)
-                }
+            if (firstIntermediatePortraitPreview512 == null) {
                 firstIntermediatePortraitPreview512 = if (step2PortraitHeadCanvas.width == 512) {
                     step2PortraitHeadCanvas.copy(Bitmap.Config.ARGB_8888, false)
                 } else {
@@ -540,13 +556,9 @@ object CleanEraseHeadReplacementEngine {
                 }
             }
 
-            if (litSourceHead !== warpedSourceHead) litSourceHead.recycle()
-            warpedSourceHead.recycle()
-            cleanHeadlessTargetCanvas.recycle()
             if (stage4Composited !== seamResolvedCanvas) stage4Composited.recycle()
             seamResolvedCanvas.recycle()
             if (step2PortraitHeadCanvas !== seamResolvedCanvas) step2PortraitHeadCanvas.recycle()
-            alignedTargetHead.recycle()
 
             totalBlendMs += (System.currentTimeMillis() - tBlend0).coerceAtLeast(1L)
         }
@@ -642,6 +654,7 @@ object CleanEraseHeadReplacementEngine {
             autoBodyAgeMatch = autoBodyAgeMatch,
             faceAgingFactor = faceAgingFactor,
             swapStrategyOption = FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY,
+            precomputedTargetDepthMap = targetDepthMap,
             onProgress = { sub ->
                 if (ortEnv != null) {
                     onProgress(
@@ -1161,6 +1174,7 @@ object CleanEraseHeadReplacementEngine {
     }
 
     private fun runDiffusionSeamBridge(
+        context: Context,
         ortEnv: OrtEnvironment,
         pack: InstalledSdInpaintPack,
         stage4Canvas: Bitmap,
@@ -1169,6 +1183,7 @@ object CleanEraseHeadReplacementEngine {
         innerFaceProtectMask: FloatArray,
         clothProtectMask: FloatArray,
         preferHardwareAccel: Boolean,
+        maxPreferredResolutionPx: Int = 512,
         isCancelled: () -> Boolean = { false },
         onDetailProgress: (String) -> Unit = {}
     ): Bitmap? {
@@ -1213,6 +1228,8 @@ object CleanEraseHeadReplacementEngine {
                 strength = 0.25f,
                 guidanceScale = 6.0f,
                 releaseEachStageAfterUse = true,
+                context = context,
+                maxPreferredResolutionPx = maxPreferredResolutionPx,
                 isCancelled = isCancelled,
                 onProgress = onDetailProgress
             )
@@ -1258,38 +1275,61 @@ object CleanEraseHeadReplacementEngine {
     ): Bitmap {
         val size = composited.width
         val total = size * size
-        val px = IntArray(total)
-        composited.getPixels(px, 0, size, 0, 0, size, size)
-        val out = px.copyOf()
+        var current = IntArray(total)
+        composited.getPixels(current, 0, size, 0, 0, size, size)
 
-        for (y in 1 until size - 1) {
-            val row = y * size
-            for (x in 1 until size - 1) {
-                val idx = row + x
-                val a = sourceAlpha[idx]
-                val clothLocked = (clothProtectMask?.getOrNull(idx) ?: 0f) > 0.45f
-                // Smooth only along the outer hair/neck transition ring (never inside inner face or protected collar/jewelry)
-                if (a in 0.06f..0.75f && innerFaceProtectMask[idx] < 0.25f && !clothLocked) {
-                    val n = px[(y - 1) * size + x]
-                    val s = px[(y + 1) * size + x]
-                    val l = px[row + x - 1]
-                    val r = px[row + x + 1]
-                    val c = px[idx]
+        // 2-pass multi-band boundary smoothing along outer hair/neck transition ring only
+        // (strictly preserves innerFaceProtectMask & collar/jewelry clothProtectMask)
+        val radii = intArrayOf(2, 1)
+        val weights = floatArrayOf(0.42f, 0.32f)
+        for (passIdx in radii.indices) {
+            val rad = radii[passIdx]
+            val baseW = weights[passIdx]
+            val next = current.copyOf()
+            for (y in rad until size - rad) {
+                val row = y * size
+                for (x in rad until size - rad) {
+                    val idx = row + x
+                    val a = sourceAlpha[idx]
+                    val clothLocked = (clothProtectMask?.getOrNull(idx) ?: 0f) > 0.45f
+                    if (a in 0.04f..0.82f && innerFaceProtectMask[idx] < 0.25f && !clothLocked) {
+                        val n = current[(y - rad) * size + x]
+                        val s = current[(y + rad) * size + x]
+                        val l = current[row + x - rad]
+                        val r = current[row + x + rad]
+                        val nw = current[(y - rad) * size + (x - rad)]
+                        val ne = current[(y - rad) * size + (x + rad)]
+                        val sw = current[(y + rad) * size + (x - rad)]
+                        val se = current[(y + rad) * size + (x + rad)]
+                        val c = current[idx]
 
-                    val avgR = ((n ushr 16 and 0xFF) + (s ushr 16 and 0xFF) + (l ushr 16 and 0xFF) + (r ushr 16 and 0xFF)) * 0.25f
-                    val avgG = ((n ushr 8 and 0xFF) + (s ushr 8 and 0xFF) + (l ushr 8 and 0xFF) + (r ushr 8 and 0xFF)) * 0.25f
-                    val avgB = ((n and 0xFF) + (s and 0xFF) + (l and 0xFF) + (r and 0xFF)) * 0.25f
+                        val avgR = (
+                            ((n ushr 16 and 0xFF) + (s ushr 16 and 0xFF) + (l ushr 16 and 0xFF) + (r ushr 16 and 0xFF)) * 2f +
+                            (nw ushr 16 and 0xFF) + (ne ushr 16 and 0xFF) + (sw ushr 16 and 0xFF) + (se ushr 16 and 0xFF)
+                        ) / 12f
+                        val avgG = (
+                            ((n ushr 8 and 0xFF) + (s ushr 8 and 0xFF) + (l ushr 8 and 0xFF) + (r ushr 8 and 0xFF)) * 2f +
+                            (nw ushr 8 and 0xFF) + (ne ushr 8 and 0xFF) + (sw ushr 8 and 0xFF) + (se ushr 8 and 0xFF)
+                        ) / 12f
+                        val avgB = (
+                            ((n and 0xFF) + (s and 0xFF) + (l and 0xFF) + (r and 0xFF)) * 2f +
+                            (nw and 0xFF) + (ne and 0xFF) + (sw and 0xFF) + (se and 0xFF)
+                        ) / 12f
 
-                    val w = 0.35f
-                    val fr = (((c ushr 16 and 0xFF) * (1f - w)) + avgR * w).toInt().coerceIn(0, 255)
-                    val fg = (((c ushr 8 and 0xFF) * (1f - w)) + avgG * w).toInt().coerceIn(0, 255)
-                    val fb = (((c and 0xFF) * (1f - w)) + avgB * w).toInt().coerceIn(0, 255)
-                    out[idx] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
+                        val edgePeak = 1f - abs(a - 0.43f) / 0.43f
+                        val w = (baseW * (0.65f + 0.35f * edgePeak.coerceIn(0f, 1f)) * (1f - innerFaceProtectMask[idx])).coerceIn(0f, 0.55f)
+                        val fr = (((c ushr 16 and 0xFF) * (1f - w)) + avgR * w).toInt().coerceIn(0, 255)
+                        val fg = (((c ushr 8 and 0xFF) * (1f - w)) + avgG * w).toInt().coerceIn(0, 255)
+                        val fb = (((c and 0xFF) * (1f - w)) + avgB * w).toInt().coerceIn(0, 255)
+                        next[idx] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
+                    }
                 }
             }
+            current = next
         }
+
         val outBmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        outBmp.setPixels(out, 0, size, 0, 0, size, size)
+        outBmp.setPixels(current, 0, size, 0, 0, size, size)
         return outBmp
     }
 }

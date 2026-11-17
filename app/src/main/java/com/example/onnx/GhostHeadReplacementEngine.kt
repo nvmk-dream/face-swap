@@ -51,7 +51,7 @@ object GhostHeadReplacementEngine {
         preloadedEmap512x512: FloatArray? = null,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
-        headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_DIFFUSION,
+        headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
