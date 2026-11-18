@@ -45,12 +45,35 @@ data class InstalledSdInpaintPack(
             unetOnnx.exists() && unetOnnx.length() > 1024L &&
             vaeEncoderOnnx.exists() && vaeEncoderOnnx.length() > 1024L &&
             vaeDecoderOnnx.exists() && vaeDecoderOnnx.length() > 1024L
+
+    val hasTokenizer: Boolean
+        get() = SdInpaintPackManager.hasTokenizerFiles(tokenizerDir)
+
+    val isReadyWithTokenizer: Boolean
+        get() = isComplete && hasTokenizer
 }
+
+data class ClipTokenizerStatus(
+    val hasVocabJson: Boolean = false,
+    val hasMergesTxt: Boolean = false,
+    val hasTokenizerJson: Boolean = false,
+    val isReady: Boolean = false,
+    val activeSourceLabel: String = "Missing"
+)
+
+data class ClipTokenizerImportResult(
+    val importedFileNames: List<String>,
+    val skippedFileNames: List<String>,
+    val status: ClipTokenizerStatus,
+    val tokenizerVerifiedLoaded: Boolean
+)
 
 object SdInpaintPackManager {
 
     private const val SD_INPAINT_ROOT = "sd_inpaint"
+    private const val SHARED_TOKENIZER_DIR = "_shared_tokenizer"
     private val COMPONENT_DIRS = setOf("unet", "text_encoder", "vae_encoder", "vae_decoder")
+    private val TOKENIZER_FOLDER_NAMES = setOf("tokenizer", "clip_tokenizer", "tokenizer_1", "tokenizer_2")
     private val TOKENIZER_FILES = setOf(
         "vocab.json",
         "merges.txt",
@@ -62,6 +85,12 @@ object SdInpaintPackManager {
     fun getSdInpaintRootDir(context: Context): File {
         val modelsRoot = OnnxProtobufInspector.getModelsRootDir(context)
         return File(modelsRoot, SD_INPAINT_ROOT).apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    fun getSharedTokenizerDir(context: Context): File {
+        return File(getSdInpaintRootDir(context), SHARED_TOKENIZER_DIR).apply {
             if (!exists()) mkdirs()
         }
     }
@@ -101,8 +130,15 @@ object SdInpaintPackManager {
      */
     fun discoverInstalledPacks(context: Context): List<InstalledSdInpaintPack> {
         val root = getSdInpaintRootDir(context)
+        val sharedTokDir = getSharedTokenizerDir(context)
         val packs = mutableListOf<InstalledSdInpaintPack>()
-        val subDirs = root.listFiles()?.filter { it.isDirectory } ?: return emptyList()
+        val subDirs = root.listFiles()
+            ?.filter { it.isDirectory && !it.name.startsWith("_") }
+            ?: return emptyList()
+
+        val siblingTokenizerDir by lazy {
+            findAnyValidTokenizerDirUnderRoot(root)
+        }
 
         for (dir in subDirs) {
             runCatching {
@@ -114,8 +150,10 @@ object SdInpaintPackManager {
                 val vaeDec = selectBestOnnxInComponentDir(File(dir, "vae_decoder"), packType) ?: return@runCatching
                 val tokSub = File(dir, "tokenizer")
                 val tokDir = when {
-                    tokSub.exists() && tokSub.isDirectory && hasTokenizerFiles(tokSub) -> tokSub
+                    hasTokenizerFiles(tokSub) -> tokSub
                     hasTokenizerFiles(dir) -> dir
+                    hasTokenizerFiles(sharedTokDir) -> sharedTokDir
+                    siblingTokenizerDir != null -> siblingTokenizerDir
                     else -> tokSub.takeIf { it.exists() && it.isDirectory }
                 }
                 val totalBytes = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
@@ -136,6 +174,189 @@ object SdInpaintPackManager {
             }
         }
         return packs.sortedBy { it.packType.priorityOrder }
+    }
+
+    private fun findAnyValidTokenizerDirUnderRoot(root: File): File? {
+        val dirs = root.listFiles()?.filter { it.isDirectory && !it.name.startsWith("_") }.orEmpty()
+        for (d in dirs) {
+            val sub = File(d, "tokenizer")
+            if (hasTokenizerFiles(sub)) return sub
+            if (hasTokenizerFiles(d)) return d
+        }
+        return null
+    }
+
+    fun inspectClipTokenizerStatus(context: Context): ClipTokenizerStatus {
+        val root = getSdInpaintRootDir(context)
+        val sharedDir = getSharedTokenizerDir(context)
+        val candidateDirs = buildList {
+            add(sharedDir)
+            root.listFiles()
+                ?.filter { it.isDirectory && !it.name.startsWith("_") }
+                ?.forEach { packDir ->
+                    add(File(packDir, "tokenizer"))
+                    add(packDir)
+                }
+        }
+
+        // First look for a complete directory
+        for (dir in candidateDirs) {
+            if (hasTokenizerFiles(dir)) {
+                val hasVocab = File(dir, "vocab.json").let { it.exists() && it.length() > 16L }
+                val hasMerges = File(dir, "merges.txt").let { it.exists() && it.length() > 16L }
+                val hasTokJson = File(dir, "tokenizer.json").let { it.exists() && it.length() > 16L }
+                val source = when {
+                    dir == sharedDir -> "Shared CLIP Tokenizer"
+                    dir.name == "tokenizer" -> "${dir.parentFile?.name ?: "SD"}/tokenizer"
+                    else -> dir.name
+                }
+                return ClipTokenizerStatus(
+                    hasVocabJson = hasVocab,
+                    hasMergesTxt = hasMerges,
+                    hasTokenizerJson = hasTokJson,
+                    isReady = true,
+                    activeSourceLabel = source
+                )
+            }
+        }
+
+        // Aggregate partial files (e.g. vocab.json uploaded first, waiting for merges.txt)
+        var hasVocab = false
+        var hasMerges = false
+        var hasTokJson = false
+        for (dir in candidateDirs) {
+            if (!dir.exists() || !dir.isDirectory) continue
+            if (File(dir, "vocab.json").let { it.exists() && it.length() > 16L }) hasVocab = true
+            if (File(dir, "merges.txt").let { it.exists() && it.length() > 16L }) hasMerges = true
+            if (File(dir, "tokenizer.json").let { it.exists() && it.length() > 16L }) hasTokJson = true
+        }
+        val source = when {
+            hasVocab && !hasMerges && !hasTokJson -> "vocab.json ready — add merges.txt"
+            hasMerges && !hasVocab && !hasTokJson -> "merges.txt ready — add vocab.json"
+            else -> "Missing (vocab.json + merges.txt or tokenizer.json)"
+        }
+        return ClipTokenizerStatus(
+            hasVocabJson = hasVocab,
+            hasMergesTxt = hasMerges,
+            hasTokenizerJson = hasTokJson,
+            isReady = false,
+            activeSourceLabel = source
+        )
+    }
+
+    fun importTokenizerFilesFromUris(
+        context: Context,
+        uris: List<Uri>
+    ): Result<ClipTokenizerImportResult> {
+        if (uris.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No files selected."))
+        }
+        return runCatching {
+            val sharedDir = getSharedTokenizerDir(context)
+            val sdRoot = getSdInpaintRootDir(context)
+            val imported = mutableListOf<String>()
+            val skipped = mutableListOf<String>()
+
+            for (uri in uris) {
+                val rawName = queryAnyDisplayName(context, uri).orEmpty().trim()
+                val canonicalName = resolveCanonicalTokenizerFileName(context, uri, rawName)
+                if (canonicalName == null) {
+                    skipped.add(rawName.ifBlank { uri.lastPathSegment ?: "unknown" })
+                    continue
+                }
+                val destShared = File(sharedDir, canonicalName)
+                copyUriToFile(context, uri, destShared)
+                imported.add(canonicalName)
+
+                // Mirror to all installed SD pack tokenizer directories so every pack works standalone too
+                sdRoot.listFiles()
+                    ?.filter { it.isDirectory && !it.name.startsWith("_") }
+                    ?.forEach { packDir ->
+                        val tokDir = File(packDir, "tokenizer").apply { if (!exists()) mkdirs() }
+                        val target = File(tokDir, canonicalName)
+                        runCatching { destShared.copyTo(target, overwrite = true) }
+                    }
+            }
+
+            if (imported.isEmpty()) {
+                error(
+                    "Selected files (${skipped.joinToString()}) are not CLIP tokenizer files. " +
+                        "Please select vocab.json + merges.txt (or tokenizer.json)."
+                )
+            }
+
+            val status = inspectClipTokenizerStatus(context)
+            val verifiedLoaded = if (status.isReady) {
+                ClipBpeTokenizer.loadFromDirectory(sharedDir).isLoaded()
+            } else {
+                false
+            }
+            ClipTokenizerImportResult(
+                importedFileNames = imported.distinct(),
+                skippedFileNames = skipped.distinct(),
+                status = status,
+                tokenizerVerifiedLoaded = verifiedLoaded
+            )
+        }
+    }
+
+    internal fun resolveCanonicalTokenizerFileName(
+        context: Context,
+        uri: Uri,
+        rawDisplayName: String
+    ): String? {
+        val lower = rawDisplayName.trim().lowercase()
+        when {
+            lower == "vocab.json" || Regex("^vocab(\\s*\\(\\d+\\)|[_-]\\d+)?\\.json$").matches(lower) ->
+                return "vocab.json"
+            lower == "merges.txt" || Regex("^merges(\\s*\\(\\d+\\)|[_-]\\d+)?\\.txt$").matches(lower) ->
+                return "merges.txt"
+            lower == "tokenizer_config.json" || lower.startsWith("tokenizer_config") ->
+                return "tokenizer_config.json"
+            lower == "special_tokens_map.json" || lower.startsWith("special_tokens_map") ->
+                return "special_tokens_map.json"
+            lower == "tokenizer.json" || Regex("^tokenizer(\\s*\\(\\d+\\)|[_-]\\d+)?\\.json$").matches(lower) ->
+                return "tokenizer.json"
+        }
+
+        // Content inspection fallback when Android/WhatsApp/Drive renames the document
+        val preview = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buf = ByteArray(4096)
+                val n = input.read(buf)
+                if (n > 0) String(buf, 0, n, Charsets.UTF_8) else ""
+            }.orEmpty()
+        }.getOrDefault("")
+        val trimmed = preview.trimStart()
+        if (trimmed.isEmpty()) return null
+
+        return when {
+            trimmed.startsWith("#version") -> "merges.txt"
+            trimmed.startsWith("{") && trimmed.contains("\"model\"") && trimmed.contains("\"vocab\"") ->
+                "tokenizer.json"
+            trimmed.startsWith("{") && (
+                trimmed.contains("\"<|startoftext|>\"") ||
+                    trimmed.contains("\"<|endoftext|>\"") ||
+                    (lower.endsWith(".json") && trimmed.contains("\"!\""))
+                ) -> "vocab.json"
+            !trimmed.startsWith("{") && !trimmed.startsWith("[") && lower.endsWith(".txt") &&
+                trimmed.lineSequence().take(5).any { it.contains(" ") } -> "merges.txt"
+            else -> null
+        }
+    }
+
+    private fun queryAnyDisplayName(context: Context, uri: Uri): String? {
+        return runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull()
     }
 
     fun resolvePackForOption(
@@ -385,7 +606,7 @@ object SdInpaintPackManager {
         val collectedFiles = mutableListOf<TreeNodeFile>()
 
         fun walk(parentDocId: String, pathSegments: List<String>, depth: Int) {
-            if (depth > 4) return
+            if (depth > 6) return
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
             val projection = arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -436,32 +657,69 @@ object SdInpaintPackManager {
         val packBuckets = mutableMapOf<PackBucketKey, MutableList<Pair<String, TreeNodeFile>>>()
 
         val rootTokenizerFiles = mutableMapOf<String, MutableList<TreeNodeFile>>()
+        val anyTokenizerFiles = mutableMapOf<String, TreeNodeFile>()
 
         for (file in collectedFiles) {
+            val lowerName = file.displayName.lowercase()
+            if (lowerName in TOKENIZER_FILES) {
+                anyTokenizerFiles.putIfAbsent(lowerName, file)
+            }
             val segs = file.parentSegments
             val compIdx = segs.indexOfLast {
                 val l = it.lowercase()
-                l in COMPONENT_DIRS || l == "tokenizer"
+                l in COMPONENT_DIRS || l in TOKENIZER_FOLDER_NAMES
             }
             if (compIdx >= 0) {
-                val compName = segs[compIdx].lowercase()
+                val rawCompName = segs[compIdx].lowercase()
+                val compName = if (rawCompName in TOKENIZER_FOLDER_NAMES) "tokenizer" else rawCompName
                 val packSegs = segs.take(compIdx)
                 val packFolderPath = if (packSegs.isEmpty()) "__root__" else packSegs.joinToString("/")
                 val packFolderName = packSegs.lastOrNull() ?: rootDocName.ifBlank { "sd_inpaint" }
-                val key = PackBucketKey(packFolderPath, packFolderName)
-                packBuckets.getOrPut(key) { mutableListOf() }.add(compName to file)
-            } else if (file.displayName.lowercase() in TOKENIZER_FILES) {
+                if (compName == "tokenizer" && packSegs.isEmpty()) {
+                    // Sibling tokenizer/ folder at selected root can serve packs in child folders too
+                    if (lowerName in TOKENIZER_FILES) {
+                        rootTokenizerFiles.getOrPut("__root__") { mutableListOf() }.add(file)
+                    }
+                } else {
+                    val key = PackBucketKey(packFolderPath, packFolderName)
+                    packBuckets.getOrPut(key) { mutableListOf() }.add(compName to file)
+                }
+            } else if (lowerName in TOKENIZER_FILES) {
                 val packFolderPath = if (segs.isEmpty()) "__root__" else segs.joinToString("/")
                 rootTokenizerFiles.getOrPut(packFolderPath) { mutableListOf() }.add(file)
             }
         }
 
-        // Attach root-level tokenizer files (vocab.json / merges.txt / tokenizer.json placed at pack root)
+        // Attach root/parent/fallback tokenizer files when a pack doesn't already have complete tokenizer files
         for ((key, list) in packBuckets) {
-            val hasTokAlready = list.any { it.first == "tokenizer" }
-            if (!hasTokAlready) {
-                rootTokenizerFiles[key.packFolderPath]?.forEach { node ->
-                    list.add("tokenizer" to node)
+            val existingTokNames = list.filter { it.first == "tokenizer" }.map { it.second.displayName.lowercase() }.toSet()
+            val hasCompleteTokAlready = "tokenizer.json" in existingTokNames ||
+                ("vocab.json" in existingTokNames && "merges.txt" in existingTokNames)
+            if (!hasCompleteTokAlready) {
+                val attached = mutableSetOf<String>().apply { addAll(existingTokNames) }
+                val candidateSources = buildList {
+                    rootTokenizerFiles[key.packFolderPath]?.let { addAll(it) }
+                    rootTokenizerFiles["__root__"]?.let { addAll(it) }
+                    addAll(anyTokenizerFiles.values)
+                }
+                for (node in candidateSources) {
+                    val lower = node.displayName.lowercase()
+                    if (lower in TOKENIZER_FILES && lower !in attached) {
+                        list.add("tokenizer" to node)
+                        attached.add(lower)
+                    }
+                }
+            }
+        }
+
+        // Even if only tokenizer files were present in the picked folder, copy them into _shared_tokenizer
+        if (anyTokenizerFiles.isNotEmpty()) {
+            val sharedDir = getSharedTokenizerDir(context)
+            anyTokenizerFiles.forEach { (name, node) ->
+                val destFile = File(sharedDir, name)
+                if (!destFile.exists() || (node.sizeBytes > 16L && destFile.length() != node.sizeBytes)) {
+                    val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, node.docId)
+                    runCatching { copyUriToFile(context, docUri, destFile) }
                 }
             }
         }
@@ -570,10 +828,14 @@ object SdInpaintPackManager {
         return result
     }
 
-    private fun hasTokenizerFiles(dir: File): Boolean {
-        if (!dir.exists() || !dir.isDirectory) return false
-        return File(dir, "tokenizer.json").exists() ||
-            (File(dir, "vocab.json").exists() && File(dir, "merges.txt").exists())
+    fun hasTokenizerFiles(dir: File?): Boolean {
+        if (dir == null || !dir.exists() || !dir.isDirectory) return false
+        val tokJson = File(dir, "tokenizer.json")
+        if (tokJson.exists() && tokJson.length() > 16L) return true
+        val vocabJson = File(dir, "vocab.json")
+        val mergesTxt = File(dir, "merges.txt")
+        return vocabJson.exists() && vocabJson.length() > 16L &&
+            mergesTxt.exists() && mergesTxt.length() > 16L
     }
 
     private fun queryDocDisplayName(context: Context, treeUri: Uri, docId: String): String? {

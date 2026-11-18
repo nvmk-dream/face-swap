@@ -34,6 +34,8 @@ import com.example.onnx.OnnxMemoryServiceState
 import com.example.onnx.OnnxModelInspection
 import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.OnnxRuntimeModelService
+import com.example.onnx.ClipTokenizerStatus
+import com.example.onnx.InstalledSdInpaintPack
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
@@ -173,6 +175,8 @@ data class FaceSwapUiState(
     val inpaintEngineLabel: String? = null,
     val inpaintModelOption: InpaintModelOption = InpaintModelOption.AUTO,
     val installedSdInpaintPacks: List<SdInpaintPackType> = emptyList(),
+    val installedSdPackDetails: List<InstalledSdInpaintPack> = emptyList(),
+    val clipTokenizerStatus: ClipTokenizerStatus = ClipTokenizerStatus(),
     val isLamaInpaintReady: Boolean = false,
     val inpaintModelLabel: String = "Coming Soon",
     val statusBannerMessage: String? = null,
@@ -557,26 +561,21 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     memoryServiceState = it.memoryServiceState.copy(isLoading = true)
                 )
             }
-            val (inspections, memState, sdPackTypes, lamaReady) = withContext(Dispatchers.IO) {
+            val (inspections, memState, packDetails, tokStatusAndLama) = withContext(Dispatchers.IO) {
                 val ctx = getApplication<Application>()
                 val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                 val mem = modelService.loadModelsIntoMemory(
                     preferHardwareAccel = _uiState.value.preferHardwareAcceleration,
                     lowMemoryMode = _uiState.value.lowMemoryMode
                 )
-                val packs = SdInpaintPackManager.discoverInstalledPacks(ctx).map { it.packType }
+                val details = SdInpaintPackManager.discoverInstalledPacks(ctx)
+                val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(ctx)
                 val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
                 val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
-                listOf(insp, mem, packs, hasLama)
-            }.let { list ->
-                @Suppress("UNCHECKED_CAST")
-                Quadruple(
-                    list[0] as List<OnnxModelInspection>,
-                    list[1] as OnnxMemoryServiceState,
-                    list[2] as List<SdInpaintPackType>,
-                    list[3] as Boolean
-                )
+                Quadruple(insp, mem, details, tokStatus to hasLama)
             }
+            val (tokStatus, lamaReady) = tokStatusAndLama
+            val sdPackTypes = packDetails.map { it.packType }
             val lamaFile = OnnxProtobufInspector.resolveModelFile(getApplication(), ModelSlot.INPAINTING)
             val resolvedOption = if (_uiState.value.inpaintModelOption == InpaintModelOption.AUTO) {
                 SdInpaintPackManager.determineDefaultModelOption(getApplication(), if (lamaReady) lamaFile else null)
@@ -593,6 +592,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     modelInspections = inspections,
                     memoryServiceState = memState,
                     installedSdInpaintPacks = sdPackTypes,
+                    installedSdPackDetails = packDetails,
+                    clipTokenizerStatus = tokStatus,
                     isLamaInpaintReady = lamaReady,
                     inpaintModelOption = resolvedOption,
                     inpaintModelLabel = label,
@@ -718,6 +719,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     errorBannerMessage = null
                 )
             }
+            val prevTokReady = SdInpaintPackManager.inspectClipTokenizerStatus(getApplication()).isReady
             val result = withContext(Dispatchers.IO) {
                 OnnxProtobufInspector.importAllModelsFromTreeUri(
                     context = getApplication(),
@@ -733,17 +735,20 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             result.fold(
                 onSuccess = { importedSlots ->
                     val ctx = getApplication<Application>()
-                    val (inspections, memState, sdPackTypes, lamaFile) = withContext(Dispatchers.IO) {
+                    val (inspections, memState, packDetails, tokAndLama) = withContext(Dispatchers.IO) {
                         OnnxProtobufInspector.clearCachedSessions()
                         val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                         val mem = modelService.loadModelsIntoMemory(
                             preferHardwareAccel = _uiState.value.preferHardwareAcceleration,
                             lowMemoryMode = _uiState.value.lowMemoryMode
                         )
-                        val packs = SdInpaintPackManager.discoverInstalledPacks(ctx).map { it.packType }
+                        val details = SdInpaintPackManager.discoverInstalledPacks(ctx)
+                        val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(ctx)
                         val lama = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
-                        Quadruple(insp, mem, packs, lama)
+                        Quadruple(insp, mem, details, tokStatus to lama)
                     }
+                    val (tokStatus, lamaFile) = tokAndLama
+                    val sdPackTypes = packDetails.map { it.packType }
                     val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
                     val defaultOpt = SdInpaintPackManager.determineDefaultModelOption(ctx, if (hasLama) lamaFile else null)
                     val label = SdInpaintPackManager.formatDropdownLabel(ctx, defaultOpt, if (hasLama) lamaFile else null)
@@ -755,6 +760,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         sdPackTypes.forEach { packType ->
                             add(packType.displayLabel)
                         }
+                        if (tokStatus.isReady && !prevTokReady) {
+                            add("CLIP Tokenizer")
+                        }
                     }
 
                     _uiState.update {
@@ -762,6 +770,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             modelInspections = inspections,
                             memoryServiceState = memState,
                             installedSdInpaintPacks = sdPackTypes,
+                            installedSdPackDetails = packDetails,
+                            clipTokenizerStatus = tokStatus,
                             isLamaInpaintReady = hasLama,
                             inpaintModelOption = defaultOpt,
                             inpaintModelLabel = label,
@@ -774,7 +784,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                 null
                             },
                             errorBannerMessage = if (importedNames.isEmpty()) {
-                                "No matching .onnx models or SD 1.5 Inpaint folders (fp16 / int8) found in selected folder."
+                                "No matching .onnx models, SD 1.5 Inpaint folders, or CLIP tokenizer files found in selected folder."
                             } else {
                                 null
                             }
@@ -792,6 +802,64 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             memoryServiceState = it.memoryServiceState.copy(isLoading = false),
                             statusBannerMessage = null,
                             errorBannerMessage = "Folder scan failed: ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun importClipTokenizerFiles(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isInspectingModels = true,
+                    statusBannerMessage = "Importing CLIP tokenizer files (vocab.json / merges.txt / tokenizer.json)...",
+                    errorBannerMessage = null
+                )
+            }
+            val result = withContext(Dispatchers.IO) {
+                SdInpaintPackManager.importTokenizerFilesFromUris(getApplication(), uris)
+            }
+            result.fold(
+                onSuccess = { importRes ->
+                    val ctx = getApplication<Application>()
+                    val (packDetails, lamaFile) = withContext(Dispatchers.IO) {
+                        SdInpaintPackManager.discoverInstalledPacks(ctx) to
+                            OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+                    }
+                    val sdPackTypes = packDetails.map { it.packType }
+                    val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
+                    val currentOpt = _uiState.value.inpaintModelOption
+                    val label = SdInpaintPackManager.formatDropdownLabel(ctx, currentOpt, if (hasLama) lamaFile else null)
+                    val msg = if (importRes.status.isReady) {
+                        if (importRes.tokenizerVerifiedLoaded) {
+                            "✓ CLIP Tokenizer Ready (${importRes.importedFileNames.joinToString()}). SD 1.5 Inpaint is ready!"
+                        } else {
+                            "Saved ${importRes.importedFileNames.joinToString()}, but tokenizer JSON/merges verification failed. Please re-check file format."
+                        }
+                    } else {
+                        "Saved ${importRes.importedFileNames.joinToString()} — ${importRes.status.activeSourceLabel}"
+                    }
+                    _uiState.update {
+                        it.copy(
+                            installedSdInpaintPacks = sdPackTypes,
+                            installedSdPackDetails = packDetails,
+                            clipTokenizerStatus = importRes.status,
+                            inpaintModelLabel = label,
+                            isInspectingModels = false,
+                            statusBannerMessage = if (!importRes.status.isReady || importRes.tokenizerVerifiedLoaded) msg else null,
+                            errorBannerMessage = if (importRes.status.isReady && !importRes.tokenizerVerifiedLoaded) msg else null
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isInspectingModels = false,
+                            statusBannerMessage = null,
+                            errorBannerMessage = err.message ?: "CLIP tokenizer upload failed."
                         )
                     }
                 }

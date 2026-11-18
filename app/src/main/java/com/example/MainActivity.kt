@@ -214,6 +214,22 @@ fun FaceSwapStudioApp(
         }
     }
 
+    val clipTokenizerPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
+            viewModel.importClipTokenizerFiles(uris)
+        }
+    }
+
     // Mobile Memory -> Folder photo picker exclusively for Inpaint Source Image
     val inpaintSourceFolderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -629,6 +645,9 @@ fun FaceSwapStudioApp(
                         inpaintSourceFolderPicker.launch(arrayOf("image/*"))
                     },
                     onSelectInpaintModelOption = viewModel::selectInpaintModelOption,
+                    onUploadClipTokenizer = {
+                        clipTokenizerPicker.launch(arrayOf("application/json", "text/plain", "*/*"))
+                    },
                     onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
                     onInpaintPromptChanged = viewModel::setInpaintPrompt,
                     onInpaintNegativePromptChanged = viewModel::setInpaintNegativePrompt,
@@ -677,6 +696,8 @@ fun FaceSwapStudioApp(
                     isInspecting = uiState.isInspectingModels,
                     memoryServiceState = uiState.memoryServiceState,
                     segformerAutoSelectedForAccessory = uiState.segformerAutoSelectedForAccessory,
+                    sdPackDetails = uiState.installedSdPackDetails,
+                    clipTokenizerStatus = uiState.clipTokenizerStatus,
                     onImportModelForSlot = { slot ->
                         pendingImportSlot = slot
                         onnxDocumentPicker.launch(arrayOf("*/*"))
@@ -684,6 +705,9 @@ fun FaceSwapStudioApp(
                     onRefreshModels = viewModel::refreshModelInspections,
                     onImportAllFromFolder = {
                         onnxFolderTreePicker.launch(null)
+                    },
+                    onUploadClipTokenizer = {
+                        clipTokenizerPicker.launch(arrayOf("application/json", "text/plain", "*/*"))
                     },
                     onPreloadMemoryModels = viewModel::preloadModelsIntoMemory,
                     onReleaseMemoryModels = viewModel::releaseModelsFromMemory

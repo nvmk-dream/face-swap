@@ -40,7 +40,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.UploadFile
+import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.GhostComponentFeasibility
+import com.example.onnx.InstalledSdInpaintPack
 import com.example.onnx.ModelRequirementLevel
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxModelInspection
@@ -59,9 +65,12 @@ fun ModelsInspectorTab(
     isInspecting: Boolean,
     memoryServiceState: OnnxMemoryServiceState = OnnxMemoryServiceState(),
     segformerAutoSelectedForAccessory: Boolean = false,
+    sdPackDetails: List<InstalledSdInpaintPack> = emptyList(),
+    clipTokenizerStatus: ClipTokenizerStatus = ClipTokenizerStatus(),
     onImportModelForSlot: (ModelSlot) -> Unit,
     onRefreshModels: () -> Unit,
     onImportAllFromFolder: () -> Unit = {},
+    onUploadClipTokenizer: () -> Unit = {},
     onPreloadMemoryModels: () -> Unit = {},
     onReleaseMemoryModels: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -333,7 +342,16 @@ fun ModelsInspectorTab(
                 }
             }
 
-            // 2. Installed vs Missing Model Slots
+            // 2. SD 1.5 Inpaint Packs & CLIP Tokenizer Card (Direct Upload Option)
+            SdInpaintAndTokenizerCard(
+                sdPackDetails = sdPackDetails,
+                clipTokenizerStatus = clipTokenizerStatus,
+                isBusy = isInspecting,
+                onUploadClipTokenizer = onUploadClipTokenizer,
+                onImportSdFolder = onImportAllFromFolder
+            )
+
+            // 3. Installed vs Missing Model Slots
             Text(
                 text = "On-Device ONNX Model Slots • ஒவ்வொரு மாடலின் பணி (தமிழில்)",
                 style = MaterialTheme.typography.titleMedium,
@@ -697,6 +715,217 @@ private fun MemorySlotRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun SdInpaintAndTokenizerCard(
+    sdPackDetails: List<InstalledSdInpaintPack>,
+    clipTokenizerStatus: ClipTokenizerStatus,
+    isBusy: Boolean,
+    onUploadClipTokenizer: () -> Unit,
+    onImportSdFolder: () -> Unit
+) {
+    val isTokenizerReady = clipTokenizerStatus.isReady
+    val cardBorder = if (isTokenizerReady) Color(0xFF10B981) else Color(0xFFF59E0B)
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("sd_inpaint_tokenizer_card"),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.4.dp, cardBorder.copy(alpha = 0.7f)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xF2FFFFFF))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isTokenizerReady) Icons.Default.CheckCircle else Icons.Default.WarningAmber,
+                        contentDescription = "CLIP Tokenizer Status",
+                        tint = if (isTokenizerReady) Color(0xFF059669) else Color(0xFFD97706),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Text(
+                        text = "SD 1.5 Inpaint & CLIP Tokenizer",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF0F172A)
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (isTokenizerReady) Color(0xFFDCFCE7) else Color(0xFFFEF3C7)
+                ) {
+                    Text(
+                        text = if (isTokenizerReady) "Tokenizer Ready ✓" else "Tokenizer Missing",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isTokenizerReady) Color(0xFF065F46) else Color(0xFF92400E),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = "SD 1.5 Inpaint (FP32 / INT8 / FP16) மற்றும் Head Replacement Stage 5-க்கு OpenAI CLIP BPE Tokenizer (vocab.json + merges.txt அல்லது tokenizer.json) தேவை. ஒருமுறை upload செய்தால் எல்லா SD மாடல்களுக்கும் வேலை செய்யும்.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF334155)
+            )
+
+            // Tokenizer File Chips
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TokenizerFileBadge(
+                    name = "vocab.json",
+                    present = clipTokenizerStatus.hasVocabJson
+                )
+                TokenizerFileBadge(
+                    name = "merges.txt",
+                    present = clipTokenizerStatus.hasMergesTxt
+                )
+                TokenizerFileBadge(
+                    name = "tokenizer.json (Alt)",
+                    present = clipTokenizerStatus.hasTokenizerJson,
+                    optionalIfPairReady = clipTokenizerStatus.hasVocabJson && clipTokenizerStatus.hasMergesTxt
+                )
+            }
+
+            if (sdPackDetails.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFFF1F5F9))
+                        .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(10.dp))
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Installed SD Inpaint Packs (${sdPackDetails.size}):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0F172A)
+                    )
+                    sdPackDetails.forEach { pack ->
+                        val sizeMb = "%.1f MB".format(pack.totalSizeBytes / (1024.0 * 1024.0))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "• ${pack.packType.displayLabel} ($sizeMb)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFF1E293B),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = if (pack.isReadyWithTokenizer) "✓ Ready" else "⚠️ Tokenizer Missing",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (pack.isReadyWithTokenizer) Color(0xFF059669) else Color(0xFFB45309)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onUploadClipTokenizer,
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("upload_clip_tokenizer_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.UploadFile,
+                        contentDescription = "Upload CLIP Tokenizer Files",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (isTokenizerReady) {
+                            "Update vocab.json / merges.txt"
+                        } else {
+                            "Upload CLIP Tokenizer"
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                OutlinedButton(
+                    onClick = onImportSdFolder,
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("import_sd_folder_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = "Import SD Folder",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("SD Folder", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TokenizerFileBadge(
+    name: String,
+    present: Boolean,
+    optionalIfPairReady: Boolean = false
+) {
+    val bg = when {
+        present -> Color(0xFFDCFCE7)
+        optionalIfPairReady -> Color(0xFFF1F5F9)
+        else -> Color(0xFFFEE2E2)
+    }
+    val fg = when {
+        present -> Color(0xFF065F46)
+        optionalIfPairReady -> Color(0xFF475569)
+        else -> Color(0xFF991B1B)
+    }
+    val prefix = when {
+        present -> "✓ "
+        optionalIfPairReady -> "○ "
+        else -> "✗ "
+    }
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = bg,
+        border = BorderStroke(1.dp, fg.copy(alpha = 0.35f))
+    ) {
+        Text(
+            text = "$prefix$name",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = fg,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+        )
     }
 }
 

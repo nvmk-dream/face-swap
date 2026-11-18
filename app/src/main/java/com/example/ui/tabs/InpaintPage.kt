@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -33,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Compare
@@ -45,7 +47,9 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Diamond
 import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -86,6 +90,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.R
 import com.example.onnx.AccessoryTarget
+import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackType
@@ -136,6 +141,7 @@ fun InpaintPage(
     onPickSourceFromFolder: () -> Unit,
     onSelectModelOption: (InpaintModelOption) -> Unit,
     onImportModelFolder: () -> Unit,
+    onUploadClipTokenizer: () -> Unit = {},
     onMaskUpdated: (Bitmap?) -> Unit,
     onPromptChanged: (String) -> Unit,
     onNegativePromptChanged: (String) -> Unit = {},
@@ -446,6 +452,32 @@ fun InpaintPage(
                                     onImportModelFolder()
                                 }
                             )
+                            DropdownMenuItem(
+                                modifier = Modifier.testTag("inpaint_dropdown_upload_tokenizer"),
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoFixHigh,
+                                        contentDescription = "Upload CLIP Tokenizer",
+                                        tint = Color(0xFF7C3AED)
+                                    )
+                                },
+                                text = {
+                                    Text(
+                                        text = if (uiState.clipTokenizerStatus.isReady) {
+                                            "CLIP Tokenizer Ready ✓ (Update)"
+                                        } else {
+                                            "Upload CLIP Tokenizer (vocab / merges)"
+                                        },
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (uiState.clipTokenizerStatus.isReady) Color(0xFF059669) else Color(0xFF7C3AED),
+                                        fontSize = 13.sp
+                                    )
+                                },
+                                onClick = {
+                                    showModelDropdown = false
+                                    onUploadClipTokenizer()
+                                }
+                            )
                         }
                     }
 
@@ -566,6 +598,16 @@ fun InpaintPage(
                         }
                     }
                 }
+            }
+
+            val usesSdPack = uiState.installedSdInpaintPacks.isNotEmpty() &&
+                uiState.inpaintModelOption != InpaintModelOption.LAMA_ONNX &&
+                uiState.inpaintModelOption != InpaintModelOption.CV_FALLBACK
+            if (usesSdPack && !uiState.clipTokenizerStatus.isReady) {
+                InpaintMissingTokenizerBanner(
+                    tokenizerStatus = uiState.clipTokenizerStatus,
+                    onUploadTokenizer = onUploadClipTokenizer
+                )
             }
 
             // Diffusion Tuning Card (Strength 1..10 & CFG 1..15) directly above Prompt
@@ -1768,6 +1810,79 @@ private fun CleanTuningSliderRow(
                 .clickable(onClick = onResetDefault)
                 .testTag(valueTag)
         )
+    }
+}
+
+@Composable
+internal fun InpaintMissingTokenizerBanner(
+    tokenizerStatus: ClipTokenizerStatus,
+    onUploadTokenizer: () -> Unit
+) {
+    val missingHint = when {
+        tokenizerStatus.hasVocabJson && !tokenizerStatus.hasMergesTxt ->
+            "vocab.json ✓ உள்ளது — இப்போது merges.txt upload செய்யவும்."
+        !tokenizerStatus.hasVocabJson && tokenizerStatus.hasMergesTxt ->
+            "merges.txt ✓ உள்ளது — இப்போது vocab.json upload செய்யவும்."
+        else ->
+            "SD 1.5-க்கு CLIP Tokenizer (vocab.json + merges.txt அல்லது tokenizer.json) தேவை."
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xFFFFFBEB))
+            .border(1.4.dp, Color(0xFFF59E0B), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .testTag("inpaint_missing_tokenizer_banner"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.WarningAmber,
+                contentDescription = "Missing CLIP Tokenizer",
+                tint = Color(0xFFD97706),
+                modifier = Modifier.size(20.dp)
+            )
+            Text(
+                text = "CLIP Tokenizer Missing",
+                color = Color(0xFF92400E),
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 14.sp
+            )
+        }
+        Text(
+            text = missingHint,
+            color = Color(0xFF78350F),
+            fontSize = 12.5.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Button(
+            onClick = onUploadTokenizer,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .testTag("inpaint_upload_tokenizer_btn"),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF7C3AED),
+                contentColor = Color.White
+            )
+        ) {
+            Icon(
+                imageVector = Icons.Default.UploadFile,
+                contentDescription = "Upload CLIP Tokenizer Files",
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "Upload vocab.json + merges.txt / tokenizer.json",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp
+            )
+        }
     }
 }
 

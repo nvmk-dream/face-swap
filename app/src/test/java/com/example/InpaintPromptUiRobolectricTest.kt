@@ -11,9 +11,12 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.ui.tabs.FullScreenPromptEditorDialog
+import com.example.ui.tabs.InpaintMissingTokenizerBanner
 import com.example.ui.tabs.InpaintProgressCancelContent
+import com.example.ui.tabs.SdInpaintAndTokenizerCard
 import com.example.ui.theme.MyApplicationTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -130,5 +133,52 @@ class InpaintPromptUiRobolectricTest {
             .performClick()
 
         assertTrue(cancelledClicked)
+    }
+
+    @Test
+    fun settingsTokenizerCard_andInpaintBanner_renderAndTriggerUploadCallback() {
+        var settingsUploadClicked = false
+        var inpaintBannerUploadClicked = false
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                androidx.compose.foundation.layout.Column {
+                    SdInpaintAndTokenizerCard(
+                        sdPackDetails = emptyList(),
+                        clipTokenizerStatus = ClipTokenizerStatus(
+                            hasVocabJson = true,
+                            hasMergesTxt = false,
+                            hasTokenizerJson = false,
+                            isReady = false,
+                            activeSourceLabel = "vocab.json ready — add merges.txt"
+                        ),
+                        isBusy = false,
+                        onUploadClipTokenizer = { settingsUploadClicked = true },
+                        onImportSdFolder = {}
+                    )
+                    InpaintMissingTokenizerBanner(
+                        tokenizerStatus = ClipTokenizerStatus(
+                            hasVocabJson = true,
+                            hasMergesTxt = false,
+                            hasTokenizerJson = false,
+                            isReady = false
+                        ),
+                        onUploadTokenizer = { inpaintBannerUploadClicked = true }
+                    )
+                }
+            }
+        }
+
+        composeTestRule.onNodeWithTag("sd_inpaint_tokenizer_card").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("upload_clip_tokenizer_button")
+            .assertIsDisplayed()
+            .performClick()
+        assertTrue(settingsUploadClicked)
+
+        composeTestRule.onNodeWithTag("inpaint_missing_tokenizer_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("inpaint_upload_tokenizer_btn")
+            .assertIsDisplayed()
+            .performClick()
+        assertTrue(inpaintBannerUploadClicked)
     }
 }

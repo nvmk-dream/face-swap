@@ -23,6 +23,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import android.net.Uri
 import java.io.File
 import java.util.concurrent.CancellationException
 
@@ -198,5 +199,67 @@ class InpaintFailurePathRobolectricTest {
         // Must preserve user's explicit LAMA_ONNX choice instead of silently overriding to SD15
         assertEquals(InpaintModelOption.LAMA_ONNX, vm.uiState.value.inpaintModelOption)
         assertTrue(vm.uiState.value.segformerAutoSelectedForAccessory)
+    }
+
+    @Test
+    fun sharedClipTokenizer_andIndividualFileImport_resolvesAcrossAllSdPacksAndValidates() {
+        val root = SdInpaintPackManager.getSdInpaintRootDir(context)
+        root.deleteRecursively()
+
+        listOf(SdInpaintPackType.SD15_FP16, SdInpaintPackType.REALVIS_INT8).forEach { pt ->
+            val packDir = File(root, pt.id)
+            listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
+                val cDir = File(packDir, comp).apply { mkdirs() }
+                File(cDir, "model.onnx").writeBytes(ByteArray(2048) { 9 })
+            }
+        }
+
+        val beforeStatus = SdInpaintPackManager.inspectClipTokenizerStatus(context)
+        assertFalse(beforeStatus.isReady)
+        val packsBefore = SdInpaintPackManager.discoverInstalledPacks(context)
+        assertEquals(2, packsBefore.size)
+        assertTrue(packsBefore.all { !it.hasTokenizer && !it.isReadyWithTokenizer })
+
+        // Prepare minimal valid CLIP vocab.json (>16 entries) and merges.txt, including browser "(1)" suffix
+        val tmpPickDir = File(context.cacheDir, "pick_tok_test").apply { deleteRecursively(); mkdirs() }
+        val vocabJson = buildString {
+            append("{")
+            append("\"<|startoftext|>\":49406,\"<|endoftext|>\":49407")
+            val words = listOf("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "red</w>", "silk</w>", "saree</w>")
+            words.forEachIndexed { idx, w -> append(",\"$w\":$idx") }
+            append("}")
+        }
+        val vocabFile = File(tmpPickDir, "vocab (1).json").apply { writeText(vocabJson) }
+        val mergesFile = File(tmpPickDir, "merges.txt").apply {
+            writeText("#version: 0.2\ns i\nsi l\nsil k</w>\nr e\nre d</w>\n")
+        }
+        val unrelatedFile = File(tmpPickDir, "notes.txt").apply { writeText("hello world") }
+
+        // Reject unrelated file clearly
+        val badRes = SdInpaintPackManager.importTokenizerFilesFromUris(
+            context,
+            listOf(Uri.fromFile(unrelatedFile))
+        )
+        assertTrue(badRes.isFailure)
+
+        // Import vocab (1).json + merges.txt
+        val goodRes = SdInpaintPackManager.importTokenizerFilesFromUris(
+            context,
+            listOf(Uri.fromFile(vocabFile), Uri.fromFile(mergesFile))
+        )
+        assertTrue(goodRes.isSuccess)
+        val importRes = goodRes.getOrThrow()
+        assertTrue(importRes.status.isReady)
+        assertTrue(importRes.status.hasVocabJson)
+        assertTrue(importRes.status.hasMergesTxt)
+        assertTrue(importRes.tokenizerVerifiedLoaded)
+
+        // Both FP16 and INT8 packs must now resolve the tokenizer automatically
+        val packsAfter = SdInpaintPackManager.discoverInstalledPacks(context)
+        assertEquals(2, packsAfter.size)
+        assertTrue(packsAfter.all { it.hasTokenizer && it.isReadyWithTokenizer })
+        packsAfter.forEach { p ->
+            assertTrue(ClipBpeTokenizer.loadFromDirectory(p.tokenizerDir).isLoaded())
+        }
     }
 }
