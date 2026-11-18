@@ -39,13 +39,11 @@ class ProcessingForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         activeInstance = this
-        serviceActive = true
         ensureChannels(this)
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "FaceSwap Studio Running"
         val detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Processing image offline in background..."
         val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
 
-        acquireOrRenewCpuWakeLock(forceRenew = false)
         val notification = buildOngoingNotification(this, title, detail, progress)
         val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -55,6 +53,18 @@ class ProcessingForegroundService : Service() {
         runCatching {
             ServiceCompat.startForeground(this, ONGOING_NOTIFICATION_ID, notification, serviceType)
         }
+        if (pendingStopRequested) {
+            pendingStopRequested = false
+            serviceActive = false
+            releaseCpuWakeLock()
+            runCatching {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            }
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        serviceActive = true
+        acquireOrRenewCpuWakeLock(forceRenew = false)
         return START_NOT_STICKY
     }
 
@@ -127,6 +137,9 @@ class ProcessingForegroundService : Service() {
         @Volatile
         private var lastOngoingNotifyAtMs = 0L
 
+        @Volatile
+        private var pendingStopRequested = false
+
         fun startOrUpdate(
             context: Context,
             title: String,
@@ -134,6 +147,7 @@ class ProcessingForegroundService : Service() {
             progressPercent: Int = -1
         ) {
             val appCtx = context.applicationContext
+            pendingStopRequested = false
             ensureChannels(appCtx)
             val now = android.os.SystemClock.elapsedRealtime()
             activeInstance?.acquireOrRenewCpuWakeLock(forceRenew = false)
@@ -176,6 +190,7 @@ class ProcessingForegroundService : Service() {
             completedBody: String
         ) {
             val appCtx = context.applicationContext
+            pendingStopRequested = true
             serviceActive = false
             startRequestedAtMs = 0L
             lastOngoingNotifyAtMs = 0L

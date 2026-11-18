@@ -56,4 +56,15 @@ object BackgroundProcessingCoordinator {
     fun clearInpaintResult() {
         _inpaintSync.value = BackgroundInpaintSync()
     }
+
+    fun clearTransientMessages() {
+        _inpaintSync.update {
+            if (it.isRunning) it.copy(errorMessage = null, statusMessage = null)
+            else BackgroundInpaintSync()
+        }
+        _swapSync.update {
+            if (it.isRunning) it.copy(errorMessage = null, statusMessage = null)
+            else it.copy(errorMessage = null, statusMessage = null)
+        }
+    }
 }

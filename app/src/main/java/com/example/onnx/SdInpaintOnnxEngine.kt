@@ -269,7 +269,7 @@ object SdInpaintOnnxEngine {
         val clampedCfg = guidanceScale.coerceIn(1.0f, 15.0f)
         val initialRamInfo = queryAvailableRamInfo(context)
         val effectiveMaxDimPx = when {
-            initialRamInfo != null && (initialRamInfo.second || initialRamInfo.first < 2200L) ->
+            initialRamInfo != null && (initialRamInfo.second || initialRamInfo.first < 1200L) ->
                 min(maxPreferredResolutionPx, 384)
             fastMode -> min(maxPreferredResolutionPx, BASE_SD_RES)
             else -> maxPreferredResolutionPx
@@ -330,8 +330,9 @@ object SdInpaintOnnxEngine {
 
         checkCancel()
         fun encodeAndDenoiseToLatent(): DenoisedLatentStageResult {
-            val effectivePrompt = prompt.trim().ifEmpty { "clean natural texture, high quality photo" }
-            val effectiveNegative = negativePrompt.trim().ifEmpty { DEFAULT_NEGATIVE_PROMPT }
+            val normalizedPrompt = normalizePromptForClip(prompt)
+            val effectivePrompt = normalizedPrompt.ifEmpty { "clean natural texture, high quality photo" }
+            val effectiveNegative = normalizePromptForClip(negativePrompt).ifEmpty { DEFAULT_NEGATIVE_PROMPT }
             onProgress("1/4 Encoding positive & negative prompts (${pack.packType.displayLabel})...")
 
             // 1. CLIP Text Encoder -> uncond & cond embeddings [77, 768] (close immediately after use to save RAM)
@@ -340,7 +341,7 @@ object SdInpaintOnnxEngine {
                 "tokenizerLoaded=${tokenizer.isLoaded()} vocabSize=${tokenizer.vocabSize} " +
                     "tokDir=${pack.tokenizerDir?.absolutePath} neg=\"$effectiveNegative\""
             )
-            if (prompt.trim().isNotEmpty() && !tokenizer.isLoaded()) {
+            if (normalizedPrompt.isNotEmpty() && !tokenizer.isLoaded()) {
                 throw IllegalStateException(
                     "CLIP tokenizer files (vocab.json + merges.txt or tokenizer.json) are missing in ${pack.packType.displayLabel}. Re-import the SD Inpaint folder."
                 )
@@ -427,7 +428,7 @@ object SdInpaintOnnxEngine {
                     targetW = dims.width,
                     targetH = dims.height
                 )
-                val maskTarget = dilateBinaryMask(rawMaskTarget, dims.width, dims.height, radiusPx = 5)
+                val maskTarget = dilateBinaryMask(rawMaskTarget, dims.width, dims.height, radiusPx = 2)
                 onProgress("2/4 Encoding ${dims.width}×${dims.height} (${dims.latentW}×${dims.latentH} latent)...")
                 val mLatent = runVaeEncoder(
                     ortEnv = ortEnv,
@@ -865,7 +866,7 @@ object SdInpaintOnnxEngine {
                         sum += mask[row + dx]
                     }
                 }
-                out[ly * latentW + lx] = if ((sum / blockArea) >= 0.12f) 1.0f else 0.0f
+                out[ly * latentW + lx] = if ((sum / blockArea) >= 0.30f) 1.0f else 0.0f
             }
         }
         return out
@@ -1286,7 +1287,24 @@ object SdInpaintOnnxEngine {
         }
     }
 
-    private fun featherMask(mask: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+    internal fun normalizePromptForClip(rawPrompt: String): String {
+        val trimmed = rawPrompt.trim()
+        if (trimmed.isEmpty()) return ""
+        return trimmed.replace(
+            Regex("\\b(?:sharee|shari|saari|sari)s?\\b", RegexOption.IGNORE_CASE)
+        ) { match ->
+            if (match.value.endsWith("s", ignoreCase = true) && !match.value.equals("sari", ignoreCase = true)) {
+                "sarees"
+            } else {
+                "saree"
+            }
+        }
+    }
+
+    internal fun featherMask(mask: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+        if (radius <= 0) {
+            return FloatArray(mask.size) { i -> mask[i].coerceIn(0f, 1f) }
+        }
         val temp = FloatArray(w * h)
         val out = FloatArray(w * h)
         val denom = (2 * radius + 1).toFloat()
@@ -1307,7 +1325,13 @@ object SdInpaintOnnxEngine {
                 for (dy in -radius..radius) {
                     sum += temp[(y + dy).coerceIn(0, h - 1) * w + x]
                 }
-                out[rowOff + x] = max(mask[rowOff + x], sum / denom).coerceIn(0f, 1f)
+                val orig = mask[rowOff + x].coerceIn(0f, 1f)
+                // Strictly prevent outward bleed outside painted mask while feathering inner boundary
+                out[rowOff + x] = if (orig <= 0.05f) {
+                    0f
+                } else {
+                    min(orig, sum / denom).coerceIn(0f, 1f)
+                }
             }
         }
         return out
@@ -1352,8 +1376,10 @@ object SdInpaintOnnxEngine {
         return (sqrt(-2.0 * ln(u1)) * cos(2.0 * Math.PI * u2)).toFloat()
     }
 
-    private fun resolveTimestepShape(modelShape: LongArray?, batchSize: Int): LongArray {
+    internal fun resolveTimestepShape(modelShape: LongArray?, batchSize: Int): LongArray {
         if (modelShape == null || modelShape.isEmpty()) return longArrayOf()
+        val dim0 = modelShape[0]
+        if (dim0 > 0L) return longArrayOf(dim0)
         return longArrayOf(batchSize.toLong())
     }
 

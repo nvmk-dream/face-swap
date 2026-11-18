@@ -214,6 +214,8 @@ fun FaceSwapStudioApp(
         }
     }
 
+    var pendingSingleTokenizerHint by remember { mutableStateOf<String?>(null) }
+
     val clipTokenizerPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -227,6 +229,26 @@ fun FaceSwapStudioApp(
                 }
             }
             viewModel.importClipTokenizerFiles(uris)
+        } else {
+            viewModel.onTokenizerPickerCancelled()
+        }
+    }
+
+    val singleTokenizerPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val hint = pendingSingleTokenizerHint
+        pendingSingleTokenizerHint = null
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            viewModel.importClipTokenizerFiles(listOf(uri), expectedCanonicalHint = hint)
+        } else {
+            viewModel.onTokenizerPickerCancelled()
         }
     }
 
@@ -646,7 +668,11 @@ fun FaceSwapStudioApp(
                     },
                     onSelectInpaintModelOption = viewModel::selectInpaintModelOption,
                     onUploadClipTokenizer = {
-                        clipTokenizerPicker.launch(arrayOf("application/json", "text/plain", "*/*"))
+                        clipTokenizerPicker.launch(arrayOf("*/*"))
+                    },
+                    onUploadSingleTokenizerFile = { expectedName ->
+                        pendingSingleTokenizerHint = expectedName
+                        singleTokenizerPicker.launch(arrayOf("*/*"))
                     },
                     onInpaintMaskUpdated = viewModel::setInpaintMaskBitmap,
                     onInpaintPromptChanged = viewModel::setInpaintPrompt,
@@ -662,7 +688,12 @@ fun FaceSwapStudioApp(
                     onApplyAccessorySelectionAndExpand = viewModel::updateAccessorySelectionAndExpand,
                     onInpaintMaskAndPromptUpdated = viewModel::applyMaskWithOptionalPrompt,
                     onRunInpaint = {
-                        if (uiState.inpaintSourceBitmap != null && uiState.inpaintMaskBitmap != null) {
+                        if (uiState.inpaintSourceBitmap != null &&
+                            uiState.inpaintMaskBitmap != null &&
+                            (uiState.clipTokenizerStatus.isReady ||
+                                uiState.inpaintModelOption == com.example.onnx.InpaintModelOption.LAMA_ONNX ||
+                                uiState.inpaintModelOption == com.example.onnx.InpaintModelOption.CV_FALLBACK)
+                        ) {
                             ensureNotificationPermissionPromptOnce()
                         }
                         viewModel.runInpaint()
@@ -707,7 +738,11 @@ fun FaceSwapStudioApp(
                         onnxFolderTreePicker.launch(null)
                     },
                     onUploadClipTokenizer = {
-                        clipTokenizerPicker.launch(arrayOf("application/json", "text/plain", "*/*"))
+                        clipTokenizerPicker.launch(arrayOf("*/*"))
+                    },
+                    onUploadSingleTokenizerFile = { expectedName ->
+                        pendingSingleTokenizerHint = expectedName
+                        singleTokenizerPicker.launch(arrayOf("*/*"))
                     },
                     onPreloadMemoryModels = viewModel::preloadModelsIntoMemory,
                     onReleaseMemoryModels = viewModel::releaseModelsFromMemory

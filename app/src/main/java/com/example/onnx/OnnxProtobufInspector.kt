@@ -531,7 +531,7 @@ object OnnxProtobufInspector {
         val pendingRank = prefs.getInt(KEY_PENDING_RANK, -1)
         if (!pendingKey.isNullOrBlank() && pendingRank >= 0) {
             val prevMin = prefs.getInt("$PREFIX_MIN_RANK$pendingKey", 0)
-            val nextSafeRank = maxOf(prevMin, pendingRank + 1).coerceAtMost(RANK_QUARANTINED)
+            val nextSafeRank = maxOf(prevMin, pendingRank + 1).coerceAtMost(RANK_CPU_NO_OPT)
             prefs.edit()
                 .putInt("$PREFIX_MIN_RANK$pendingKey", nextSafeRank)
                 .remove(KEY_PENDING_MODEL)
@@ -545,7 +545,7 @@ object OnnxProtobufInspector {
         val ctx = context?.applicationContext ?: context ?: return 0
         val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return 0
         val key = buildCrashGuardModelKey(file)
-        return prefs.getInt("$PREFIX_MIN_RANK$key", 0).coerceIn(0, RANK_QUARANTINED)
+        return prefs.getInt("$PREFIX_MIN_RANK$key", 0).coerceIn(0, RANK_CPU_NO_OPT)
     }
 
     internal fun clearCrashGuardForFile(file: File, context: Context? = appContextRef) {
@@ -713,12 +713,7 @@ object OnnxProtobufInspector {
         intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     ): Pair<OrtSession, String> {
         val threads = intraOpThreads.coerceIn(1, 4)
-        val minSafeRank = getMinSafeRankForFile(modelFile)
-        if (minSafeRank >= RANK_QUARANTINED) {
-            throw IllegalStateException(
-                "Skipped ${modelFile.name}: previous native crash detected even in CPU(NO_OPT). Re-import the model to retry."
-            )
-        }
+        val minSafeRank = getMinSafeRankForFile(modelFile).coerceAtMost(RANK_CPU_NO_OPT)
 
         data class Attempt(
             val rank: Int,

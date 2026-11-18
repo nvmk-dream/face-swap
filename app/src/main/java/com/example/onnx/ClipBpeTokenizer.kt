@@ -132,18 +132,25 @@ class ClipBpeTokenizer private constructor(
         const val DEFAULT_EOS_TOKEN_ID = 49407
         private val WHITESPACE_REGEX = Regex("\\s+")
 
+        private fun stripUtf8Bom(text: String): String =
+            if (text.startsWith("\uFEFF")) text.substring(1) else text
+
         fun loadFromDirectory(tokenizerDir: File?): ClipBpeTokenizer {
             if (tokenizerDir != null && tokenizerDir.exists()) {
                 val vocabFile = File(tokenizerDir, "vocab.json")
                 val mergesFile = File(tokenizerDir, "merges.txt")
                 if (vocabFile.exists() && mergesFile.exists()) {
-                    val parsed = runCatching { fromVocabAndMerges(vocabFile.readText(), mergesFile.readText()) }.getOrNull()
-                    if (parsed != null) return parsed
+                    val parsed = runCatching {
+                        fromVocabAndMerges(vocabFile.readText(), mergesFile.readText())
+                    }.getOrNull()
+                    if (parsed != null && parsed.isLoaded()) return parsed
                 }
                 val tokJsonFile = File(tokenizerDir, "tokenizer.json")
                 if (tokJsonFile.exists()) {
-                    val parsed = runCatching { fromTokenizerJson(tokJsonFile.readText()) }.getOrNull()
-                    if (parsed != null) return parsed
+                    val parsed = runCatching {
+                        fromTokenizerJson(tokJsonFile.readText())
+                    }.getOrNull()
+                    if (parsed != null && parsed.isLoaded()) return parsed
                 }
             }
             return ClipBpeTokenizer(
@@ -153,17 +160,20 @@ class ClipBpeTokenizer private constructor(
         }
 
         fun fromVocabAndMerges(vocabJsonText: String, mergesText: String): ClipBpeTokenizer {
-            val json = JSONObject(vocabJsonText)
+            val cleanVocab = stripUtf8Bom(vocabJsonText).trim()
+            val cleanMerges = stripUtf8Bom(mergesText)
+            val json = JSONObject(cleanVocab)
             val vocabMap = HashMap<String, Int>(json.length())
             val keys = json.keys()
             while (keys.hasNext()) {
                 val k = keys.next()
-                vocabMap[k] = json.getInt(k)
+                val v = json.optInt(k, -1)
+                if (v >= 0) vocabMap[k] = v
             }
 
             val rankMap = HashMap<Pair<String, String>, Int>(50_000)
             var rank = 0
-            mergesText.lineSequence().forEach { rawLine ->
+            cleanMerges.lineSequence().forEach { rawLine ->
                 val line = rawLine.trim()
                 if (line.isEmpty() || line.startsWith("#")) return@forEach
                 val spaceIdx = line.indexOf(' ')
@@ -177,14 +187,31 @@ class ClipBpeTokenizer private constructor(
         }
 
         fun fromTokenizerJson(tokenizerJsonText: String): ClipBpeTokenizer {
-            val root = JSONObject(tokenizerJsonText)
+            val root = JSONObject(stripUtf8Bom(tokenizerJsonText).trim())
             val model = root.getJSONObject("model")
-            val vocabObj = model.getJSONObject("vocab")
-            val vocabMap = HashMap<String, Int>(vocabObj.length() + 16)
-            val keys = vocabObj.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                vocabMap[k] = vocabObj.getInt(k)
+            val vocabMap = HashMap<String, Int>(50_000)
+            val vocabObj = model.optJSONObject("vocab")
+            if (vocabObj != null) {
+                val keys = vocabObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = vocabObj.optInt(k, -1)
+                    if (v >= 0) vocabMap[k] = v
+                }
+            } else {
+                val vocabArr = model.optJSONArray("vocab")
+                    ?: throw IllegalArgumentException("tokenizer.json missing model.vocab")
+                for (i in 0 until vocabArr.length()) {
+                    val pair = vocabArr.optJSONArray(i)
+                    val token = if (pair != null && pair.length() >= 1) {
+                        pair.optString(0, "")
+                    } else {
+                        vocabArr.optString(i, "")
+                    }
+                    if (token.isNotEmpty()) {
+                        vocabMap[token] = i
+                    }
+                }
             }
 
             val addedArr = root.optJSONArray("added_tokens")

@@ -379,6 +379,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun clearMessages() {
+        BackgroundProcessingCoordinator.clearTransientMessages()
         _uiState.update { it.copy(statusBannerMessage = null, errorBannerMessage = null) }
     }
 
@@ -809,8 +810,23 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun importClipTokenizerFiles(uris: List<Uri>) {
-        if (uris.isEmpty()) return
+    fun onTokenizerPickerCancelled() {
+        _uiState.update {
+            it.copy(
+                errorBannerMessage = null,
+                statusBannerMessage = "No tokenizer file selected. Use 'vocab.json', 'merges.txt', 'tokenizer.json' buttons or 'Import SD Folder'."
+            )
+        }
+    }
+
+    fun importClipTokenizerFiles(
+        uris: List<Uri>,
+        expectedCanonicalHint: String? = null
+    ) {
+        if (uris.isEmpty()) {
+            onTokenizerPickerCancelled()
+            return
+        }
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
@@ -820,7 +836,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 )
             }
             val result = withContext(Dispatchers.IO) {
-                SdInpaintPackManager.importTokenizerFilesFromUris(getApplication(), uris)
+                SdInpaintPackManager.importTokenizerFilesFromUris(
+                    context = getApplication(),
+                    uris = uris,
+                    expectedCanonicalHint = expectedCanonicalHint
+                )
             }
             result.fold(
                 onSuccess = { importRes ->
@@ -833,14 +853,19 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
                     val currentOpt = _uiState.value.inpaintModelOption
                     val label = SdInpaintPackManager.formatDropdownLabel(ctx, currentOpt, if (hasLama) lamaFile else null)
+                    val skippedNote = if (importRes.skippedFileNames.isNotEmpty()) {
+                        " Skipped: ${importRes.skippedFileNames.joinToString()}"
+                    } else {
+                        ""
+                    }
                     val msg = if (importRes.status.isReady) {
                         if (importRes.tokenizerVerifiedLoaded) {
-                            "✓ CLIP Tokenizer Ready (${importRes.importedFileNames.joinToString()}). SD 1.5 Inpaint is ready!"
+                            "✓ CLIP Tokenizer Ready (${importRes.importedFileNames.joinToString()}). SD 1.5 Inpaint is ready!$skippedNote"
                         } else {
-                            "Saved ${importRes.importedFileNames.joinToString()}, but tokenizer JSON/merges verification failed. Please re-check file format."
+                            "Saved ${importRes.importedFileNames.joinToString()}, but tokenizer JSON/merges verification failed. Please re-check file format.$skippedNote"
                         }
                     } else {
-                        "Saved ${importRes.importedFileNames.joinToString()} — ${importRes.status.activeSourceLabel}"
+                        "Saved ${importRes.importedFileNames.joinToString()} — ${importRes.status.activeSourceLabel}$skippedNote"
                     }
                     _uiState.update {
                         it.copy(
@@ -1721,6 +1746,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             decoded.fold(
                 onSuccess = { bitmap ->
+                    BackgroundProcessingCoordinator.clearInpaintResult()
                     _uiState.update {
                         it.copy(
                             inpaintSourceBitmap = bitmap,
@@ -1732,6 +1758,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             accessoryMaskNotice = null,
                             inpaintResultBitmap = null,
                             inpaintElapsedSec = null,
+                            errorBannerMessage = null,
                             statusBannerMessage = "Loaded Inpaint Source (${bitmap.width}×${bitmap.height}) from folder."
                         )
                     }
@@ -2105,6 +2132,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun reuseInpaintResultAsSource() {
         val resultBmp = _uiState.value.inpaintResultBitmap ?: return
+        BackgroundProcessingCoordinator.clearInpaintResult()
         _uiState.update {
             it.copy(
                 inpaintSourceBitmap = resultBmp,
@@ -2116,6 +2144,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 accessoryMaskNotice = null,
                 inpaintResultBitmap = null,
                 inpaintElapsedSec = null,
+                errorBannerMessage = null,
                 statusBannerMessage = "Result loaded as Source Image. Draw a new mask to edit further."
             )
         }
@@ -2154,7 +2183,13 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun runInpaint() {
+        if (activeInpaintJob?.isActive == true) return
         val state = _uiState.value
+        if (state.isInpainting && activeInpaintJob?.isActive != true) {
+            // Self-heal stale isInpainting flag if no job is actually active
+            BackgroundProcessingCoordinator.updateInpaint { it.copy(isRunning = false, progressText = null) }
+            _uiState.update { it.copy(isInpainting = false, inpaintProgressText = null) }
+        }
         val srcBmp = state.inpaintSourceBitmap
         val maskBmp = state.inpaintMaskBitmap
         if (srcBmp == null) {
@@ -2163,34 +2198,68 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             return
         }
-        if (maskBmp == null) {
+        if (maskBmp == null || !InteractiveInpaintEngine.hasPaintedMaskPixels(maskBmp)) {
             _uiState.update {
-                it.copy(errorBannerMessage = "Please tap 'Draw Mask' and paint the region to inpaint first.")
+                it.copy(errorBannerMessage = "Please tap 'Edit Mask' / 'Draw Mask' and paint the region to inpaint first.")
             }
             return
         }
 
-        if (state.isInpainting || activeInpaintJob?.isActive == true) return
-        inpaintCancellationRequested.set(false)
+        // Pre-flight validation BEFORE starting ForegroundService to prevent start-then-stop OS race
         val appCtx = getApplication<Application>()
+        val lamaFilePre = OnnxProtobufInspector.resolveModelFile(appCtx, ModelSlot.INPAINTING)
+        val primaryPackPre = SdInpaintPackManager.resolvePackForOption(appCtx, state.inpaintModelOption)
+
+        if (state.inpaintModelOption == InpaintModelOption.LAMA_ONNX &&
+            (!lamaFilePre.exists() || lamaFilePre.length() <= 1024L)
+        ) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Selected model 'LaMa (Object Remove)' is not installed. Import lama_fp32.onnx or switch Model.")
+            }
+            return
+        }
+        if ((state.inpaintModelOption == InpaintModelOption.SD15_FP32 ||
+                state.inpaintModelOption == InpaintModelOption.REALVIS_INT8 ||
+                state.inpaintModelOption == InpaintModelOption.SD15_FP16) &&
+            primaryPackPre == null
+        ) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Selected model '${state.inpaintModelOption.displayName}' is not installed. Import the SD Inpaint folder first.")
+            }
+            return
+        }
+        if (primaryPackPre != null && state.inpaintPrompt.trim().isNotEmpty()) {
+            val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(appCtx)
+            if (!tokStatus.isReady) {
+                _uiState.update {
+                    it.copy(
+                        clipTokenizerStatus = tokStatus,
+                        errorBannerMessage = "CLIP tokenizer files (vocab.json + merges.txt or tokenizer.json) are missing in ${primaryPackPre.packType.displayLabel}. Upload them below."
+                    )
+                }
+                return
+            }
+        }
+
+        inpaintCancellationRequested.set(false)
+        _uiState.update {
+            it.copy(
+                isInpainting = true,
+                inpaintProgressText = "Preparing offline inpainting engine...",
+                errorBannerMessage = null,
+                statusBannerMessage = null
+            )
+        }
+        BackgroundProcessingCoordinator.updateInpaint {
+            it.copy(isRunning = true, progressText = "Preparing offline inpainting engine...", errorMessage = null, statusMessage = null)
+        }
         ProcessingForegroundService.startOrUpdate(
             context = appCtx,
             title = "Inpaint Image Generating",
             detail = "Running offline AI inpainting (safe during screen lock & app switch)...",
             progressPercent = 5
         )
-        BackgroundProcessingCoordinator.updateInpaint {
-            it.copy(isRunning = true, progressText = "Preparing offline inpainting engine...", errorMessage = null, statusMessage = null)
-        }
         activeInpaintJob = BackgroundProcessingCoordinator.scope.launch {
-            _uiState.update {
-                it.copy(
-                    isInpainting = true,
-                    inpaintProgressText = "Preparing offline inpainting engine...",
-                    errorBannerMessage = null,
-                    statusBannerMessage = null
-                )
-            }
             try {
                 val res = withContext(Dispatchers.Default) {
                     val ctx = getApplication<Application>()

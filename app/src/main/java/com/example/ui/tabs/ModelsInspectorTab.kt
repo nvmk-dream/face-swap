@@ -71,6 +71,7 @@ fun ModelsInspectorTab(
     onRefreshModels: () -> Unit,
     onImportAllFromFolder: () -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
+    onUploadSingleTokenizerFile: (String) -> Unit = {},
     onPreloadMemoryModels: () -> Unit = {},
     onReleaseMemoryModels: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -348,6 +349,7 @@ fun ModelsInspectorTab(
                 clipTokenizerStatus = clipTokenizerStatus,
                 isBusy = isInspecting,
                 onUploadClipTokenizer = onUploadClipTokenizer,
+                onUploadSingleTokenizerFile = onUploadSingleTokenizerFile,
                 onImportSdFolder = onImportAllFromFolder
             )
 
@@ -725,6 +727,7 @@ internal fun SdInpaintAndTokenizerCard(
     clipTokenizerStatus: ClipTokenizerStatus,
     isBusy: Boolean,
     onUploadClipTokenizer: () -> Unit,
+    onUploadSingleTokenizerFile: (String) -> Unit = {},
     onImportSdFolder: () -> Unit
 ) {
     val isTokenizerReady = clipTokenizerStatus.isReady
@@ -887,6 +890,33 @@ internal fun SdInpaintAndTokenizerCard(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("SD Folder", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { onUploadSingleTokenizerFile("vocab.json") },
+                    enabled = !isBusy,
+                    modifier = Modifier.heightIn(min = 40.dp)
+                ) {
+                    Text(if (clipTokenizerStatus.hasVocabJson) "✓ Replace vocab.json" else "+ Pick vocab.json", fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(
+                    onClick = { onUploadSingleTokenizerFile("merges.txt") },
+                    enabled = !isBusy,
+                    modifier = Modifier.heightIn(min = 40.dp)
+                ) {
+                    Text(if (clipTokenizerStatus.hasMergesTxt) "✓ Replace merges.txt" else "+ Pick merges.txt", fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(
+                    onClick = { onUploadSingleTokenizerFile("tokenizer.json") },
+                    enabled = !isBusy,
+                    modifier = Modifier.heightIn(min = 40.dp)
+                ) {
+                    Text(if (clipTokenizerStatus.hasTokenizerJson) "✓ Replace tokenizer.json" else "+ Pick tokenizer.json", fontWeight = FontWeight.SemiBold)
                 }
             }
         }

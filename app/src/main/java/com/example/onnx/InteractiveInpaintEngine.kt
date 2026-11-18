@@ -795,12 +795,35 @@ object InteractiveInpaintEngine {
         }
     }
 
-    private fun featherMask(
+    fun hasPaintedMaskPixels(maskBitmap: Bitmap?, minCount: Int = 8): Boolean {
+        if (maskBitmap == null || maskBitmap.width <= 0 || maskBitmap.height <= 0) return false
+        val w = maskBitmap.width
+        val h = maskBitmap.height
+        val px = IntArray(w * h)
+        maskBitmap.getPixels(px, 0, w, 0, 0, w, h)
+        var count = 0
+        for (c in px) {
+            val a = (c ushr 24) and 0xFF
+            val r = (c ushr 16) and 0xFF
+            val g = (c ushr 8) and 0xFF
+            val b = c and 0xFF
+            if (max(a, max(r, max(g, b))) > 30) {
+                count++
+                if (count >= minCount) return true
+            }
+        }
+        return false
+    }
+
+    internal fun featherMask(
         mask: FloatArray,
         w: Int,
         h: Int,
         radius: Int
     ): FloatArray {
+        if (radius <= 0) {
+            return FloatArray(mask.size) { i -> mask[i].coerceIn(0f, 1f) }
+        }
         val temp = FloatArray(w * h)
         val out = FloatArray(w * h)
         val denom = (2 * radius + 1).toFloat()
@@ -824,8 +847,13 @@ object InteractiveInpaintEngine {
                     val sy = (y + dy).coerceIn(0, h - 1)
                     sum += temp[sy * w + x]
                 }
-                // Preserve full interior while feathering edge smoothly
-                out[rowOff + x] = max(mask[rowOff + x], sum / denom).coerceIn(0f, 1f)
+                val orig = mask[rowOff + x].coerceIn(0f, 1f)
+                // Strictly prevent outward bleed outside painted mask while feathering inner edge smoothly
+                out[rowOff + x] = if (orig <= 0.05f) {
+                    0f
+                } else {
+                    kotlin.math.min(orig, sum / denom).coerceIn(0f, 1f)
+                }
             }
         }
         return out

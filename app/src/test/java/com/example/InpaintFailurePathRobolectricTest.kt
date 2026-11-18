@@ -262,4 +262,130 @@ class InpaintFailurePathRobolectricTest {
             assertTrue(ClipBpeTokenizer.loadFromDirectory(p.tokenizerDir).isLoaded())
         }
     }
+
+    @Test
+    fun vcopJsonWithBom_largeHeaderTokenizerJson_andPackMergesSync_allImportAndVerify() {
+        val root = SdInpaintPackManager.getSdInpaintRootDir(context)
+        root.deleteRecursively()
+
+        // Pack has merges.txt ONLY inside its tokenizer/ subfolder (matches screenshot scenario)
+        val fp16Dir = File(root, SdInpaintPackType.SD15_FP16.id)
+        listOf("text_encoder", "unet", "vae_encoder", "vae_decoder").forEach { comp ->
+            File(fp16Dir, comp).apply { mkdirs() }.let {
+                File(it, "model.onnx").writeBytes(ByteArray(2048) { 4 })
+            }
+        }
+        val packTokDir = File(fp16Dir, "tokenizer").apply { mkdirs() }
+        File(packTokDir, "merges.txt").writeText("#version: 0.2\nr e\nre d</w>\ns i\nsi l\nsil k</w>\n")
+
+        val initialStatus = SdInpaintPackManager.inspectClipTokenizerStatus(context)
+        assertFalse(initialStatus.isReady)
+        assertTrue(initialStatus.hasMergesTxt)
+        assertFalse(initialStatus.hasVocabJson)
+
+        // Scenario A: User uploads "Vcop .json" with UTF-8 BOM while merges.txt is in pack dir
+        val tmpDir = File(context.cacheDir, "vcop_tok_test").apply { deleteRecursively(); mkdirs() }
+        val vocabBody = buildString {
+            append("\uFEFF{")
+            val words = (0 until 20).map { "w$it</w>" } + listOf("red</w>", "saree</w>")
+            words.forEachIndexed { idx, w ->
+                if (idx > 0) append(",")
+                append("\"$w\":$idx")
+            }
+            append(",\"<|startoftext|>\":49406,\"<|endoftext|>\":49407}")
+        }
+        val vcopFile = File(tmpDir, "Vcop .json").apply { writeText(vocabBody) }
+        val vcopImport = SdInpaintPackManager.importTokenizerFilesFromUris(
+            context,
+            listOf(Uri.fromFile(vcopFile)),
+            expectedCanonicalHint = "vocab.json"
+        )
+        assertTrue("Expected Vcop .json import to succeed: ${vcopImport.exceptionOrNull()}", vcopImport.isSuccess)
+        val vcopRes = vcopImport.getOrThrow()
+        assertTrue(vcopRes.status.isReady)
+        assertTrue(vcopRes.status.hasVocabJson)
+        assertTrue(vcopRes.status.hasMergesTxt)
+        assertTrue("Expected cross-dir sync verification to succeed", vcopRes.tokenizerVerifiedLoaded)
+
+        // Scenario B: Large HuggingFace tokenizer.json (>16 KB before "model" key appears) with generic name
+        root.deleteRecursively()
+        val bigTokenizerJson = buildString {
+            append("{\"version\":\"1.0\",\"added_tokens\":[")
+            // Generate > 18 KB of added_tokens before "model"
+            for (i in 0 until 280) {
+                if (i > 0) append(",")
+                append("{\"id\":${50000 + i},\"content\":\"<extra_token_padding_$i>\",\"special\":false}")
+            }
+            append("],\"model\":{\"type\":\"BPE\",\"vocab\":{")
+            val vocabEntries = (0 until 20).map { "\"t$it</w>\":$it" } +
+                listOf("\"<|startoftext|>\":49406", "\"<|endoftext|>\":49407")
+            append(vocabEntries.joinToString(","))
+            append("},\"merges\":[\"r e\",\"re d</w>\",\"s a\",\"sa ree</w>\"]}}")
+        }
+        assertTrue(bigTokenizerJson.indexOf("\"model\"") > 12_000)
+        val genericTokFile = File(tmpDir, "hf_clip_fast_config.json").apply { writeText(bigTokenizerJson) }
+        val bigImport = SdInpaintPackManager.importTokenizerFilesFromUris(
+            context,
+            listOf(Uri.fromFile(genericTokFile))
+        )
+        assertTrue("Expected >12KB-offset tokenizer.json import to succeed: ${bigImport.exceptionOrNull()}", bigImport.isSuccess)
+        assertTrue(bigImport.getOrThrow().status.hasTokenizerJson)
+        assertTrue(bigImport.getOrThrow().tokenizerVerifiedLoaded)
+    }
+
+    @Test
+    fun inpaintEngine_timestepShape_promptNormalize_zeroBleedFeather_andViewModelSelfHeal() {
+        // 1. Static [1] timestep must stay [1] even when CFG batch=2
+        val staticOne = SdInpaintOnnxEngine.resolveTimestepShape(longArrayOf(1L), batchSize = 2)
+        assertEquals(1, staticOne.size)
+        assertEquals(1L, staticOne[0])
+
+        val dynamicBatch = SdInpaintOnnxEngine.resolveTimestepShape(longArrayOf(-1L), batchSize = 2)
+        assertEquals(1, dynamicBatch.size)
+        assertEquals(2L, dynamicBatch[0])
+
+        // 2. Prompt normalization maps sharee -> saree while keeping saree intact
+        assertEquals(
+            "red saree, realistic photography",
+            SdInpaintOnnxEngine.normalizePromptForClip("red sharee, realistic photography")
+        )
+        assertEquals(
+            "red silk saree",
+            SdInpaintOnnxEngine.normalizePromptForClip("red silk saree")
+        )
+
+        // 3. Zero outward bleed in featherMask across both engines
+        val w = 20
+        val h = 20
+        val mask = FloatArray(w * h)
+        for (y in 6..13) {
+            for (x in 6..13) {
+                mask[y * w + x] = 1.0f
+            }
+        }
+        val sdFeathered = SdInpaintOnnxEngine.featherMask(mask, w, h, radius = 3)
+        val interactiveFeathered = InteractiveInpaintEngine.featherMask(mask, w, h, radius = 3)
+        // Pixels just outside the mask (e.g. x=5, y=10) MUST be strictly 0.0f
+        assertEquals(0f, sdFeathered[10 * w + 5], 1e-6f)
+        assertEquals(0f, interactiveFeathered[10 * w + 5], 1e-6f)
+        // Deep interior pixel MUST remain 1.0f
+        assertEquals(1f, sdFeathered[10 * w + 10], 1e-6f)
+        assertEquals(1f, interactiveFeathered[10 * w + 10], 1e-6f)
+
+        // 4. Blank mask rejected + Create pre-flight errors cleanly
+        val blankMask = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.TRANSPARENT)
+        }
+        assertFalse(InteractiveInpaintEngine.hasPaintedMaskPixels(blankMask))
+
+        val vm = FaceSwapViewModel(context.applicationContext as Application)
+        val deadline = System.currentTimeMillis() + 3000L
+        while (vm.uiState.value.isInspectingModels && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L)
+        }
+        // Without source image, runInpaint sets error cleanly instead of silent no-op
+        vm.runInpaint()
+        assertTrue(vm.uiState.value.errorBannerMessage?.contains("Source Image", ignoreCase = true) == true)
+        assertFalse(vm.uiState.value.isInpainting)
+    }
 }

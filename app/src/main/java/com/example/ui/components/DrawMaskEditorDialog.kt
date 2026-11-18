@@ -340,6 +340,11 @@ fun DrawMaskEditorDialog(
                                 baseMask = autoBase
                             )
                             autoBase?.recycle()
+                            if (!com.example.onnx.InteractiveInpaintEngine.hasPaintedMaskPixels(maskBmp)) {
+                                maskBmp.recycle()
+                                inlineHintMessage = "Paint at least one brush stroke (or select Auto BG / Glasses / Cap) before tapping Done."
+                                return@clickable
+                            }
                             onAccessorySelectionChanged(selectedAccessories, accessoryExpandPx)
                             val suggestedPrompt = if (selectedAccessories.isNotEmpty()) {
                                 AccessoryMaskEngine.buildCombinedRemovalPrompt(selectedAccessories)

@@ -142,6 +142,7 @@ fun InpaintPage(
     onSelectModelOption: (InpaintModelOption) -> Unit,
     onImportModelFolder: () -> Unit,
     onUploadClipTokenizer: () -> Unit = {},
+    onUploadSingleTokenizerFile: (String) -> Unit = {},
     onMaskUpdated: (Bitmap?) -> Unit,
     onPromptChanged: (String) -> Unit,
     onNegativePromptChanged: (String) -> Unit = {},
@@ -600,13 +601,62 @@ fun InpaintPage(
                 }
             }
 
+            if (uiState.isInpainting) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFF0F9FF),
+                    border = BorderStroke(1.4.dp, Color(0xFF0284C7)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("inpaint_top_progress_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            color = Color(0xFF0284C7),
+                            strokeWidth = 2.6.dp
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Inpainting Active...",
+                                color = darkSlate,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.5.sp
+                            )
+                            Text(
+                                text = uiState.inpaintProgressText ?: "Preparing offline diffusion...",
+                                color = mutedSlate,
+                                fontSize = 12.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onCancelInpaint,
+                            border = BorderStroke(1.dp, Color(0xFFDC2626)),
+                            modifier = Modifier.testTag("inpaint_progress_cancel_btn")
+                        ) {
+                            Text("Cancel", color = Color(0xFFDC2626), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
             val usesSdPack = uiState.installedSdInpaintPacks.isNotEmpty() &&
                 uiState.inpaintModelOption != InpaintModelOption.LAMA_ONNX &&
                 uiState.inpaintModelOption != InpaintModelOption.CV_FALLBACK
             if (usesSdPack && !uiState.clipTokenizerStatus.isReady) {
                 InpaintMissingTokenizerBanner(
                     tokenizerStatus = uiState.clipTokenizerStatus,
-                    onUploadTokenizer = onUploadClipTokenizer
+                    onUploadTokenizer = onUploadClipTokenizer,
+                    onUploadSingleFile = onUploadSingleTokenizerFile,
+                    onImportFolder = onImportModelFolder
                 )
             }
 
@@ -1813,16 +1863,19 @@ private fun CleanTuningSliderRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun InpaintMissingTokenizerBanner(
     tokenizerStatus: ClipTokenizerStatus,
-    onUploadTokenizer: () -> Unit
+    onUploadTokenizer: () -> Unit,
+    onUploadSingleFile: (String) -> Unit = {},
+    onImportFolder: () -> Unit = {}
 ) {
     val missingHint = when {
         tokenizerStatus.hasVocabJson && !tokenizerStatus.hasMergesTxt ->
             "vocab.json ✓ உள்ளது — இப்போது merges.txt upload செய்யவும்."
         !tokenizerStatus.hasVocabJson && tokenizerStatus.hasMergesTxt ->
-            "merges.txt ✓ உள்ளது — இப்போது vocab.json upload செய்யவும்."
+            "merges.txt ✓ உள்ளது — இப்போது vocab.json (அல்லது tokenizer.json) upload செய்யவும்."
         else ->
             "SD 1.5-க்கு CLIP Tokenizer (vocab.json + merges.txt அல்லது tokenizer.json) தேவை."
     }
@@ -1882,6 +1935,67 @@ internal fun InpaintMissingTokenizerBanner(
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp
             )
+        }
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            OutlinedButton(
+                onClick = { onUploadSingleFile("vocab.json") },
+                border = BorderStroke(1.dp, if (tokenizerStatus.hasVocabJson) Color(0xFF059669) else Color(0xFFD97706)),
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("inpaint_pick_vocab_btn")
+            ) {
+                Text(
+                    text = if (tokenizerStatus.hasVocabJson) "✓ vocab.json" else "+ vocab.json",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (tokenizerStatus.hasVocabJson) Color(0xFF059669) else Color(0xFF92400E)
+                )
+            }
+            OutlinedButton(
+                onClick = { onUploadSingleFile("merges.txt") },
+                border = BorderStroke(1.dp, if (tokenizerStatus.hasMergesTxt) Color(0xFF059669) else Color(0xFFD97706)),
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("inpaint_pick_merges_btn")
+            ) {
+                Text(
+                    text = if (tokenizerStatus.hasMergesTxt) "✓ merges.txt" else "+ merges.txt",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (tokenizerStatus.hasMergesTxt) Color(0xFF059669) else Color(0xFF92400E)
+                )
+            }
+            OutlinedButton(
+                onClick = { onUploadSingleFile("tokenizer.json") },
+                border = BorderStroke(1.dp, if (tokenizerStatus.hasTokenizerJson) Color(0xFF059669) else Color(0xFF7C3AED)),
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("inpaint_pick_tokenizer_json_btn")
+            ) {
+                Text(
+                    text = if (tokenizerStatus.hasTokenizerJson) "✓ tokenizer.json" else "+ tokenizer.json",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (tokenizerStatus.hasTokenizerJson) Color(0xFF059669) else Color(0xFF6D28D9)
+                )
+            }
+            OutlinedButton(
+                onClick = onImportFolder,
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("inpaint_pick_tokenizer_folder_btn")
+            ) {
+                Text(
+                    text = "SD Folder",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF334155)
+                )
+            }
         }
     }
 }
