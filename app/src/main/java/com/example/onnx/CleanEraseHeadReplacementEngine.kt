@@ -180,6 +180,7 @@ object CleanEraseHeadReplacementEngine {
 
         var firstTargetHeadPreview: Bitmap? = null
         var firstHeadlessPreview512: Bitmap? = null
+        var firstSourceCutoutPreview512: Bitmap? = null
         var firstIntermediatePortraitPreview512: Bitmap? = null
         var firstTgtCanvasMatrix: FloatArray? = null
         val placedHeadPoses = mutableListOf<PlacedHeadPose>()
@@ -360,7 +361,7 @@ object CleanEraseHeadReplacementEngine {
                 clothProtectMask = clothProtectMask
             )
 
-            // Capture Step 1 previews BEFORE recycling Stage 1-4 bitmaps so Stage 5 SD 1.5 has max free RAM
+            // Capture Step 1 & Output 2 UI previews BEFORE recycling Stage 1-4 bitmaps so Stage 5 SD 1.5 has max free RAM
             if (firstTargetHeadPreview == null) {
                 firstTargetHeadPreview = alignedTargetHead.copy(Bitmap.Config.ARGB_8888, false)
                 firstTgtCanvasMatrix = tgtCanvasMatrix.copyOf()
@@ -368,6 +369,17 @@ object CleanEraseHeadReplacementEngine {
                     cleanHeadlessTargetCanvas.copy(Bitmap.Config.ARGB_8888, false)
                 } else {
                     Bitmap.createScaledBitmap(cleanHeadlessTargetCanvas, 512, 512, true)
+                }
+                val cutoutFull = buildTransparentCutoutPreviewBitmap(
+                    cropBitmap = warpedSourceHead,
+                    alpha = filteredFullHeadAlpha
+                )
+                firstSourceCutoutPreview512 = if (cutoutFull.width == 512) {
+                    cutoutFull
+                } else {
+                    Bitmap.createScaledBitmap(cutoutFull, 512, 512, true).also {
+                        cutoutFull.recycle()
+                    }
                 }
             }
             if (litSourceHead !== warpedSourceHead) litSourceHead.recycle()
@@ -713,8 +725,25 @@ object CleanEraseHeadReplacementEngine {
             stageTimings = step3Res.stageTimings.copy(totalMs = totalMs),
             benchmarkReports = step3Res.benchmarkReports,
             engineUsed = step3Res.engineUsed,
-            ageHarmonySummary = step3Res.ageHarmonySummary ?: firstAgeHarmonySummary
+            ageHarmonySummary = step3Res.ageHarmonySummary ?: firstAgeHarmonySummary,
+            headlessTargetPreview = firstHeadlessPreview512,
+            sourceHeadCutoutPreview = firstSourceCutoutPreview512
         )
+    }
+
+    private fun buildTransparentCutoutPreviewBitmap(cropBitmap: Bitmap, alpha: FloatArray): Bitmap {
+        val w = cropBitmap.width
+        val h = cropBitmap.height
+        val total = w * h
+        val px = IntArray(total)
+        cropBitmap.getPixels(px, 0, w, 0, 0, w, h)
+        for (i in 0 until total) {
+            val aByte = (alpha[i].coerceIn(0f, 1f) * 255f).toInt().coerceIn(0, 255)
+            px[i] = (aByte shl 24) or (px[i] and 0x00FFFFFF)
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setPixels(px, 0, w, 0, 0, w, h)
+        }
     }
 
     private fun computeCanvasBorderEnvelope(canvasSize: Int): FloatArray {

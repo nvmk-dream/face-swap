@@ -131,7 +131,9 @@ data class FaceSwapExecutionResult(
     val stageTimings: ProductionStageTimings = ProductionStageTimings(),
     val benchmarkReports: List<SwapCandidateBenchmarkReport> = emptyList(),
     val engineUsed: String = "NEURAL",
-    val ageHarmonySummary: String? = null
+    val ageHarmonySummary: String? = null,
+    val headlessTargetPreview: Bitmap? = null,
+    val sourceHeadCutoutPreview: Bitmap? = null
 )
 
 /**

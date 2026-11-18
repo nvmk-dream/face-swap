@@ -64,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
@@ -218,6 +219,7 @@ fun StudioFrontPage(
     onDismissSwapStrategyPopup: () -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
+    onViewStepFullScreen: (Bitmap, String) -> Unit = { bmp, _ -> onViewResultFullScreen(bmp) },
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -270,13 +272,14 @@ fun StudioFrontPage(
                 onRequestSwapStrategySelection = onRequestSwapStrategySelection
             )
 
-            // 4. Result Card (Source -> Target + Result Preview + Download + Save to Gallery + Completed Footer)
+            // 4. Result Card (Source -> Target + Result Preview + Output 1 & 2 Steps + Download + Save to Gallery + Completed Footer)
             FrontResultShowcaseCard(
                 uiState = uiState,
                 onDownloadHd = onDownloadHd,
                 onSaveToGallery = onSaveToGallery,
                 onInspectResultDetails = onInspectResultDetails,
-                onViewResultFullScreen = onViewResultFullScreen
+                onViewResultFullScreen = onViewResultFullScreen,
+                onViewStepFullScreen = onViewStepFullScreen
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -1537,12 +1540,13 @@ private fun SecondaryActionPillButton(
 }
 
 @Composable
-private fun FrontResultShowcaseCard(
+internal fun FrontResultShowcaseCard(
     uiState: FaceSwapUiState,
     onDownloadHd: () -> Unit,
     onSaveToGallery: () -> Unit,
     onInspectResultDetails: () -> Unit,
-    onViewResultFullScreen: (Bitmap) -> Unit = {}
+    onViewResultFullScreen: (Bitmap) -> Unit = {},
+    onViewStepFullScreen: (Bitmap, String) -> Unit = { bmp, _ -> onViewResultFullScreen(bmp) }
 ) {
     val result = uiState.swapResult
     val currentTimeText = remember(result) {
@@ -1926,7 +1930,136 @@ private fun FrontResultShowcaseCard(
                     )
                 }
             }
+
+            // Output 1 (Headless Target) + Output 2 (Source Head Cutout) -> Final Merge Preview
+            if (result != null && (result.headlessTargetPreview != null || result.sourceHeadCutoutPreview != null)) {
+                var showPipelineSteps by remember(result) { mutableStateOf(true) }
+                HorizontalDivider(color = Color(0x337E22CE), thickness = 1.dp)
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { showPipelineSteps = !showPipelineSteps }
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .testTag("btn_toggle_output12_preview"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Output 1 + Output 2 → Final Preview (Tap to Zoom)",
+                        color = Color(0xFF4C1D95),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.5.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = if (showPipelineSteps) "Hide ▲" else "Show ▼",
+                        color = Color(0xFF0284C7),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                }
+
+                AnimatedVisibility(visible = showPipelineSteps) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        result.headlessTargetPreview?.let { out1Bmp ->
+                            OutputStepPreviewTile(
+                                title = "Output 1: No Head",
+                                bitmap = out1Bmp,
+                                useCheckerboard = false,
+                                onClick = { onViewStepFullScreen(out1Bmp, "Output 1: Headless Target") },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("preview_tile_output1")
+                            )
+                        }
+                        result.sourceHeadCutoutPreview?.let { out2Bmp ->
+                            OutputStepPreviewTile(
+                                title = "Output 2: Cutout",
+                                bitmap = out2Bmp,
+                                useCheckerboard = true,
+                                onClick = { onViewStepFullScreen(out2Bmp, "Output 2: Source Head Cutout") },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("preview_tile_output2")
+                            )
+                        }
+                        OutputStepPreviewTile(
+                            title = "Final Merge",
+                            bitmap = result.outputBitmap,
+                            useCheckerboard = false,
+                            onClick = { onViewStepFullScreen(result.outputBitmap, "Final Merged Output") },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("preview_tile_final")
+                        )
+                    }
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun OutputStepPreviewTile(
+    title: String,
+    bitmap: Bitmap,
+    useCheckerboard: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0F172A))
+            .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(82.dp)
+                .clip(RoundedCornerShape(8.dp))
+        ) {
+            if (useCheckerboard) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val cell = 8.dp.toPx()
+                    val cols = (size.width / cell).toInt() + 1
+                    val rows = (size.height / cell).toInt() + 1
+                    for (r in 0 until rows) {
+                        for (c in 0 until cols) {
+                            drawRect(
+                                color = if ((r + c) % 2 == 0) Color(0xFF1E293B) else Color(0xFF334155),
+                                topLeft = Offset(c * cell, r * cell),
+                                size = Size(cell, cell)
+                            )
+                        }
+                    }
+                }
+            }
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = title,
+                contentScale = if (useCheckerboard) ContentScale.Fit else ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        Text(
+            text = title,
+            color = Color(0xFFE0F2FE),
+            fontWeight = FontWeight.Bold,
+            fontSize = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

@@ -215,6 +215,7 @@ fun StudioTab(
             onViewResultFullScreen = { bmp ->
                 onViewImageFullScreen(bmp, "Swap Result")
             },
+            onViewStepFullScreen = onViewImageFullScreen,
             modifier = modifier
         )
         return
@@ -368,7 +369,8 @@ fun StudioTab(
                         onSaveHdToGallery = onSaveHdToGallery,
                         onShareResult = onShareResult,
                         onRotateResult90 = onRotateResult90,
-                        onCropResultAspect = onCropResultAspect
+                        onCropResultAspect = onCropResultAspect,
+                        onViewStepFullScreen = onViewImageFullScreen
                     )
                 }
 
@@ -1373,7 +1375,8 @@ private fun SwapResultCard(
     onSaveHdToGallery: () -> Unit = onSaveToGallery,
     onShareResult: () -> Unit = {},
     onRotateResult90: () -> Unit = {},
-    onCropResultAspect: (Int, Int) -> Unit = { _, _ -> }
+    onCropResultAspect: (Int, Int) -> Unit = { _, _ -> },
+    onViewStepFullScreen: (android.graphics.Bitmap, String) -> Unit = { _, _ -> }
 ) {
     val result = uiState.swapResult ?: return
     val displayBitmap = if (uiState.showOriginalInComparison && uiState.targetBitmap != null) {
@@ -1691,8 +1694,21 @@ private fun SwapResultCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                AlignedCropThumb(bitmap = result.alignedSource112, label = "Source Crop")
-                AlignedCropThumb(bitmap = result.alignedTarget128, label = "Target Crop")
+                if (result.headlessTargetPreview != null && result.sourceHeadCutoutPreview != null) {
+                    AlignedCropThumb(
+                        bitmap = result.headlessTargetPreview,
+                        label = "Out 1 (No Head)",
+                        onClick = { onViewStepFullScreen(result.headlessTargetPreview, "Output 1: Headless Target") }
+                    )
+                    AlignedCropThumb(
+                        bitmap = result.sourceHeadCutoutPreview,
+                        label = "Out 2 (Cutout)",
+                        onClick = { onViewStepFullScreen(result.sourceHeadCutoutPreview, "Output 2: Source Head Cutout") }
+                    )
+                } else {
+                    AlignedCropThumb(bitmap = result.alignedSource112, label = "Source Crop")
+                    AlignedCropThumb(bitmap = result.alignedTarget128, label = "Target Crop")
+                }
                 result.stage1SwapOnly512?.let {
                     AlignedCropThumb(bitmap = it, label = if (isThreeStepPortrait) "1. Headless" else "1. Swap-Only")
                 }
@@ -1821,11 +1837,13 @@ private fun SwapResultCard(
 @Composable
 private fun AlignedCropThumb(
     bitmap: android.graphics.Bitmap,
-    label: String
+    label: String,
+    onClick: (() -> Unit)? = null
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     ) {
         Image(
             bitmap = bitmap.asImageBitmap(),
