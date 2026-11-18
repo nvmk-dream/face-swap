@@ -18,9 +18,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -32,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
@@ -147,6 +150,7 @@ fun InpaintPage(
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onMaskAndPromptUpdated: (Bitmap?, String?) -> Unit = { bmp, _ -> onMaskUpdated(bmp) },
     onCreateInpaint: () -> Unit,
+    onCancelInpaint: () -> Unit = {},
     onSaveToFolder: (Bitmap) -> Unit,
     onDownloadToGallery: (Bitmap) -> Unit,
     onReuseResult: () -> Unit,
@@ -487,34 +491,79 @@ fun InpaintPage(
                         )
                     }
 
-                    // Create Button
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(46.dp)
-                            .clip(actionBtnShape)
-                            .background(
-                                if (uiState.isInpainting) {
-                                    Brush.horizontalGradient(
-                                        listOf(Color(0xFF94A3B8), Color(0xFF64748B))
+                    // Create / Working + Quick Stop Button
+                    if (uiState.isInpainting) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .clip(actionBtnShape)
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(Color(0xFF64748B), Color(0xFF475569))
+                                        )
                                     )
-                                } else {
+                                    .border(1.4.dp, frostedBorderColor, actionBtnShape)
+                                    .testTag("inpaint_create_btn"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Working...",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.5.sp
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .clip(actionBtnShape)
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(Color(0xFFEF4444), Color(0xFFDC2626))
+                                        )
+                                    )
+                                    .clickable(onClick = onCancelInpaint)
+                                    .padding(horizontal = 14.dp)
+                                    .testTag("inpaint_top_cancel_btn"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Cancel Inpaint",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .clip(actionBtnShape)
+                                .background(
                                     Brush.horizontalGradient(
                                         listOf(Color(0xF2FFFFFF), Color(0xE6E0F2FE))
                                     )
-                                }
+                                )
+                                .border(1.4.dp, frostedBorderColor, actionBtnShape)
+                                .clickable(onClick = onCreateInpaint)
+                                .testTag("inpaint_create_btn"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Create",
+                                color = darkSlate,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.5.sp
                             )
-                            .border(1.4.dp, frostedBorderColor, actionBtnShape)
-                            .clickable(enabled = !uiState.isInpainting, onClick = onCreateInpaint)
-                            .testTag("inpaint_create_btn"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (uiState.isInpainting) "Working..." else "Create",
-                            color = if (uiState.isInpainting) Color.White else darkSlate,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.5.sp
-                        )
+                        }
                     }
                 }
             }
@@ -941,24 +990,11 @@ fun InpaintPage(
                 ) {
                     when {
                         uiState.isInpainting -> {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
-                                modifier = Modifier.padding(horizontal = 12.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    color = Color(0xFF0284C7),
-                                    strokeWidth = 3.5.dp,
-                                    modifier = Modifier.size(44.dp)
-                                )
-                                Text(
-                                    text = uiState.inpaintProgressText ?: "Inpainting...",
-                                    color = darkSlate,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 14.5.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
+                            InpaintProgressCancelContent(
+                                progressText = uiState.inpaintProgressText,
+                                onCancelInpaint = onCancelInpaint,
+                                darkSlate = darkSlate
+                            )
                         }
                         displayedBmp != null -> {
                             Image(
@@ -1149,9 +1185,67 @@ fun InpaintPage(
     }
 }
 
+@Composable
+internal fun InpaintProgressCancelContent(
+    progressText: String?,
+    onCancelInpaint: () -> Unit,
+    darkSlate: Color = Color(0xFF0F172A),
+    animateProgress: Boolean = true
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.padding(horizontal = 16.dp)
+    ) {
+        if (animateProgress) {
+            CircularProgressIndicator(
+                color = Color(0xFF0284C7),
+                strokeWidth = 3.5.dp,
+                modifier = Modifier.size(44.dp)
+            )
+        } else {
+            CircularProgressIndicator(
+                progress = { 0.5f },
+                color = Color(0xFF0284C7),
+                strokeWidth = 3.5.dp,
+                modifier = Modifier.size(44.dp)
+            )
+        }
+        Text(
+            text = progressText ?: "Inpainting...",
+            color = darkSlate,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.5.sp,
+            textAlign = TextAlign.Center
+        )
+        OutlinedButton(
+            onClick = onCancelInpaint,
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.2.dp, Color(0xFFDC2626)),
+            modifier = Modifier
+                .height(48.dp)
+                .testTag("inpaint_cancel_btn")
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Cancel Inpaint",
+                tint = Color(0xFFDC2626),
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "Cancel",
+                color = Color(0xFFDC2626),
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FullScreenPromptEditorDialog(
+internal fun FullScreenPromptEditorDialog(
     title: String,
     subtitle: String,
     accentColor: Color,
@@ -1178,146 +1272,219 @@ private fun FullScreenPromptEditorDialog(
     ) {
         BackHandler { onDismiss() }
 
-        Surface(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .testTag(dialogTag),
-            color = Color(0xFFF8FAFC)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(0xFFF0F9FF),
+                            Color(0xFFF8FAFC),
+                            Color(0xFFF5F3FF)
+                        )
+                    )
+                )
+                .testTag(dialogTag)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .systemBarsPadding()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .imePadding()
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Premium Header Row: weight(1f) keeps right OK pill 100% visible on narrow screens
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.White,
+                        shadowElevation = 3.dp,
+                        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clickable(onClick = onDismiss)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                                .border(1.dp, Color(0xFFE2E8F0), CircleShape)
-                                .clickable(onClick = onDismiss),
-                            contentAlignment = Alignment.Center
-                        ) {
+                        Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back",
-                                tint = Color(0xFF0F172A)
-                            )
-                        }
-                        Column {
-                            Text(
-                                text = title,
-                                color = Color(0xFF0F172A),
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 20.sp
-                            )
-                            Text(
-                                text = subtitle,
-                                color = Color(0xFF64748B),
-                                fontSize = 12.sp
+                                tint = Color(0xFF0F172A),
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
 
-                    Button(
-                        onClick = { onApply(draftText.trim()) },
-                        colors = ButtonDefaults.buttonColors(containerColor = accentColor),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .height(44.dp)
-                            .testTag(applyTag)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = "Apply",
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Apply", fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(170.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.White)
-                        .border(1.5.dp, accentColor.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                        .padding(14.dp)
-                ) {
-                    if (draftText.isEmpty()) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = placeholderText,
-                            color = Color(0xFF94A3B8),
-                            fontSize = 15.sp
+                            text = title,
+                            color = Color(0xFF0F172A),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 20.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = subtitle,
+                            color = Color(0xFF475569),
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    BasicTextField(
-                        value = draftText,
-                        onValueChange = { draftText = it },
-                        textStyle = TextStyle(
-                            color = Color(0xFF0F172A),
-                            fontSize = 15.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            lineHeight = 22.sp
-                        ),
-                        cursorBrush = SolidColor(accentColor),
+
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = accentColor,
+                        shadowElevation = 4.dp,
                         modifier = Modifier
-                            .fillMaxSize()
-                            .testTag(inputTag)
-                    )
+                            .height(48.dp)
+                            .clickable { onApply(draftText.trim()) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "OK",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "OK",
+                                color = Color.White,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp
+                            )
+                        }
+                    }
                 }
 
+                // Premium Elevated Prompt Input Card
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.White,
+                    shadowElevation = 6.dp,
+                    border = BorderStroke(
+                        1.5.dp,
+                        Brush.horizontalGradient(
+                            listOf(
+                                accentColor.copy(alpha = 0.70f),
+                                Color(0xFF8B5CF6).copy(alpha = 0.45f)
+                            )
+                        )
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = accentColor.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    text = title.uppercase(),
+                                    color = accentColor,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 0.8.sp,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                            val wordCount = draftText.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = Color(0xFFF1F5F9)
+                            ) {
+                                Text(
+                                    text = "$wordCount / 75 tokens",
+                                    color = Color(0xFF475569),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(136.dp)
+                        ) {
+                            if (draftText.isEmpty()) {
+                                Text(
+                                    text = placeholderText,
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 15.sp,
+                                    lineHeight = 22.sp
+                                )
+                            }
+                            BasicTextField(
+                                value = draftText,
+                                onValueChange = { draftText = it },
+                                textStyle = TextStyle(
+                                    color = Color(0xFF0F172A),
+                                    fontSize = 15.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    lineHeight = 22.sp
+                                ),
+                                cursorBrush = SolidColor(accentColor),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .testTag(inputTag)
+                            )
+                        }
+                    }
+                }
+
+                // Utility Chips Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    val wordCount = draftText.trim().split(Regex("\\s+")).count { it.isNotBlank() }
                     Text(
-                        text = "$wordCount words (CLIP max ~75 tokens)",
-                        color = Color(0xFF64748B),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        text = "Tap to Add Quick Tags",
+                        color = Color(0xFF0F172A),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.5.sp
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (showResetDefault) {
                             OutlinedButton(
                                 onClick = { draftText = defaultText },
-                                shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.5f))
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.5f)),
+                                modifier = Modifier.height(38.dp)
                             ) {
                                 Text("Reset Default", color = accentColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                         OutlinedButton(
                             onClick = { draftText = "" },
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, Color(0xFFCBD5E1))
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                            modifier = Modifier.height(38.dp)
                         ) {
                             Text("Clear", color = Color(0xFF475569), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
-
-                Text(
-                    text = "Tap to Add Quick Tags",
-                    color = Color(0xFF0F172A),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp
-                )
 
                 FlowRow(
                     modifier = Modifier
@@ -1366,6 +1533,74 @@ private fun FullScreenPromptEditorDialog(
                                 fontSize = 12.5.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
+                        }
+                    }
+                }
+
+                // Pinned Premium Bottom Action Bar (Always Visible Above Keyboard & Nav Bar)
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color(0xF5FFFFFF),
+                    shadowElevation = 8.dp,
+                    border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.2.dp, Color(0xFFCBD5E1)),
+                            modifier = Modifier
+                                .weight(0.42f)
+                                .height(50.dp)
+                        ) {
+                            Text(
+                                text = "Cancel",
+                                color = Color(0xFF334155),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                        }
+
+                        val okGradient = if (accentColor == Color(0xFFDC2626)) {
+                            listOf(Color(0xFFEF4444), Color(0xFFB91C1C))
+                        } else {
+                            listOf(Color(0xFF0284C7), Color(0xFF6366F1))
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(0.58f)
+                                .height(50.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Brush.horizontalGradient(okGradient))
+                                .clickable { onApply(draftText.trim()) }
+                                .testTag(applyTag),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "OK",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "OK",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 16.sp,
+                                    letterSpacing = 0.5.sp
+                                )
+                            }
                         }
                     }
                 }

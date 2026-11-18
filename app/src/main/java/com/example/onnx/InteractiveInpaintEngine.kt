@@ -1,13 +1,21 @@
 package com.example.onnx
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.TensorInfo
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
 import android.util.Log
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.CancellationException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -112,6 +120,13 @@ object InteractiveInpaintEngine {
         }
     }
 
+    internal fun shouldStopAutoFallbackOnError(error: Throwable?): Boolean {
+        return error is CancellationException ||
+            error is SdInpaintOnnxEngine.InsufficientNativeRamException ||
+            error is OutOfMemoryError ||
+            error is IllegalArgumentException
+    }
+
     fun inpaint(
         ortEnv: OrtEnvironment?,
         sourceBitmap: Bitmap,
@@ -128,21 +143,49 @@ object InteractiveInpaintEngine {
         enableDepthGuard: Boolean = false,
         strength: Float = SdInpaintOnnxEngine.DEFAULT_STRENGTH,
         guidanceScale: Float = SdInpaintOnnxEngine.DEFAULT_GUIDANCE_SCALE,
+        context: Context? = null,
+        isCancelled: () -> Boolean = { false },
         onProgress: (String) -> Unit = {}
     ): InpaintExecutionResult {
+        if (isCancelled()) {
+            throw CancellationException("Inpaint cancelled by user.")
+        }
+
         val guardedMaskBitmap = if (enableDepthGuard && depthMap != null) {
             applyDepthForegroundGuardToMask(sourceBitmap, maskBitmap, depthMap)
         } else {
             maskBitmap
         }
+        if (isCancelled()) {
+            throw CancellationException("Inpaint cancelled by user.")
+        }
 
         val requiresExplicitSdPack = selectedOption == InpaintModelOption.SD15_FP32 ||
             selectedOption == InpaintModelOption.SD15_FP16 ||
             selectedOption == InpaintModelOption.REALVIS_INT8
-        if (requiresExplicitSdPack && primarySdPack == null) {
-            throw IllegalStateException(
-                "${selectedOption.displayName} pack is not installed or incomplete. Import the model folder in Inpaint or Models tab."
-            )
+        if (requiresExplicitSdPack) {
+            if (primarySdPack == null) {
+                throw IllegalStateException(
+                    "${selectedOption.displayName} pack is not installed or incomplete. Import the model folder in Inpaint or Models tab."
+                )
+            }
+            if (ortEnv == null) {
+                throw IllegalStateException(
+                    "ONNX Runtime failed to initialize on this device. Restart the app or use Fast Offline CV."
+                )
+            }
+        }
+        if (selectedOption == InpaintModelOption.LAMA_ONNX) {
+            if (lamaModelFile == null || !lamaModelFile.exists() || lamaModelFile.length() <= 1024L) {
+                throw IllegalStateException(
+                    "LaMa ONNX model (lama_fp32.onnx) is missing or incomplete. Import it in the Models tab."
+                )
+            }
+            if (ortEnv == null) {
+                throw IllegalStateException(
+                    "ONNX Runtime failed to initialize on this device. Restart the app or use Fast Offline CV."
+                )
+            }
         }
 
         // 1. Stable Diffusion 1.5 Inpainting ONNX (Priority: FP32 CPU -> RealVis INT8 -> FP16 Secondary)
@@ -161,13 +204,21 @@ object InteractiveInpaintEngine {
                             prompt = prompt,
                             negativePrompt = negativePrompt,
                             fastMode = fastMode,
-                            preferHardwareAccel = preferHardwareAccel,
+                            preferHardwareAccel = false,
                             strength = strength,
                             guidanceScale = guidanceScale,
+                            context = context,
+                            isCancelled = isCancelled,
                             onProgress = onProgress
                         )
                     }
                     if (primaryAttempt.isSuccess) return primaryAttempt.getOrThrow()
+                    val err = primaryAttempt.exceptionOrNull()
+                    if (shouldStopAutoFallbackOnError(err) && err != null) {
+                        throw err
+                    }
+                    SdInpaintOnnxEngine.clearSessionCache()
+                    System.gc()
                     onProgress("Switching to secondary option (${secondarySdPack.packType.displayLabel})...")
                     return SdInpaintOnnxEngine.inpaint(
                         ortEnv = ortEnv,
@@ -177,9 +228,11 @@ object InteractiveInpaintEngine {
                         prompt = prompt,
                         negativePrompt = negativePrompt,
                         fastMode = fastMode,
-                        preferHardwareAccel = preferHardwareAccel,
+                        preferHardwareAccel = false,
                         strength = strength,
                         guidanceScale = guidanceScale,
+                        context = context,
+                        isCancelled = isCancelled,
                         onProgress = onProgress
                     )
                 } else {
@@ -191,9 +244,11 @@ object InteractiveInpaintEngine {
                         prompt = prompt,
                         negativePrompt = negativePrompt,
                         fastMode = fastMode,
-                        preferHardwareAccel = preferHardwareAccel,
+                        preferHardwareAccel = false,
                         strength = strength,
                         guidanceScale = guidanceScale,
+                        context = context,
+                        isCancelled = isCancelled,
                         onProgress = onProgress
                     )
                 }
@@ -249,6 +304,10 @@ object InteractiveInpaintEngine {
             "Please draw a mask over the area you want to edit using 'Draw Mask'."
         }
 
+        if (isCancelled()) {
+            throw CancellationException("Inpaint cancelled by user.")
+        }
+
         // 2. Try ONNX LaMa inpainting if lama_fp32.onnx is installed (and not forced CV_FALLBACK)
         var inpaintedFull: Bitmap? = null
         var engineLabel = "On-Device Boundary-Diffusion Inpainter"
@@ -260,23 +319,33 @@ object InteractiveInpaintEngine {
             lamaModelFile.length() > 1024L
         ) {
             onProgress("Running LaMa ONNX inpainting...")
-            val lamaOut = runCatching {
+            val lamaAttempt = runCatching {
                 runLamaInpaint(
                     ortEnv = ortEnv,
                     lamaFile = lamaModelFile,
                     sourceBitmap = sourceBitmap,
                     fullMaskAlpha = maskAlpha,
-                    preferHardwareAccel = preferHardwareAccel
+                    context = context,
+                    isCancelled = isCancelled
                 )
-            }.getOrNull()
-            if (lamaOut != null) {
-                inpaintedFull = lamaOut
+            }
+            if (lamaAttempt.isSuccess) {
+                inpaintedFull = lamaAttempt.getOrThrow()
                 engineLabel = "LaMa ONNX (${lamaModelFile.name})"
+            } else {
+                val err = lamaAttempt.exceptionOrNull()
+                if (selectedOption == InpaintModelOption.LAMA_ONNX || shouldStopAutoFallbackOnError(err)) {
+                    throw (err ?: IllegalStateException("LaMa ONNX inpainting failed."))
+                }
+                onProgress("LaMa ONNX skipped (${err?.message ?: "error"}); using offline CV...")
             }
         }
 
         // 3. Built-in boundary-diffusion fallback
         if (inpaintedFull == null) {
+            if (isCancelled()) {
+                throw CancellationException("Inpaint cancelled by user.")
+            }
             onProgress("Running offline boundary-diffusion inpainter...")
             inpaintedFull = runBoundaryDiffusionInpaint(
                 sourceBitmap = sourceBitmap,
@@ -335,89 +404,222 @@ object InteractiveInpaintEngine {
         )
     }
 
+    private fun createFloatOrHalfBufferTensor(
+        ortEnv: OrtEnvironment,
+        data: FloatArray,
+        shape: LongArray,
+        type: OnnxJavaType
+    ): OnnxTensor {
+        if (type == OnnxJavaType.FLOAT16) {
+            val byteBuf = ByteBuffer.allocateDirect(data.size * 2).order(ByteOrder.nativeOrder())
+            val shortView = byteBuf.asShortBuffer()
+            for (i in data.indices) {
+                shortView.put(SdInpaintOnnxEngine.floatToHalfBits(data[i]))
+            }
+            byteBuf.rewind()
+            return OnnxTensor.createTensor(ortEnv, byteBuf, shape, OnnxJavaType.FLOAT16)
+        }
+        return OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(data), shape)
+    }
+
+    private fun readLamaOutputFloats(tensor: OnnxTensor): FloatArray {
+        return when (tensor.info.type) {
+            OnnxJavaType.FLOAT16 -> {
+                val sb = tensor.shortBuffer
+                val shorts = ShortArray(sb.remaining())
+                sb.get(shorts)
+                FloatArray(shorts.size) { idx ->
+                    val v = SdInpaintOnnxEngine.halfBitsToFloat(shorts[idx])
+                    if (v.isFinite()) v else 0f
+                }
+            }
+            else -> {
+                val fb = tensor.floatBuffer
+                val floats = FloatArray(fb.remaining())
+                fb.get(floats)
+                for (i in floats.indices) {
+                    if (!floats[i].isFinite()) floats[i] = 0f
+                }
+                floats
+            }
+        }
+    }
+
     private fun runLamaInpaint(
         ortEnv: OrtEnvironment,
         lamaFile: File,
         sourceBitmap: Bitmap,
         fullMaskAlpha: FloatArray,
-        preferHardwareAccel: Boolean
+        context: Context? = null,
+        isCancelled: () -> Boolean = { false }
     ): Bitmap {
-        val origW = sourceBitmap.width
-        val origH = sourceBitmap.height
+        if (isCancelled()) throw CancellationException("Inpaint cancelled by user.")
+        SdInpaintOnnxEngine.queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
+            if (isLowMem || availMb < 450L) {
+                throw SdInpaintOnnxEngine.InsufficientNativeRamException(
+                    "Insufficient free RAM for LaMa ONNX (${availMb}MB available)."
+                )
+            }
+        }
 
+        val origW = sourceBitmap.width.coerceAtLeast(1)
+        val origH = sourceBitmap.height.coerceAtLeast(1)
+
+        // Force safe CPU/ORT for LaMa (avoids XNNPACK/NNAPI ConvTranspose/FFT crashes)
         val (lamaSession, _) = OnnxProtobufInspector.createSessionWithFallback(
             ortEnv = ortEnv,
             modelFile = lamaFile,
-            preferHardwareAcceleration = preferHardwareAccel
+            preferHardwareAcceleration = false
         )
         lamaSession.use { session ->
-                val names = session.inputNames.toList()
-                val imgName = names.firstOrNull { it.contains("image", ignoreCase = true) } ?: names[0]
-                val maskName = names.firstOrNull { it.contains("mask", ignoreCase = true) }
-                    ?: names.getOrElse(1) { names[0] }
+            if (isCancelled()) throw CancellationException("Inpaint cancelled by user.")
 
-                val imgInfo = session.inputInfo[imgName]?.info as? TensorInfo
-                val modelH = imgInfo?.shape?.getOrNull(2)?.toInt()?.takeIf { it in 128..2048 } ?: 512
-                val modelW = imgInfo?.shape?.getOrNull(3)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+            val names = session.inputNames.toList()
+            val imgName = names.firstOrNull { it.contains("image", ignoreCase = true) } ?: names[0]
+            val maskName = names.firstOrNull { it.contains("mask", ignoreCase = true) }
+                ?: names.getOrElse(1) { names[0] }
 
-                val scaled = if (origW == modelW && origH == modelH) {
-                    sourceBitmap
-                } else {
-                    Bitmap.createScaledBitmap(sourceBitmap, modelW, modelH, true)
-                }
-                val hw = modelW * modelH
-                val pixels = IntArray(hw)
-                scaled.getPixels(pixels, 0, modelW, 0, 0, modelW, modelH)
-                if (scaled !== sourceBitmap) scaled.recycle()
+            val imgInfo = session.inputInfo[imgName]?.info as? TensorInfo
+            val maskInfo = session.inputInfo[maskName]?.info as? TensorInfo
+            val imgShape = imgInfo?.shape
+            val isInputNhwc = imgShape != null && imgShape.size == 4 && imgShape[3] == 3L && imgShape[1] != 3L
+            val modelH = if (isInputNhwc) {
+                imgShape?.getOrNull(1)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+            } else {
+                imgShape?.getOrNull(2)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+            }
+            val modelW = if (isInputNhwc) {
+                imgShape?.getOrNull(2)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+            } else {
+                imgShape?.getOrNull(3)?.toInt()?.takeIf { it in 128..2048 } ?: 512
+            }
 
-                val imgBuf = FloatBuffer.allocate(3 * hw)
-                val maskBuf = FloatBuffer.allocate(hw)
-                for (y in 0 until modelH) {
-                    val sy = (y * origH / modelH).coerceIn(0, origH - 1)
-                    for (x in 0 until modelW) {
-                        val sx = (x * origW / modelW).coerceIn(0, origW - 1)
-                        val i = y * modelW + x
-                        val m = if (fullMaskAlpha[sy * origW + sx] > 0.15f) 1.0f else 0.0f
-                        val c = pixels[i]
-                        val r = ((c ushr 16) and 0xFF) / 255.0f
-                        val g = ((c ushr 8) and 0xFF) / 255.0f
-                        val b = (c and 0xFF) / 255.0f
-                        imgBuf.put(i, r * (1f - m))
-                        imgBuf.put(hw + i, g * (1f - m))
-                        imgBuf.put(2 * hw + i, b * (1f - m))
-                        maskBuf.put(i, m)
+            // Aspect-ratio preserved fit inside modelW x modelH so non-square portraits do not squash/blur
+            val fitScale = min(modelW.toFloat() / origW.toFloat(), modelH.toFloat() / origH.toFloat())
+            val contentW = (origW * fitScale).roundToInt().coerceIn(1, modelW)
+            val contentH = (origH * fitScale).roundToInt().coerceIn(1, modelH)
+            val padLeft = (modelW - contentW) / 2
+            val padTop = (modelH - contentH) / 2
+
+            val paddedBmp = Bitmap.createBitmap(modelW, modelH, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(paddedBmp)
+            canvas.drawColor(Color.rgb(128, 128, 128))
+            val dstContentRect = Rect(padLeft, padTop, padLeft + contentW, padTop + contentH)
+            canvas.drawBitmap(sourceBitmap, Rect(0, 0, origW, origH), dstContentRect, Paint(Paint.FILTER_BITMAP_FLAG))
+
+            val hw = modelW * modelH
+            val pixels = IntArray(hw)
+            paddedBmp.getPixels(pixels, 0, modelW, 0, 0, modelW, modelH)
+            paddedBmp.recycle()
+
+            val imgFloats = FloatArray(3 * hw)
+            val maskFloats = FloatArray(hw)
+            for (y in 0 until modelH) {
+                val contentY = (y - padTop).coerceIn(0, contentH - 1)
+                val sy = (contentY * origH / contentH).coerceIn(0, origH - 1)
+                val insideY = y in padTop until (padTop + contentH)
+                for (x in 0 until modelW) {
+                    val contentX = (x - padLeft).coerceIn(0, contentW - 1)
+                    val sx = (contentX * origW / contentW).coerceIn(0, origW - 1)
+                    val inside = insideY && (x in padLeft until (padLeft + contentW))
+                    val i = y * modelW + x
+                    val m = if (inside && fullMaskAlpha[sy * origW + sx] > 0.15f) 1.0f else 0.0f
+                    val c = pixels[i]
+                    val r = ((c ushr 16) and 0xFF) / 255.0f
+                    val g = ((c ushr 8) and 0xFF) / 255.0f
+                    val b = (c and 0xFF) / 255.0f
+                    if (isInputNhwc) {
+                        val base = i * 3
+                        imgFloats[base] = r * (1f - m)
+                        imgFloats[base + 1] = g * (1f - m)
+                        imgFloats[base + 2] = b * (1f - m)
+                    } else {
+                        imgFloats[i] = r * (1f - m)
+                        imgFloats[hw + i] = g * (1f - m)
+                        imgFloats[2 * hw + i] = b * (1f - m)
                     }
+                    maskFloats[i] = m
                 }
-                imgBuf.rewind()
-                maskBuf.rewind()
+            }
 
-                OnnxTensor.createTensor(ortEnv, imgBuf, longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())).use { imgT ->
-                    OnnxTensor.createTensor(ortEnv, maskBuf, longArrayOf(1L, 1L, modelH.toLong(), modelW.toLong())).use { maskT ->
-                        session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
-                            val outT = res[0] as OnnxTensor
-                            val outFloats = FloatArray(3 * hw)
-                            outT.floatBuffer.get(outFloats)
-                            val maxVal = outFloats.maxOrNull() ?: 1.0f
-                            val scale = if (maxVal <= 1.5f) 255.0f else 1.0f
-                            val outPx = IntArray(hw)
-                            for (i in 0 until hw) {
-                                val r = (outFloats[i] * scale).toInt().coerceIn(0, 255)
-                                val g = (outFloats[hw + i] * scale).toInt().coerceIn(0, 255)
-                                val b = (outFloats[2 * hw + i] * scale).toInt().coerceIn(0, 255)
-                                outPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                            }
-                            val outBmp = Bitmap.createBitmap(modelW, modelH, Bitmap.Config.ARGB_8888)
-                            outBmp.setPixels(outPx, 0, modelW, 0, 0, modelW, modelH)
-                            return if (origW == modelW && origH == modelH) {
-                                outBmp
+            val inImgShape = if (isInputNhwc) {
+                longArrayOf(1L, modelH.toLong(), modelW.toLong(), 3L)
+            } else {
+                longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())
+            }
+            val maskHasChannelLast = maskInfo?.shape?.let { it.size == 4 && it[3] == 1L && it[1] != 1L } == true
+            val inMaskShape = if (maskHasChannelLast) {
+                longArrayOf(1L, modelH.toLong(), modelW.toLong(), 1L)
+            } else {
+                longArrayOf(1L, 1L, modelH.toLong(), modelW.toLong())
+            }
+            val imgType = imgInfo?.type ?: OnnxJavaType.FLOAT
+            val maskType = maskInfo?.type ?: OnnxJavaType.FLOAT
+
+            createFloatOrHalfBufferTensor(ortEnv, imgFloats, inImgShape, imgType).use { imgT ->
+                createFloatOrHalfBufferTensor(ortEnv, maskFloats, inMaskShape, maskType).use { maskT ->
+                    session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
+                        val outT = res[0] as OnnxTensor
+                        val outFloats = readLamaOutputFloats(outT)
+                        if (outFloats.size < 3 * hw) {
+                            throw IllegalStateException("LaMa ONNX output shape mismatch: got ${outFloats.size} floats, expected ${3 * hw}.")
+                        }
+                        val outShape = outT.info?.shape
+                        val isOutNhwc = outShape != null && outShape.size == 4 && outShape[3] == 3L && outShape[1] != 3L
+
+                        var minVal = Float.MAX_VALUE
+                        var maxVal = -Float.MAX_VALUE
+                        val limit = min(outFloats.size, 3 * hw)
+                        for (k in 0 until limit step max(1, limit / 4096)) {
+                            val v = outFloats[k]
+                            if (v < minVal) minVal = v
+                            if (v > maxVal) maxVal = v
+                        }
+                        val isSignedMinusOneToOne = minVal < -0.15f && maxVal <= 1.35f
+                        val scale = if (isSignedMinusOneToOne) 127.5f else if (maxVal <= 1.5f) 255.0f else 1.0f
+                        val offset = if (isSignedMinusOneToOne) 127.5f else 0.0f
+
+                        val outPx = IntArray(hw)
+                        for (i in 0 until hw) {
+                            val rf: Float
+                            val gf: Float
+                            val bf: Float
+                            if (isOutNhwc) {
+                                val base = i * 3
+                                rf = outFloats[base]
+                                gf = outFloats[base + 1]
+                                bf = outFloats[base + 2]
                             } else {
-                                val resized = Bitmap.createScaledBitmap(outBmp, origW, origH, true)
-                                outBmp.recycle()
-                                resized
+                                rf = outFloats[i]
+                                gf = outFloats[hw + i]
+                                bf = outFloats[2 * hw + i]
                             }
+                            val r = (rf * scale + offset).roundToInt().coerceIn(0, 255)
+                            val g = (gf * scale + offset).roundToInt().coerceIn(0, 255)
+                            val b = (bf * scale + offset).roundToInt().coerceIn(0, 255)
+                            outPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                        }
+                        val outBmp = Bitmap.createBitmap(modelW, modelH, Bitmap.Config.ARGB_8888)
+                        outBmp.setPixels(outPx, 0, modelW, 0, 0, modelW, modelH)
+
+                        // Crop back out the padded margins, then scale to original aspect ratio
+                        val croppedContent = if (padLeft > 0 || padTop > 0 || contentW != modelW || contentH != modelH) {
+                            Bitmap.createBitmap(outBmp, padLeft, padTop, contentW, contentH).also {
+                                outBmp.recycle()
+                            }
+                        } else {
+                            outBmp
+                        }
+                        return if (origW == contentW && origH == contentH) {
+                            croppedContent
+                        } else {
+                            val resized = Bitmap.createScaledBitmap(croppedContent, origW, origH, true)
+                            croppedContent.recycle()
+                            resized
                         }
                     }
                 }
+            }
         }
     }
 

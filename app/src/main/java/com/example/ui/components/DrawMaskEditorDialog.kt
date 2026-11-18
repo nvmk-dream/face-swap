@@ -297,7 +297,7 @@ fun DrawMaskEditorDialog(
                             val autoBase = if (hasDepth || hasAcc || preservedBase != null) {
                                 val base = Bitmap.createBitmap(sourceBitmap.width, sourceBitmap.height, Bitmap.Config.ARGB_8888)
                                 val baseCanvas = AndroidCanvas(base)
-                                if (preservedBase != null && !hasAcc) {
+                                if (preservedBase != null) {
                                     baseCanvas.drawBitmap(
                                         preservedBase,
                                         null,
@@ -702,7 +702,7 @@ fun DrawMaskEditorDialog(
                         val minSide = minOf(size.width, size.height)
                         val maskColor = Color(0xFF00E5FF).copy(alpha = 0.58f)
 
-                        if (keepExistingMask && existingMaskBitmap != null && selectedAccessories.isEmpty()) {
+                        if (keepExistingMask && existingMaskBitmap != null) {
                             drawImage(
                                 image = existingMaskBitmap.asImageBitmap(),
                                 dstSize = IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1)),

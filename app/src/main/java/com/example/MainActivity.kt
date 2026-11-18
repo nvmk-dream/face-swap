@@ -648,6 +648,7 @@ fun FaceSwapStudioApp(
                         }
                         viewModel.runInpaint()
                     },
+                    onCancelInpaint = viewModel::cancelActiveInpaint,
                     onReuseInpaintResult = viewModel::reuseInpaintResultAsSource,
                     onSaveBitmapToFolder = requestSaveToFolder,
                     onDownloadBitmapToGallery = { bmp ->

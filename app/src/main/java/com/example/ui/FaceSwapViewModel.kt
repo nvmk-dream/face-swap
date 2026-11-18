@@ -241,6 +241,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     private val swapCancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeSwapJob: kotlinx.coroutines.Job? = null
+    private val inpaintCancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var activeInpaintJob: kotlinx.coroutines.Job? = null
 
     val auditLogs: StateFlow<List<SwapAuditLog>> = auditRepository.allLogs.stateIn(
         scope = viewModelScope,
@@ -252,7 +254,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         refreshModelInspections()
         viewModelScope.launch {
             BackgroundProcessingCoordinator.inpaintSync.collect { sync ->
-                if (sync.isRunning || sync.resultBitmap != null || sync.errorMessage != null) {
+                if (sync.isRunning || sync.resultBitmap != null || sync.errorMessage != null || sync.statusMessage != null) {
                     _uiState.update { cur ->
                         cur.copy(
                             isInpainting = sync.isRunning,
@@ -1770,6 +1772,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         if (!needsHeadParserAndSd) {
             return Triple(cur.inpaintModelOption, cur.inpaintModelLabel, false)
         }
+        // Preserve explicit non-AUTO selections (e.g. LAMA_ONNX, CV_FALLBACK, or a user-selected SD pack)
+        if (cur.inpaintModelOption != InpaintModelOption.AUTO) {
+            return Triple(cur.inpaintModelOption, cur.inpaintModelLabel, true)
+        }
         val ctx = getApplication<Application>()
         val installedPacks = cur.installedSdInpaintPacks.ifEmpty {
             SdInpaintPackManager.discoverInstalledPacks(ctx).map { it.packType }
@@ -2047,6 +2053,38 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun cancelActiveInpaint() {
+        val state = _uiState.value
+        if (!state.isInpainting && activeInpaintJob?.isActive != true) return
+        inpaintCancellationRequested.set(true)
+        activeInpaintJob?.cancel(java.util.concurrent.CancellationException("Inpaint cancelled by user."))
+        SdInpaintOnnxEngine.clearSessionCache()
+        val appCtx = getApplication<Application>()
+        val cancelMsg = "Inpaint cancelled."
+        BackgroundProcessingCoordinator.updateInpaint {
+            it.copy(
+                isRunning = false,
+                progressText = null,
+                errorMessage = null,
+                statusMessage = cancelMsg
+            )
+        }
+        _uiState.update {
+            it.copy(
+                isInpainting = false,
+                inpaintProgressText = null,
+                errorBannerMessage = null,
+                statusBannerMessage = cancelMsg
+            )
+        }
+        ProcessingForegroundService.finishAndNotify(
+            context = appCtx,
+            showCompletionNotification = false,
+            completedTitle = "Inpaint Cancelled",
+            completedBody = cancelMsg
+        )
+    }
+
     fun runInpaint() {
         val state = _uiState.value
         val srcBmp = state.inpaintSourceBitmap
@@ -2064,7 +2102,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        if (state.isInpainting) return
+        if (state.isInpainting || activeInpaintJob?.isActive == true) return
+        inpaintCancellationRequested.set(false)
         val appCtx = getApplication<Application>()
         ProcessingForegroundService.startOrUpdate(
             context = appCtx,
@@ -2075,7 +2114,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         BackgroundProcessingCoordinator.updateInpaint {
             it.copy(isRunning = true, progressText = "Preparing offline inpainting engine...", errorMessage = null, statusMessage = null)
         }
-        BackgroundProcessingCoordinator.scope.launch {
+        activeInpaintJob = BackgroundProcessingCoordinator.scope.launch {
             _uiState.update {
                 it.copy(
                     isInpainting = true,
@@ -2094,9 +2133,16 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     } else {
                         null
                     }
-                    if (primaryPack != null) {
-                        // Free FaceSwap ONNX sessions before running multi-stage SD 1.5 diffusion
+                    if (primaryPack != null ||
+                        state.inpaintModelOption == InpaintModelOption.LAMA_ONNX ||
+                        state.inpaintModelOption == InpaintModelOption.AUTO
+                    ) {
+                        // Free FaceSwap / SegFormer / Depth ONNX sessions before heavy neural inpainting
                         modelService.releaseAllSessions()
+                        SdInpaintOnnxEngine.clearSessionCache()
+                    }
+                    if (inpaintCancellationRequested.get()) {
+                        throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
                     }
                     val activeDepthMap = if (state.inpaintDepthGuardEnabled && state.inpaintDepthMap == null &&
                         DepthEstimationEngine.hasInstalledDepthModel(ctx)
@@ -2128,15 +2174,25 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         enableDepthGuard = state.inpaintDepthGuardEnabled,
                         strength = state.inpaintStrength,
                         guidanceScale = state.inpaintCfgScale,
+                        context = ctx,
+                        isCancelled = { inpaintCancellationRequested.get() },
                         onProgress = { progressMsg ->
+                            if (inpaintCancellationRequested.get()) return@inpaint
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
                             BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }
-                            val stepMatch = Regex("Step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
-                            val pct = if (stepMatch != null) {
-                                val curS = stepMatch.groupValues[1].toIntOrNull() ?: 1
-                                val totS = stepMatch.groupValues[2].toIntOrNull()?.coerceAtLeast(1) ?: 8
-                                (15 + (curS * 78) / totS).coerceIn(15, 95)
-                            } else -1
+                            val diffStepMatch = Regex("step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
+                            val pct = when {
+                                diffStepMatch != null -> {
+                                    val curS = diffStepMatch.groupValues[1].toIntOrNull() ?: 1
+                                    val totS = diffStepMatch.groupValues[2].toIntOrNull()?.coerceAtLeast(1) ?: 8
+                                    (25 + (curS * 63) / totS).coerceIn(25, 88)
+                                }
+                                progressMsg.contains("1/4") -> 10
+                                progressMsg.contains("2/4") -> 20
+                                progressMsg.contains("4/4") -> 92
+                                progressMsg.contains("LaMa", ignoreCase = true) -> 50
+                                else -> -1
+                            }
                             ProcessingForegroundService.startOrUpdate(
                                 context = appCtx,
                                 title = "Inpaint Generating (Background Active)",
@@ -2200,23 +2256,47 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedBody = doneMsg
                 )
             } catch (t: Throwable) {
-                val errMsg = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
-                BackgroundProcessingCoordinator.updateInpaint {
-                    it.copy(isRunning = false, progressText = null, errorMessage = errMsg)
-                }
-                _uiState.update {
-                    it.copy(
-                        isInpainting = false,
-                        inpaintProgressText = null,
-                        errorBannerMessage = errMsg
+                val cancelled = t is java.util.concurrent.CancellationException || inpaintCancellationRequested.get()
+                if (cancelled) {
+                    val cancelMsg = "Inpaint cancelled."
+                    BackgroundProcessingCoordinator.updateInpaint {
+                        it.copy(isRunning = false, progressText = null, errorMessage = null, statusMessage = cancelMsg)
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isInpainting = false,
+                            inpaintProgressText = null,
+                            errorBannerMessage = null,
+                            statusBannerMessage = cancelMsg
+                        )
+                    }
+                    ProcessingForegroundService.finishAndNotify(
+                        context = appCtx,
+                        showCompletionNotification = false,
+                        completedTitle = "Inpaint Cancelled",
+                        completedBody = cancelMsg
+                    )
+                } else {
+                    val errMsg = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
+                    BackgroundProcessingCoordinator.updateInpaint {
+                        it.copy(isRunning = false, progressText = null, errorMessage = errMsg)
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isInpainting = false,
+                            inpaintProgressText = null,
+                            errorBannerMessage = errMsg
+                        )
+                    }
+                    ProcessingForegroundService.finishAndNotify(
+                        context = appCtx,
+                        showCompletionNotification = true,
+                        completedTitle = "Inpaint Failed",
+                        completedBody = errMsg
                     )
                 }
-                ProcessingForegroundService.finishAndNotify(
-                    context = appCtx,
-                    showCompletionNotification = true,
-                    completedTitle = "Inpaint Failed",
-                    completedBody = errMsg
-                )
+            } finally {
+                activeInpaintJob = null
             }
         }
     }
