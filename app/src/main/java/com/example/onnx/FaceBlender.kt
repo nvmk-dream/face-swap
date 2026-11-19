@@ -1890,10 +1890,21 @@ object FaceBlender {
         val maxX = (max(geom512.rightEye.x, geom512.rightMouth.x) + geom512.eyeDist * 0.55f)
             .toInt().coerceIn(minX + 1, HD_SIZE - 13)
 
+        val mouthMidX = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
+        val mouthMidY = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
+        val lipRx = geom512.eyeDist * 0.62f
+        val lipRy = geom512.eyeDist * 0.28f
+
         for (y in minY..maxY) {
             val row = y * HD_SIZE
             for (x in minX..maxX) {
                 val idx = row + x
+                val dLipSq = orientedEllipseDistSq(
+                    x.toFloat(), y.toFloat(),
+                    mouthMidX, mouthMidY,
+                    lipRx, lipRy,
+                    geom512.cosA, geom512.sinA
+                )
                 val sc = swapPx512[idx]
                 val sR = (sc ushr 16) and 0xFF
                 val sG = (sc ushr 8) and 0xFF
@@ -1905,7 +1916,12 @@ object FaceBlender {
                 val tB = tc and 0xFF
                 val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
 
-                val isNeonRed = (sR - sG >= 68) && (sR - sB >= 68) && (tR - tG < 46)
+                val isLipZone = dLipSq <= 1.25f || (tR - tG >= 24)
+                val isNeonRed = if (isLipZone) {
+                    (sR - sG >= 120) && (sG <= 36) && (sB <= 36) && (tR - tG < 40)
+                } else {
+                    (sR - sG >= 76) && (sR - sB >= 76) && (tR - tG < 46)
+                }
                 val isCollapsedBlack = (sR <= 8 && sG <= 8 && sB <= 8) && (tLum > 48f)
                 if (isNeonRed || isCollapsedBlack) {
                     val outR = (sR * 0.12f + tR * 0.88f).toInt().coerceIn(0, 255)

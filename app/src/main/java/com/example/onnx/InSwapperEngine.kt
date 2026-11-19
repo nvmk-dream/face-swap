@@ -132,6 +132,7 @@ data class FaceSwapExecutionResult(
     val benchmarkReports: List<SwapCandidateBenchmarkReport> = emptyList(),
     val engineUsed: String = "NEURAL",
     val ageHarmonySummary: String? = null,
+    val usedNeuralGfpgan: Boolean = false,
     val headlessTargetPreview: Bitmap? = null,
     val sourceHeadCutoutPreview: Bitmap? = null
 )
@@ -712,7 +713,8 @@ object InSwapperEngine {
             stageTimings = stageTimings,
             benchmarkReports = benchmarkReports,
             engineUsed = engineUsed,
-            ageHarmonySummary = firstAgeHarmonySummary
+            ageHarmonySummary = firstAgeHarmonySummary,
+            usedNeuralGfpgan = usedNeuralGfpgan
         )
     }
 

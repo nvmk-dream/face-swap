@@ -413,4 +413,179 @@ class HeadErase3DPipelineTest {
         assertEquals(768, dims768.height)
         root.deleteRecursively()
     }
+
+    @Test
+    fun `warpSourceHeadToTarget3DPoseWithBounds preserves open-mouth Source smile teeth without lip collapse`() {
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(30, 35, 45),
+            skinColor = Color.rgb(230, 185, 155),
+            hairColor = Color.rgb(28, 22, 22)
+        )
+        // Paint wide open smile teeth band around Source mouth center
+        val mouthCy = (srcFace.landmarks5[3].y + srcFace.landmarks5[4].y) * 0.5f
+        val mouthCx = 128f
+        for (y in (mouthCy - 5).toInt()..(mouthCy + 6).toInt()) {
+            for (x in (mouthCx - 16).toInt()..(mouthCx + 16).toInt()) {
+                srcBmp.setPixel(x, y, Color.rgb(245, 245, 245))
+            }
+        }
+        val (tgtBmp, rawTgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(120, 75, 45),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(25, 20, 20)
+        )
+        // Narrower closed-mouth target landmarks
+        val closedMouthFace = rawTgtFace.copy(
+            landmarks5 = rawTgtFace.landmarks5.mapIndexed { idx, pt ->
+                when (idx) {
+                    3 -> PointF(pt.x + 6f, pt.y - 8f)
+                    4 -> PointF(pt.x - 6f, pt.y - 8f)
+                    else -> pt
+                }
+            }
+        )
+
+        val srcMesh = FaceMesh3DEngine.extractFaceMesh3D(null, srcBmp, srcFace, null)
+        val tgtMesh = FaceMesh3DEngine.extractFaceMesh3D(null, tgtBmp, closedMouthFace, null)
+        val mat = HeadSegmentationAndInpainting.estimateHeadAlignmentMatrix(closedMouthFace.landmarks5, 256, 0f)
+        val warped = FaceMesh3DEngine.warpSourceHeadToTarget3DPoseWithBounds(
+            sourceBitmap = srcBmp,
+            sourceMesh = srcMesh,
+            targetMesh = tgtMesh,
+            targetCanvasMatrix2x3 = mat,
+            canvasSize = 256
+        )
+
+        // Bright white teeth pixels must survive cleanly in the warped mouth zone without black/skin tearing
+        var brightTeethCount = 0
+        for (y in 160..215) {
+            for (x in 100..156) {
+                val p = warped.bitmap.getPixel(x, y)
+                if (Color.red(p) > 225 && Color.green(p) > 225 && Color.blue(p) > 225) {
+                    brightTeethCount++
+                }
+            }
+        }
+        assertTrue("Expected open-mouth teeth pixels preserved cleanly, got count=$brightTeethCount", brightTeethCount >= 40)
+    }
+
+    @Test
+    fun `CleanEraseHeadReplacementEngine strips cool corner glare, keeps cheek smooth, and protects lower dupatta`() {
+        val w = 256
+        val h = 256
+        val (srcBmp, rawSrcFace) = createPortrait(
+            width = w,
+            height = h,
+            bgColor = Color.rgb(85, 185, 195), // Cool cyan window glare behind cropped top hair
+            skinColor = Color.rgb(232, 188, 158),
+            hairColor = Color.rgb(26, 24, 24)
+        )
+        // Paint dark black blouse strip near bottom edge of source
+        for (y in 215 until h) {
+            for (x in 0 until w) {
+                srcBmp.setPixel(x, y, Color.rgb(12, 12, 14))
+            }
+        }
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = w,
+            height = h,
+            bgColor = Color.rgb(105, 62, 34), // Warm brown wood background
+            skinColor = Color.rgb(212, 168, 140),
+            hairColor = Color.rgb(22, 20, 20)
+        )
+        // Paint olive-gold dupatta band below Target chin
+        for (y in 196 until 228) {
+            for (x in 64 until 192) {
+                tgtBmp.setPixel(x, y, Color.rgb(165, 148, 52))
+            }
+        }
+
+        val result = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = rawSrcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(tgtFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+
+        // 1. Target olive-gold dupatta directly below neck must remain protected (never overwritten by black blouse)
+        val dupattaPx = result.outputBitmap.getPixel(128, 212)
+        assertTrue(
+            "Expected olive-gold dupatta preserved below chin, got RGB=(${Color.red(dupattaPx)},${Color.green(dupattaPx)},${Color.blue(dupattaPx)})",
+            Color.red(dupattaPx) > 110 && Color.green(dupattaPx) > 95
+        )
+        // 2. Step 2 portrait upper crown must not leak strong cyan window glare
+        val step2 = result.stage2SwapRestore512!!
+        for (y in 135..165 step 10) {
+            val crownPx = step2.getPixel(215, y)
+            assertTrue(
+                "Expected cool cyan cast stripped from crown at y=$y, got RGB=(${Color.red(crownPx)},${Color.green(crownPx)},${Color.blue(crownPx)})",
+                Color.blue(crownPx) - Color.red(crownPx) < 18
+            )
+        }
+    }
+
+    @Test
+    fun `CleanEraseHeadReplacementEngine preserves peripheral marigold flowers while erasing bright wide hair`() {
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(20, 25, 35),
+            skinColor = Color.rgb(225, 180, 150),
+            hairColor = Color.rgb(30, 20, 20),
+            hairRadiusScale = 0.85f
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(220, 235, 250),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(210, 25, 25),
+            hairRadiusScale = 1.35f
+        )
+        // Add vivid yellow flower garland cluster in top-left exterior region outside head
+        for (y in 24..56) {
+            for (x in 20..52) {
+                tgtBmp.setPixel(x, y, Color.rgb(245, 200, 20))
+            }
+        }
+
+        val result = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(tgtFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+
+        val flowerPx = result.outputBitmap.getPixel(36, 40)
+        assertTrue(
+            "Expected peripheral yellow flower preserved, got RGB=(${Color.red(flowerPx)},${Color.green(flowerPx)},${Color.blue(flowerPx)})",
+            Color.red(flowerPx) > 190 && Color.green(flowerPx) > 150 && Color.blue(flowerPx) < 80
+        )
+        val erasedHairPx = result.outputBitmap.getPixel(128, 48)
+        assertTrue(
+            "Expected wide red target hair erased cleanly toward sky bg, got blue=${Color.blue(erasedHairPx)}",
+            Color.blue(erasedHairPx) > 150
+        )
+    }
 }
+

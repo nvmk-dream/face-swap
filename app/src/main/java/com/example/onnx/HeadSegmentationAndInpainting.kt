@@ -177,14 +177,16 @@ object HeadSegmentationAndInpainting {
         if (ortEnv != null && mattingModelFile != null && mattingModelFile.exists() && mattingModelFile.length() > 1024L) {
             val refinedMasks = runCatching {
                 val refined = runModnetOnnx(
-                    ortEnv,
-                    mattingModelFile,
-                    alignedHeadCrop,
-                    baseMasks.fullHeadAlpha,
-                    preferHardwareAccel
+                    ortEnv = ortEnv,
+                    mattingFile = mattingModelFile,
+                    alignedHeadCrop = alignedHeadCrop,
+                    baseAlpha = baseMasks.fullHeadAlpha,
+                    hasNeuralSegformer = baseMasks.usedSegmentationOnnx,
+                    preferHardwareAccel = preferHardwareAccel
                 )
                 baseMasks.copy(
                     fullHeadAlpha = refined,
+                    usedSegmentationOnnx = true,
                     segmentationSourceLabel = "${baseMasks.segmentationSourceLabel} + modnet.onnx"
                 )
             }.getOrNull()
@@ -305,7 +307,8 @@ object HeadSegmentationAndInpainting {
         ortEnv: OrtEnvironment,
         mattingFile: File,
         alignedHeadCrop: Bitmap,
-        coarseAlpha: FloatArray,
+        baseAlpha: FloatArray,
+        hasNeuralSegformer: Boolean,
         preferHardwareAccel: Boolean
     ): FloatArray {
         val cropSize = alignedHeadCrop.width
@@ -344,13 +347,61 @@ object HeadSegmentationAndInpainting {
                 val outTensor = res[0] as OnnxTensor
                 val matte512 = FloatArray(hw)
                 outTensor.floatBuffer.get(matte512)
+                val borderMargin = (cropSize * 0.025f).coerceAtLeast(4f)
+                val scaleXY = (modelSize - 1).toFloat() / (cropSize - 1).coerceAtLeast(1).toFloat()
                 for (y in 0 until cropSize) {
-                    val sy = (y * modelSize / cropSize).coerceIn(0, modelSize - 1)
+                    val sy = (y * scaleXY).coerceIn(0f, (modelSize - 1).toFloat())
+                    val y0 = sy.toInt().coerceIn(0, modelSize - 2)
+                    val y1 = y0 + 1
+                    val fy = sy - y0
+                    val rowOff = y * cropSize
+                    val ny = y.toFloat() / cropSize.toFloat()
                     for (x in 0 until cropSize) {
-                        val sx = (x * modelSize / cropSize).coerceIn(0, modelSize - 1)
-                        val modVal = matte512[sy * modelSize + sx].coerceIn(0f, 1f)
-                        val idx = y * cropSize + x
-                        refined[idx] = (0.55f * coarseAlpha[idx] + 0.45f * modVal).coerceIn(0f, 1f)
+                        val sx = (x * scaleXY).coerceIn(0f, (modelSize - 1).toFloat())
+                        val x0 = sx.toInt().coerceIn(0, modelSize - 2)
+                        val x1 = x0 + 1
+                        val fx = sx - x0
+                        val m00 = matte512[y0 * modelSize + x0]
+                        val m10 = matte512[y0 * modelSize + x1]
+                        val m01 = matte512[y1 * modelSize + x0]
+                        val m11 = matte512[y1 * modelSize + x1]
+                        val modVal = (
+                            (m00 * (1f - fx) + m10 * fx) * (1f - fy) +
+                                (m01 * (1f - fx) + m11 * fx) * fy
+                            ).coerceIn(0f, 1f)
+
+                        val idx = rowOff + x
+                        val combined = if (hasNeuralSegformer) {
+                            (0.40f * baseAlpha[idx] + 0.60f * modVal).coerceIn(0f, 1f)
+                        } else {
+                            // Contrast-clean MODNet foreground (solid hair/face = 1.0, crisp background = 0.0)
+                            val shapedMod = when {
+                                modVal <= 0.09f -> 0f
+                                modVal >= 0.80f -> 1f
+                                else -> ((modVal - 0.09f) / 0.71f).coerceIn(0f, 1f)
+                            }
+                            // Only guarantee interior face oval near eye/nose/mouth stays 1.0 (never exterior walls)
+                            val nx = x.toFloat() / cropSize.toFloat()
+                            val fDx = (nx - 0.50f) / 0.17f
+                            val fDy = (ny - 0.57f) / 0.19f
+                            val inFaceCore = (fDx * fDx + fDy * fDy) < 0.85f
+                            if (inFaceCore && shapedMod > 0.20f) {
+                                max(shapedMod, baseAlpha[idx])
+                            } else {
+                                shapedMod
+                            }
+                        }
+
+                        val edgeDist = min(
+                            min(x.toFloat(), (cropSize - 1 - x).toFloat()),
+                            min(y.toFloat(), (cropSize - 1 - y).toFloat())
+                        )
+                        val borderTaper = if (edgeDist < borderMargin) {
+                            (edgeDist / borderMargin).coerceIn(0f, 1f)
+                        } else {
+                            1f
+                        }
+                        refined[idx] = (combined * borderTaper).coerceIn(0f, 1f)
                     }
                 }
             }

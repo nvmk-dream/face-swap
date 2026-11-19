@@ -745,12 +745,21 @@ object GhostHeadReplacementEngine {
                 val idx = y * size + x
                 val sc = srcPx[idx]
                 val tc = tgtPx[idx]
-                sRMean += (sc ushr 16) and 0xFF
-                sGMean += (sc ushr 8) and 0xFF
-                sBMean += sc and 0xFF
-                tRMean += (tc ushr 16) and 0xFF
-                tGMean += (tc ushr 8) and 0xFF
-                tBMean += tc and 0xFF
+                val sr = (sc ushr 16) and 0xFF
+                val sg = (sc ushr 8) and 0xFF
+                val sb = sc and 0xFF
+                val tr = (tc ushr 16) and 0xFF
+                val tg = (tc ushr 8) and 0xFF
+                val tb = tc and 0xFF
+                val sLum = 0.299f * sr + 0.587f * sg + 0.114f * sb
+                val tLum = 0.299f * tr + 0.587f * tg + 0.114f * tb
+                if (sLum !in 38f..244f || tLum !in 38f..244f) continue
+                sRMean += sr
+                sGMean += sg
+                sBMean += sb
+                tRMean += tr
+                tGMean += tg
+                tBMean += tb
                 count++
             }
         }
@@ -775,12 +784,21 @@ object GhostHeadReplacementEngine {
                 val idx = y * size + x
                 val sc = srcPx[idx]
                 val tc = tgtPx[idx]
-                val sr = ((sc ushr 16) and 0xFF) - sRMean
-                val sg = ((sc ushr 8) and 0xFF) - sGMean
-                val sb = (sc and 0xFF) - sBMean
-                val tr = ((tc ushr 16) and 0xFF) - tRMean
-                val tg = ((tc ushr 8) and 0xFF) - tGMean
-                val tb = (tc and 0xFF) - tBMean
+                val srRaw = (sc ushr 16) and 0xFF
+                val sgRaw = (sc ushr 8) and 0xFF
+                val sbRaw = sc and 0xFF
+                val trRaw = (tc ushr 16) and 0xFF
+                val tgRaw = (tc ushr 8) and 0xFF
+                val tbRaw = tc and 0xFF
+                val sLum = 0.299f * srRaw + 0.587f * sgRaw + 0.114f * sbRaw
+                val tLum = 0.299f * trRaw + 0.587f * tgRaw + 0.114f * tbRaw
+                if (sLum !in 38f..244f || tLum !in 38f..244f) continue
+                val sr = srRaw - sRMean
+                val sg = sgRaw - sGMean
+                val sb = sbRaw - sBMean
+                val tr = trRaw - tRMean
+                val tg = tgRaw - tGMean
+                val tb = tbRaw - tBMean
                 sRVar += sr * sr
                 sGVar += sg * sg
                 sBVar += sb * sb
@@ -790,14 +808,14 @@ object GhostHeadReplacementEngine {
             }
         }
 
-        val scaleR = (sqrt(tRVar / count).coerceAtLeast(6.0) / sqrt(sRVar / count).coerceAtLeast(6.0)).coerceIn(0.80, 1.25)
-        val scaleG = (sqrt(tGVar / count).coerceAtLeast(6.0) / sqrt(sGVar / count).coerceAtLeast(6.0)).coerceIn(0.80, 1.25)
-        val scaleB = (sqrt(tBVar / count).coerceAtLeast(6.0) / sqrt(sBVar / count).coerceAtLeast(6.0)).coerceIn(0.80, 1.25)
+        val scaleR = (sqrt(tRVar / count).coerceAtLeast(8.0) / sqrt(sRVar / count).coerceAtLeast(8.0)).coerceIn(0.88, 1.15)
+        val scaleG = (sqrt(tGVar / count).coerceAtLeast(8.0) / sqrt(sGVar / count).coerceAtLeast(8.0)).coerceIn(0.88, 1.15)
+        val scaleB = (sqrt(tBVar / count).coerceAtLeast(8.0) / sqrt(sBVar / count).coerceAtLeast(8.0)).coerceIn(0.88, 1.15)
 
         // Ambient luminance ratio for gentle hair exposure adaptation
         val srcLum = 0.299 * sRMean + 0.587 * sGMean + 0.114 * sBMean
         val tgtLum = 0.299 * tRMean + 0.587 * tGMean + 0.114 * tBMean
-        val hairAmbientScale = (tgtLum / srcLum.coerceAtLeast(15.0)).coerceIn(0.85, 1.18).toFloat()
+        val hairAmbientScale = (tgtLum / srcLum.coerceAtLeast(15.0)).coerceIn(0.85, 1.12).toFloat()
 
         val leftEyeX = if (hasOverride) overrideLandmarks5!![0].x else size * (98.0f / 256.0f)
         val rightEyeX = if (hasOverride) overrideLandmarks5!![1].x else size * (158.0f / 256.0f)
@@ -806,9 +824,9 @@ object GhostHeadReplacementEngine {
         val eyeRy = ovEyeDist * 0.27f
 
         val skinStrength = when (skinToneMode) {
-            SkinToneSourceMode.TARGET_SCENE -> 0.76f
-            SkinToneSourceMode.SOURCE_IDENTITY -> 0.14f
-            SkinToneSourceMode.BALANCED_BLEND -> 0.45f
+            SkinToneSourceMode.TARGET_SCENE -> 0.84f
+            SkinToneSourceMode.SOURCE_IDENTITY -> 0.16f
+            SkinToneSourceMode.BALANCED_BLEND -> 0.52f
         }
 
         val outPx = IntArray(total)
@@ -1011,7 +1029,7 @@ object GhostHeadReplacementEngine {
                         ) * clampedBlend
 
                     if (alpha > 0.003f) {
-                        val headColor = FaceAlignment.sampleBilinearClamped(cropPixels, cropSize, cropSize, u, v)
+                        val headColor = FaceAlignment.sampleBicubicClamped(cropPixels, cropSize, cropSize, u, v)
                         val dstColor = targetPixels[rowOffset + x]
 
                         val sr = (headColor ushr 16) and 0xFF

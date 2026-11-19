@@ -66,42 +66,74 @@ object FaceMesh3DEngine {
      */
     const val CONTROL_POINT_COUNT = 31
 
-    // Fixed, topologically valid triangle mesh over the 31 anatomical control points.
-    // Every triangle covers face, jaw, skull crown, side hair wings, or neck-to-collar seamlessly.
+    // Fixed, topologically valid planar triangle mesh over the 31 anatomical control points:
+    //  0:lEye, 1:rEye, 2:nose, 3:lMouth, 4:rMouth, 5:uLip, 6:lLip, 7:noseBridge,
+    //  8:lBrow, 9:rBrow, 10:forehead, 11:lCheek, 12:rCheek, 13:lTemple, 14:rTemple,
+    //  15:lJaw, 16:rJaw, 17:chin,
+    //  18:crownTop, 19:crownLeft, 20:crownRight, 21:hairDomeLeft, 22:hairDomeRight,
+    //  23:hairWingLeft, 24:hairWingRight,
+    //  25:neckLeft, 26:neckCenter, 27:neckRight, 28:collarLeft, 29:collarCenter, 30:collarRight
     private val HEAD_MESH_TRIANGLES: Array<IntArray> = arrayOf(
-        // Inner ocular & nasal core
-        intArrayOf(0, 8, 2), intArrayOf(8, 9, 2), intArrayOf(9, 1, 2),
-        intArrayOf(0, 2, 3), intArrayOf(1, 2, 3),
-        intArrayOf(8, 10, 9), intArrayOf(8, 0, 10), intArrayOf(9, 1, 10),
-        // Cheeks & mouth
-        intArrayOf(0, 3, 11), intArrayOf(1, 3, 12),
-        intArrayOf(3, 6, 11), intArrayOf(3, 6, 12),
-        intArrayOf(3, 4, 6), intArrayOf(3, 5, 6),
-        intArrayOf(4, 6, 7), intArrayOf(5, 6, 7),
-        intArrayOf(4, 11, 7), intArrayOf(5, 12, 7),
-        // Jawline & chin perimeter
-        intArrayOf(0, 11, 13), intArrayOf(11, 13, 15), intArrayOf(11, 4, 15),
-        intArrayOf(4, 15, 17), intArrayOf(4, 7, 17),
-        intArrayOf(1, 12, 14), intArrayOf(12, 14, 16), intArrayOf(12, 5, 16),
-        intArrayOf(5, 16, 17), intArrayOf(5, 7, 17),
-        // Forehead & temples
-        intArrayOf(0, 8, 13), intArrayOf(1, 9, 14),
-        intArrayOf(8, 10, 18), intArrayOf(9, 10, 18),
-        intArrayOf(8, 13, 19), intArrayOf(8, 18, 19),
-        intArrayOf(9, 14, 20), intArrayOf(9, 18, 20),
-        // Cranial crown & hair dome
-        intArrayOf(18, 19, 21), intArrayOf(18, 21, 22), intArrayOf(18, 20, 22),
-        intArrayOf(13, 19, 23), intArrayOf(19, 21, 23),
-        intArrayOf(14, 20, 24), intArrayOf(20, 22, 24),
-        // Side hair wings to jaw
-        intArrayOf(13, 15, 23), intArrayOf(14, 16, 24),
+        // Forehead & brow band (zero cross-face diagonals)
+        intArrayOf(8, 10, 9),
+        intArrayOf(8, 9, 7),
+        intArrayOf(0, 8, 7),
+        intArrayOf(1, 7, 9),
+        intArrayOf(0, 13, 8),
+        intArrayOf(1, 9, 14),
+        // Central nose bridge, eyes & upper cheeks
+        intArrayOf(0, 7, 2),
+        intArrayOf(1, 2, 7),
+        intArrayOf(0, 2, 11),
+        intArrayOf(1, 12, 2),
+        intArrayOf(0, 11, 13),
+        intArrayOf(1, 14, 12),
+        // Sub-nasal philtrum, upper lip & mid-cheeks
+        intArrayOf(2, 11, 3),
+        intArrayOf(2, 3, 5),
+        intArrayOf(2, 5, 4),
+        intArrayOf(2, 4, 12),
+        // Oral mouth & lower cheeks
+        intArrayOf(3, 5, 6),
+        intArrayOf(5, 4, 6),
+        intArrayOf(3, 6, 15),
+        intArrayOf(3, 15, 11),
+        intArrayOf(4, 16, 6),
+        intArrayOf(4, 12, 16),
+        // Lower jaw & chin perimeter
+        intArrayOf(6, 15, 17),
+        intArrayOf(6, 17, 16),
+        // Cranial crown & left hair dome (fan around 19: crownLeft)
+        intArrayOf(18, 10, 19),
+        intArrayOf(10, 8, 19),
+        intArrayOf(8, 13, 19),
+        intArrayOf(13, 23, 19),
+        intArrayOf(23, 21, 19),
+        intArrayOf(21, 18, 19),
+        // Cranial crown & right hair dome (fan around 20: crownRight)
+        intArrayOf(18, 20, 10),
+        intArrayOf(10, 20, 9),
+        intArrayOf(9, 20, 14),
+        intArrayOf(14, 20, 24),
+        intArrayOf(24, 20, 22),
+        intArrayOf(22, 20, 18),
+        // Side hair wings to jaw & cheekbones
+        intArrayOf(13, 11, 15),
+        intArrayOf(13, 15, 23),
+        intArrayOf(14, 16, 12),
+        intArrayOf(14, 24, 16),
         // Upper neck & chin transition
-        intArrayOf(15, 17, 25), intArrayOf(17, 25, 26),
-        intArrayOf(16, 17, 27), intArrayOf(17, 27, 26),
-        intArrayOf(15, 23, 25), intArrayOf(16, 24, 27),
+        intArrayOf(15, 25, 17),
+        intArrayOf(17, 25, 26),
+        intArrayOf(17, 26, 27),
+        intArrayOf(16, 17, 27),
+        intArrayOf(15, 23, 25),
+        intArrayOf(16, 27, 24),
         // Lower neck to collar anchors
-        intArrayOf(25, 26, 28), intArrayOf(26, 28, 29),
-        intArrayOf(26, 27, 29), intArrayOf(27, 29, 30)
+        intArrayOf(25, 28, 26),
+        intArrayOf(26, 28, 29),
+        intArrayOf(26, 29, 27),
+        intArrayOf(27, 29, 30)
     )
 
     fun extractFaceMesh3D(
@@ -605,18 +637,31 @@ object FaceMesh3DEngine {
         val poseScale = tgtEyeDist / srcEyeDist
 
         val tgtCanvasPts = Array(CONTROL_POINT_COUNT) { i ->
-            val basePt = if (i in 18..24) {
-                // Project Source crown/hair wing vector rotated & scaled into Target head pose so Source hairstyle volume keeps its authentic silhouette
-                val vx = srcCtrl[i].x - srcEyeMidX
-                val vy = srcCtrl[i].y - srcEyeMidY
-                val localU = (vx * srcDirX + vy * srcDirY) * poseScale
-                val localV = (-vx * srcDirY + vy * srcDirX) * poseScale
-                PointF(
-                    tgtEyeMidX + localU * tgtDirX - localV * tgtDirY,
-                    tgtEyeMidY + localU * tgtDirY + localV * tgtDirX
+            val vx = srcCtrl[i].x - srcEyeMidX
+            val vy = srcCtrl[i].y - srcEyeMidY
+            val localU = (vx * srcDirX + vy * srcDirY) * poseScale
+            val localV = (-vx * srcDirY + vy * srcDirX) * poseScale
+            val projectedSrcPt = PointF(
+                tgtEyeMidX + localU * tgtDirX - localV * tgtDirY,
+                tgtEyeMidY + localU * tgtDirY + localV * tgtDirX
+            )
+
+            val basePt = when {
+                // Keep inner facial features (eyes, nose, lips, teeth, brows, cheeks) undistorted to prevent
+                // triangular creases/V-notches when Source smiles more widely than Target.
+                i in 0..14 -> projectedSrcPt
+                // Gently harmonize outer jawline/chin width & length slightly (18%) toward Target's pose angle
+                i in 15..17 -> PointF(
+                    projectedSrcPt.x * 0.82f + rawCanvasPts[i].x * 0.18f,
+                    projectedSrcPt.y * 0.82f + rawCanvasPts[i].y * 0.18f
                 )
-            } else {
-                rawCanvasPts[i]
+                // Keep cranial crown & hair wings (18..24) true to Source skull silhouette
+                i in 18..24 -> projectedSrcPt
+                // Anchor lower neck & collar junction (25..30) cleanly onto Target neck/collar position
+                else -> PointF(
+                    projectedSrcPt.x * 0.28f + rawCanvasPts[i].x * 0.72f,
+                    projectedSrcPt.y * 0.28f + rawCanvasPts[i].y * 0.72f
+                )
             }
             // Apply user scaleAdjust & offset around eye midpoint
             val safeScale = scaleAdjust.coerceIn(0.80f, 1.25f)
@@ -635,7 +680,7 @@ object FaceMesh3DEngine {
         val outPixels = IntArray(canvasSize * canvasSize)
         val inBoundsMask = FloatArray(canvasSize * canvasSize)
         val filled = BooleanArray(canvasSize * canvasSize)
-        val edgeMarginPx = (min(srcW, srcH) * 0.03f).coerceIn(6f, 14f)
+        val edgeMarginPx = (min(srcW, srcH) * 0.045f).coerceIn(10f, 22f)
 
         fun computeBoundsAlpha(sx: Float, sy: Float): Float {
             val edgeDist = min(min(sx, (srcW - 1f) - sx), min(sy, (srcH - 1f) - sy))

@@ -58,7 +58,15 @@ android {
   androidResources {
     noCompress += listOf("onnx", "bin", "ort")
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all {
+        it.forkEvery = 1
+        it.maxHeapSize = "1024m"
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
