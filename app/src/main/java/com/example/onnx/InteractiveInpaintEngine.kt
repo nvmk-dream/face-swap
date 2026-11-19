@@ -556,14 +556,19 @@ object InteractiveInpaintEngine {
             val imgType = imgInfo?.type ?: OnnxJavaType.FLOAT
             val maskType = maskInfo?.type ?: OnnxJavaType.FLOAT
 
-            createFloatOrHalfBufferTensor(ortEnv, imgFloats, inImgShape, imgType).use { imgT ->
+            return createFloatOrHalfBufferTensor(ortEnv, imgFloats, inImgShape, imgType).use { imgT ->
                 createFloatOrHalfBufferTensor(ortEnv, maskFloats, inMaskShape, maskType).use { maskT ->
-                    session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
-                        val outT = res[0] as OnnxTensor
-                        val outFloats = readLamaOutputFloats(outT)
-                        if (outFloats.size < 3 * hw) {
-                            throw IllegalStateException("LaMa ONNX output shape mismatch: got ${outFloats.size} floats, expected ${3 * hw}.")
-                        }
+                    OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
+                        context = context,
+                        stageName = "lama_inpaint",
+                        resolutionPx = max(modelW, modelH)
+                    ) {
+                        session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
+                            val outT = res[0] as OnnxTensor
+                            val outFloats = readLamaOutputFloats(outT)
+                            if (outFloats.size < 3 * hw) {
+                                throw IllegalStateException("LaMa ONNX output shape mismatch: got ${outFloats.size} floats, expected ${3 * hw}.")
+                            }
                         val outShape = outT.info?.shape
                         val isOutNhwc = outShape != null && outShape.size == 4 && outShape[3] == 3L && outShape[1] != 3L
 
@@ -610,13 +615,14 @@ object InteractiveInpaintEngine {
                         } else {
                             outBmp
                         }
-                        return if (origW == contentW && origH == contentH) {
+                        if (origW == contentW && origH == contentH) {
                             croppedContent
                         } else {
                             val resized = Bitmap.createScaledBitmap(croppedContent, origW, origH, true)
                             croppedContent.recycle()
                             resized
                         }
+                    }
                     }
                 }
             }

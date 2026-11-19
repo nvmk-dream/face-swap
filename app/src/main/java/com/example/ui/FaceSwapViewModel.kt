@@ -145,6 +145,8 @@ data class FaceSwapUiState(
     val allowTwoModelFallbackForTesting: Boolean = false,
     val preferHardwareAcceleration: Boolean = false,
     val lowMemoryMode: Boolean = false,
+    val runtimeLowRamLatched: Boolean = false,
+    val runtimeLowRamCrashStage: String? = null,
     val isSwapping: Boolean = false,
     val swapProgress: SwapStageProgress? = null,
     val swapResult: FaceSwapExecutionResult? = null,
@@ -232,13 +234,22 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     )
 
     private val initialRamConfig = detectDeviceRamProfile(application)
+    private val initialLatched = OnnxProtobufInspector.isRuntimeLowRamLatched(application)
+    private val initialLatchedStage = OnnxProtobufInspector.getLastRuntimeCrashStage(application)
 
     private val _uiState = MutableStateFlow(
         FaceSwapUiState(
-            lowMemoryMode = initialRamConfig.first,
-            qualityLevel = initialRamConfig.second,
+            lowMemoryMode = initialRamConfig.first || initialLatched,
+            qualityLevel = if (initialLatched) ProcessingQualityLevel.FAST else initialRamConfig.second,
             deviceTotalRamGb = initialRamConfig.third.first,
-            deviceAvailRamMb = initialRamConfig.third.second
+            deviceAvailRamMb = initialRamConfig.third.second,
+            runtimeLowRamLatched = initialLatched,
+            runtimeLowRamCrashStage = initialLatchedStage,
+            statusBannerMessage = if (initialLatched) {
+                "Safe Low-RAM Mode (384px) auto-enabled after previous native memory force-stop${initialLatchedStage?.let { " ($it)" }.orEmpty()}."
+            } else {
+                null
+            }
         )
     )
     val uiState: StateFlow<FaceSwapUiState> = _uiState.asStateFlow()
@@ -324,6 +335,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     private fun detectDeviceRamProfile(
         context: Context
     ): Triple<Boolean, ProcessingQualityLevel, Pair<Float, Long>> {
+        OnnxProtobufInspector.promoteStuckCrashBreadcrumbIfAny(context)
+        val runtimeLatched = OnnxProtobufInspector.isRuntimeLowRamLatched(context)
         return runCatching {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             val memInfo = ActivityManager.MemoryInfo()
@@ -338,14 +351,15 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             } else {
                 2048L
             }
-            val isLow = (am?.isLowRamDevice == true) || totalGb < 4.0f || availMb < 750L
+            // Catch 3GB-4GB marketed phones (totalMem often reports ~3.6-4.3 GB) plus borderline free RAM
+            val isLow = runtimeLatched || (am?.isLowRamDevice == true) || memInfo.lowMemory || totalGb <= 4.35f || availMb < 1100L
             val autoQuality = when {
                 isLow -> ProcessingQualityLevel.FAST
                 totalGb >= 7.5f && availMb >= 1800L -> ProcessingQualityLevel.HIGH_QUALITY
                 else -> ProcessingQualityLevel.BALANCED
             }
             Triple(isLow, autoQuality, totalGb to availMb)
-        }.getOrDefault(Triple(false, ProcessingQualityLevel.BALANCED, 6.0f to 2048L))
+        }.getOrDefault(Triple(runtimeLatched, if (runtimeLatched) ProcessingQualityLevel.FAST else ProcessingQualityLevel.BALANCED, 6.0f to 2048L))
     }
 
     fun selectTab(tab: AppTab) {
@@ -514,10 +528,35 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setLowMemoryMode(enabled: Boolean) {
+        if (!enabled) {
+            OnnxProtobufInspector.clearRuntimeLowRamLatch(getApplication())
+        }
+        val latchedAfter = OnnxProtobufInspector.isRuntimeLowRamLatched(getApplication())
         _uiState.update {
             it.copy(
                 lowMemoryMode = enabled,
-                qualityLevel = if (enabled) ProcessingQualityLevel.FAST else it.qualityLevel
+                qualityLevel = if (enabled) ProcessingQualityLevel.FAST else it.qualityLevel,
+                runtimeLowRamLatched = latchedAfter,
+                runtimeLowRamCrashStage = if (latchedAfter) it.runtimeLowRamCrashStage else null
+            )
+        }
+    }
+
+    fun resetRuntimeCrashGuard() {
+        val ctx = getApplication<Application>()
+        OnnxProtobufInspector.clearRuntimeLowRamLatch(ctx)
+        SdInpaintOnnxEngine.clearSessionCache()
+        OnnxProtobufInspector.clearCachedSessions()
+        val ramProfile = detectDeviceRamProfile(ctx)
+        _uiState.update {
+            it.copy(
+                runtimeLowRamLatched = false,
+                runtimeLowRamCrashStage = null,
+                lowMemoryMode = ramProfile.first,
+                qualityLevel = ramProfile.second,
+                deviceTotalRamGb = ramProfile.third.first,
+                deviceAvailRamMb = ramProfile.third.second,
+                statusBannerMessage = "Safe Low-RAM Crash Guard reset cleanly."
             )
         }
     }
@@ -588,6 +627,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 resolvedOption,
                 if (lamaReady) lamaFile else null
             )
+            val runtimeLatched = OnnxProtobufInspector.isRuntimeLowRamLatched(getApplication())
+            val runtimeLatchStage = OnnxProtobufInspector.getLastRuntimeCrashStage(getApplication())
             _uiState.update {
                 it.copy(
                     modelInspections = inspections,
@@ -598,6 +639,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     isLamaInpaintReady = lamaReady,
                     inpaintModelOption = resolvedOption,
                     inpaintModelLabel = label,
+                    runtimeLowRamLatched = runtimeLatched,
+                    runtimeLowRamCrashStage = runtimeLatchStage,
+                    lowMemoryMode = it.lowMemoryMode || runtimeLatched,
+                    qualityLevel = if (runtimeLatched) ProcessingQualityLevel.FAST else it.qualityLevel,
                     isInspectingModels = false
                 )
             }

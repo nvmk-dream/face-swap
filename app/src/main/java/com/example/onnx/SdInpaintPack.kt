@@ -965,6 +965,10 @@ object SdInpaintPackManager {
             }
         }
 
+        if (importedTypes.isNotEmpty()) {
+            OnnxProtobufInspector.clearRuntimeLowRamLatch(context)
+        }
+
         return importedTypes
     }
 

@@ -51,15 +51,77 @@ object SdInpaintOnnxEngine {
 
     class InsufficientNativeRamException(message: String) : RuntimeException(message)
 
-    internal fun queryAvailableRamInfo(context: Context?): Pair<Long, Boolean>? {
+    internal data class DeviceRamStatus(
+        val availMb: Long,
+        val totalMb: Long,
+        val isLowMemory: Boolean
+    )
+
+    internal data class SdExecutionProfile(
+        val maxDimensionPx: Int,
+        val isLowRamConstrained: Boolean,
+        val intraOpThreads: Int,
+        val isRuntimeCrashLatched: Boolean,
+        val is384UnsafeLatched: Boolean,
+        val minRamBeforeVaeEncoderMb: Long = 600L,
+        val minRamBeforeUnetMb: Long = 650L,
+        val minRamBeforeVaeDecoderMbFor512: Long = 850L,
+        val minRamBeforeVaeDecoderMbFor384: Long = 520L
+    )
+
+    internal fun queryDeviceRamStatus(context: Context?): DeviceRamStatus? {
         val ctx = context?.applicationContext ?: context ?: return null
         return runCatching {
             val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
             val info = ActivityManager.MemoryInfo()
             am.getMemoryInfo(info)
             val availMb = if (info.availMem > 0L) info.availMem / (1024L * 1024L) else Long.MAX_VALUE
-            availMb to info.lowMemory
+            val totalMb = if (info.totalMem > 0L) info.totalMem / (1024L * 1024L) else Long.MAX_VALUE
+            DeviceRamStatus(
+                availMb = availMb,
+                totalMb = totalMb,
+                isLowMemory = info.lowMemory || (am.isLowRamDevice)
+            )
         }.getOrNull()
+    }
+
+    internal fun queryAvailableRamInfo(context: Context?): Pair<Long, Boolean>? {
+        val status = queryDeviceRamStatus(context) ?: return null
+        return status.availMb to status.isLowMemory
+    }
+
+    internal fun resolveExecutionProfile(
+        ramStatus: DeviceRamStatus?,
+        fastMode: Boolean,
+        maxPreferredResolutionPx: Int,
+        isRuntimeCrashLatched: Boolean,
+        is384UnsafeLatched: Boolean = false
+    ): SdExecutionProfile {
+        val is4GbOrLessDevice = ramStatus != null && ramStatus.totalMb in 1L..4600L
+        val isBorderlineFreeRam = ramStatus != null && ramStatus.availMb < 1650L
+        val isConstrained = isRuntimeCrashLatched ||
+            is384UnsafeLatched ||
+            (ramStatus?.isLowMemory == true) ||
+            is4GbOrLessDevice ||
+            isBorderlineFreeRam
+
+        val maxDimPx = when {
+            isConstrained -> min(maxPreferredResolutionPx, 384)
+            fastMode -> min(maxPreferredResolutionPx, BASE_SD_RES)
+            else -> maxPreferredResolutionPx
+        }
+        val threads = if (isConstrained) {
+            2
+        } else {
+            Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        }
+        return SdExecutionProfile(
+            maxDimensionPx = maxDimPx,
+            isLowRamConstrained = isConstrained,
+            intraOpThreads = threads,
+            isRuntimeCrashLatched = isRuntimeCrashLatched,
+            is384UnsafeLatched = is384UnsafeLatched
+        )
     }
 
     internal data class TargetDimensions(
@@ -111,9 +173,11 @@ object SdInpaintOnnxEngine {
         pack: InstalledSdInpaintPack,
         componentName: String,
         modelFile: java.io.File,
-        preferHardwareAccel: Boolean
+        preferHardwareAccel: Boolean,
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     ): Pair<OrtSession, String> {
-        val packKey = "${pack.packDir.absolutePath}|hw=$preferHardwareAccel"
+        val threads = intraOpThreads.coerceIn(1, 4)
+        val packKey = "${pack.packDir.absolutePath}|hw=$preferHardwareAccel|t=$threads"
         val lastMod = modelFile.lastModified()
         synchronized(sessionLock) {
             if (cachedPackKey != null && cachedPackKey != packKey) {
@@ -142,7 +206,8 @@ object SdInpaintOnnxEngine {
                 OnnxProtobufInspector.createSessionWithFallback(
                     ortEnv = ortEnv,
                     modelFile = modelFile,
-                    preferHardwareAcceleration = false
+                    preferHardwareAcceleration = false,
+                    intraOpThreads = threads
                 )
             } catch (oom: OutOfMemoryError) {
                 // Free other cached SD components first, keep only what we're loading now
@@ -152,11 +217,13 @@ object SdInpaintOnnxEngine {
                         cachedComponentSessions.remove(k)
                     }
                 }
+                OnnxProtobufInspector.clearCachedSessions()
                 System.gc()
                 OnnxProtobufInspector.createSessionWithFallback(
                     ortEnv = ortEnv,
                     modelFile = modelFile,
-                    preferHardwareAcceleration = false
+                    preferHardwareAcceleration = false,
+                    intraOpThreads = min(threads, 2)
                 )
             }
 
@@ -267,13 +334,33 @@ object SdInpaintOnnxEngine {
         val origH = sourceBitmap.height
         val plan = computeDenoisePlan(fastMode = fastMode, strength = strength)
         val clampedCfg = guidanceScale.coerceIn(1.0f, 15.0f)
-        val initialRamInfo = queryAvailableRamInfo(context)
-        val effectiveMaxDimPx = when {
-            initialRamInfo != null && (initialRamInfo.second || initialRamInfo.first < 1200L) ->
-                min(maxPreferredResolutionPx, 384)
-            fastMode -> min(maxPreferredResolutionPx, BASE_SD_RES)
-            else -> maxPreferredResolutionPx
+        OnnxProtobufInspector.promoteStuckCrashBreadcrumbIfAny(context)
+        val initialRamStatus = queryDeviceRamStatus(context)
+        val isRuntimeCrashLatched = OnnxProtobufInspector.isRuntimeLowRamLatched(context)
+        val is384UnsafeLatched = OnnxProtobufInspector.isRuntime384UnsafeLatched(context)
+        if (is384UnsafeLatched) {
+            clearSessionCache()
+            OnnxProtobufInspector.clearCachedSessions()
+            System.gc()
+            throw InsufficientNativeRamException(
+                "Previous native force-stop occurred even at Low-RAM 384×384. Free device RAM, switch to LaMa/Fast CV, or reset Safe Mode in Settings."
+            )
         }
+        val execProfile = resolveExecutionProfile(
+            ramStatus = initialRamStatus,
+            fastMode = fastMode,
+            maxPreferredResolutionPx = maxPreferredResolutionPx,
+            isRuntimeCrashLatched = isRuntimeCrashLatched,
+            is384UnsafeLatched = is384UnsafeLatched
+        )
+        val effectiveMaxDimPx = execProfile.maxDimensionPx
+        if (execProfile.isLowRamConstrained) {
+            OnnxProtobufInspector.clearCachedSessions()
+        }
+        logDebug(
+            "ramProfile availMb=${initialRamStatus?.availMb} totalMb=${initialRamStatus?.totalMb} " +
+                "latched=$isRuntimeCrashLatched maxDim=$effectiveMaxDimPx threads=${execProfile.intraOpThreads}"
+        )
 
         // Align mask to source resolution
         val alignedMask = if (maskBitmap.width == origW && maskBitmap.height == origH) {
@@ -353,15 +440,22 @@ object SdInpaintOnnxEngine {
                 pack = pack,
                 componentName = "text_encoder",
                 modelFile = pack.textEncoderOnnx,
-                preferHardwareAccel = preferHardwareAccel
+                preferHardwareAccel = preferHardwareAccel,
+                intraOpThreads = execProfile.intraOpThreads
             )
             val (uncondEmbed, condEmbed) = try {
-                runTextEncoder(
-                    ortEnv = ortEnv,
-                    session = textEncSession,
-                    uncondIds = uncondIds,
-                    condIds = condIds
-                )
+                OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
+                    context = context,
+                    stageName = "sd_text_encoder",
+                    resolutionPx = effectiveMaxDimPx
+                ) {
+                    runTextEncoder(
+                        ortEnv = ortEnv,
+                        session = textEncSession,
+                        uncondIds = uncondIds,
+                        condIds = condIds
+                    )
+                }
             } finally {
                 if (releaseEachStageAfterUse) {
                     closeComponentSession("text_encoder")
@@ -369,12 +463,13 @@ object SdInpaintOnnxEngine {
             }
             checkCancel()
 
-            queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
-                if (isLowMem || availMb < 600L) {
+            queryDeviceRamStatus(context)?.let { ram ->
+                if (ram.isLowMemory || ram.availMb < execProfile.minRamBeforeVaeEncoderMb) {
                     clearSessionCache()
+                    OnnxProtobufInspector.clearCachedSessions()
                     System.gc()
                     throw InsufficientNativeRamException(
-                        "Insufficient free RAM before VAE encoding (${availMb}MB available)."
+                        "Insufficient free RAM before VAE encoding (${ram.availMb}MB available)."
                     )
                 }
             }
@@ -392,7 +487,8 @@ object SdInpaintOnnxEngine {
                     pack = pack,
                     componentName = "vae_decoder",
                     modelFile = pack.vaeDecoderOnnx,
-                    preferHardwareAccel = preferHardwareAccel
+                    preferHardwareAccel = preferHardwareAccel,
+                    intraOpThreads = execProfile.intraOpThreads
                 )
                 probeDecSession.inputInfo[probeDecSession.inputNames.first()]?.info as? TensorInfo
             } finally {
@@ -409,10 +505,25 @@ object SdInpaintOnnxEngine {
                 pack = pack,
                 componentName = "vae_encoder",
                 modelFile = pack.vaeEncoderOnnx,
-                preferHardwareAccel = preferHardwareAccel
+                preferHardwareAccel = preferHardwareAccel,
+                intraOpThreads = execProfile.intraOpThreads
             )
             val vaeEncInfo = vaeEncSession.inputInfo[vaeEncSession.inputNames.first()]?.info as? TensorInfo
             var targetDims = selectCompatibleDims(candidateDims, vaeEncInfo, vaeDecProbeInfo)
+            val downgradedToStatic512 = max(targetDims.width, targetDims.height) >= BASE_SD_RES &&
+                candidateDims.width < BASE_SD_RES
+            if (downgradedToStatic512 &&
+                (execProfile.isRuntimeCrashLatched ||
+                    (initialRamStatus != null && initialRamStatus.availMb < 1400L))
+            ) {
+                if (releaseEachStageAfterUse) closeComponentSession("vae_encoder")
+                clearSessionCache()
+                OnnxProtobufInspector.clearCachedSessions()
+                System.gc()
+                throw InsufficientNativeRamException(
+                    "Low-RAM protection: installed SD 1.5 model only supports fixed 512×512 (384×384 not supported), which risks a native force-stop at ${initialRamStatus?.availMb ?: 0}MB free RAM."
+                )
+            }
 
             fun encodeLatentsAt(
                 activeVaeEncSession: OrtSession,
@@ -430,33 +541,39 @@ object SdInpaintOnnxEngine {
                 )
                 val maskTarget = dilateBinaryMask(rawMaskTarget, dims.width, dims.height, radiusPx = 2)
                 onProgress("2/4 Encoding ${dims.width}×${dims.height} (${dims.latentW}×${dims.latentH} latent)...")
-                val mLatent = runVaeEncoder(
-                    ortEnv = ortEnv,
-                    session = activeVaeEncSession,
-                    cropBmp = cropBmpTarget,
-                    maskTarget = maskTarget,
-                    targetW = dims.width,
-                    targetH = dims.height,
-                    applyZeroMask = true
-                )
-                val iLatent = runVaeEncoder(
-                    ortEnv = ortEnv,
-                    session = activeVaeEncSession,
-                    cropBmp = cropBmpTarget,
-                    maskTarget = maskTarget,
-                    targetW = dims.width,
-                    targetH = dims.height,
-                    applyZeroMask = false
-                )
-                cropBmpTarget.recycle()
-                val latMask = downsampleMaskToLatent(
-                    mask = maskTarget,
-                    targetW = dims.width,
-                    targetH = dims.height,
-                    latentW = dims.latentW,
-                    latentH = dims.latentH
-                )
-                return Triple(r, latMask, mLatent to iLatent)
+                return OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
+                    context = context,
+                    stageName = "sd_vae_encoder",
+                    resolutionPx = max(dims.width, dims.height)
+                ) {
+                    val mLatent = runVaeEncoder(
+                        ortEnv = ortEnv,
+                        session = activeVaeEncSession,
+                        cropBmp = cropBmpTarget,
+                        maskTarget = maskTarget,
+                        targetW = dims.width,
+                        targetH = dims.height,
+                        applyZeroMask = true
+                    )
+                    val iLatent = runVaeEncoder(
+                        ortEnv = ortEnv,
+                        session = activeVaeEncSession,
+                        cropBmp = cropBmpTarget,
+                        maskTarget = maskTarget,
+                        targetW = dims.width,
+                        targetH = dims.height,
+                        applyZeroMask = false
+                    )
+                    cropBmpTarget.recycle()
+                    val latMask = downsampleMaskToLatent(
+                        mask = maskTarget,
+                        targetW = dims.width,
+                        targetH = dims.height,
+                        latentW = dims.latentW,
+                        latentH = dims.latentH
+                    )
+                    Triple(r, latMask, mLatent to iLatent)
+                }
             }
 
             var encodedTriple = try {
@@ -468,14 +585,19 @@ object SdInpaintOnnxEngine {
             }
             checkCancel()
 
-            queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
-                if (isLowMem || availMb < 650L) {
+            queryDeviceRamStatus(context)?.let { ram ->
+                if (ram.isLowMemory || ram.availMb < execProfile.minRamBeforeUnetMb) {
                     clearSessionCache()
+                    OnnxProtobufInspector.clearCachedSessions()
                     System.gc()
                     throw InsufficientNativeRamException(
-                        "Insufficient free RAM before UNet denoising (${availMb}MB available)."
+                        "Insufficient free RAM before UNet denoising (${ram.availMb}MB available)."
                     )
                 }
+            }
+
+            if (execProfile.isLowRamConstrained || releaseEachStageAfterUse) {
+                OnnxProtobufInspector.clearCachedSessions()
             }
 
             // 3. Load UNet alone in RAM and verify spatial dimensions before denoising
@@ -485,7 +607,8 @@ object SdInpaintOnnxEngine {
                 pack = pack,
                 componentName = "unet",
                 modelFile = pack.unetOnnx,
-                preferHardwareAccel = preferHardwareAccel
+                preferHardwareAccel = preferHardwareAccel,
+                intraOpThreads = execProfile.intraOpThreads
             )
             val unetSampleName = unetSession.inputNames.firstOrNull { it.contains("sample", ignoreCase = true) }
                 ?: unetSession.inputNames.first()
@@ -501,6 +624,18 @@ object SdInpaintOnnxEngine {
                         "UNet and VAE Decoder do not share a compatible spatial resolution."
                     )
                 }
+                val ramBeforeRetry512 = queryDeviceRamStatus(context)
+                if (execProfile.isRuntimeCrashLatched ||
+                    (execProfile.isLowRamConstrained && ramBeforeRetry512 != null && ramBeforeRetry512.availMb < 1400L)
+                ) {
+                    if (releaseEachStageAfterUse) closeComponentSession("unet")
+                    clearSessionCache()
+                    OnnxProtobufInspector.clearCachedSessions()
+                    System.gc()
+                    throw InsufficientNativeRamException(
+                        "Low-RAM protection: UNet requires fixed 512×512 (384×384 not supported), which risks a native force-stop."
+                    )
+                }
                 targetDims = fallback512
                 if (releaseEachStageAfterUse) {
                     closeComponentSession("unet")
@@ -510,7 +645,8 @@ object SdInpaintOnnxEngine {
                     pack = pack,
                     componentName = "vae_encoder",
                     modelFile = pack.vaeEncoderOnnx,
-                    preferHardwareAccel = preferHardwareAccel
+                    preferHardwareAccel = preferHardwareAccel,
+                    intraOpThreads = execProfile.intraOpThreads
                 )
                 encodedTriple = try {
                     encodeLatentsAt(reEncSession, targetDims)
@@ -524,7 +660,8 @@ object SdInpaintOnnxEngine {
                     pack = pack,
                     componentName = "unet",
                     modelFile = pack.unetOnnx,
-                    preferHardwareAccel = preferHardwareAccel
+                    preferHardwareAccel = preferHardwareAccel,
+                    intraOpThreads = execProfile.intraOpThreads
                 )
                 unetSession = reloadedUnet.first
                 unetEpLabel = reloadedUnet.second
@@ -540,26 +677,32 @@ object SdInpaintOnnxEngine {
                     "ep=$unetEpLabel sequential=$releaseEachStageAfterUse roi=[${roi.left},${roi.top},${roi.width}x${roi.height}]"
             )
 
-            // 4. UNet Denoising Loop (Euler Discrete Scheduler)
+            // 4. UNet Denoising Loop (Euler Discrete Scheduler) + Runtime Native Crash Breadcrumb
             val denoisedLatent = try {
-                runUnetDenoisingLoop(
-                    ortEnv = ortEnv,
-                    session = unetSession,
-                    uncondEmbed = uncondEmbed,
-                    condEmbed = condEmbed,
-                    maskedLatent = maskedLatent,
-                    initLatent = initLatent,
-                    maskLatent = maskLatent,
-                    latentW = targetDims.latentW,
-                    latentH = targetDims.latentH,
-                    plan = plan,
-                    guidanceScale = clampedCfg,
-                    seed = seed,
-                    isCancelled = isCancelled,
-                    onStep = { step, total ->
-                        onProgress("3/4 Diffusion step $step/$total (${targetDims.width}×${targetDims.height} • $unetEpLabel)...")
-                    }
-                )
+                OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
+                    context = context,
+                    stageName = "sd_unet",
+                    resolutionPx = max(targetDims.width, targetDims.height)
+                ) {
+                    runUnetDenoisingLoop(
+                        ortEnv = ortEnv,
+                        session = unetSession,
+                        uncondEmbed = uncondEmbed,
+                        condEmbed = condEmbed,
+                        maskedLatent = maskedLatent,
+                        initLatent = initLatent,
+                        maskLatent = maskLatent,
+                        latentW = targetDims.latentW,
+                        latentH = targetDims.latentH,
+                        plan = plan,
+                        guidanceScale = clampedCfg,
+                        seed = seed,
+                        isCancelled = isCancelled,
+                        onStep = { step, total ->
+                            onProgress("3/4 Diffusion step $step/$total (${targetDims.width}×${targetDims.height} • $unetEpLabel)...")
+                        }
+                    )
+                }
             } finally {
                 if (releaseEachStageAfterUse) {
                     closeComponentSession("unet")
@@ -580,17 +723,24 @@ object SdInpaintOnnxEngine {
         val denoisedLatent = stageResult.denoisedLatent
         val unetEpLabel = stageResult.unetEpLabel
         if (releaseEachStageAfterUse) {
-            // Ensure prompt embeddings & UNet tensors are out of scope and reclaimed before 512x512 VAE Decode
+            // Ensure prompt embeddings, UNet tensors, and cached FaceSwap sessions are reclaimed before VAE Decode (+700MB spike)
+            OnnxProtobufInspector.clearCachedSessions()
             System.gc()
         }
         checkCancel()
 
-        queryAvailableRamInfo(context)?.let { (availMb, isLowMem) ->
-            if (isLowMem || availMb < 550L) {
+        val requiredPreVaeDecodeRamMb = if (max(targetDims.width, targetDims.height) >= BASE_SD_RES) {
+            execProfile.minRamBeforeVaeDecoderMbFor512
+        } else {
+            execProfile.minRamBeforeVaeDecoderMbFor384
+        }
+        queryDeviceRamStatus(context)?.let { ram ->
+            if (ram.isLowMemory || ram.availMb < requiredPreVaeDecodeRamMb) {
                 clearSessionCache()
+                OnnxProtobufInspector.clearCachedSessions()
                 System.gc()
                 throw InsufficientNativeRamException(
-                    "Insufficient free RAM before 4/4 VAE Decoding (${availMb}MB available)."
+                    "Insufficient free RAM before 4/4 VAE Decoding at ${targetDims.width}×${targetDims.height} (${ram.availMb}MB available, need >= ${requiredPreVaeDecodeRamMb}MB)."
                 )
             }
         }
@@ -602,16 +752,23 @@ object SdInpaintOnnxEngine {
             pack = pack,
             componentName = "vae_decoder",
             modelFile = pack.vaeDecoderOnnx,
-            preferHardwareAccel = preferHardwareAccel
+            preferHardwareAccel = preferHardwareAccel,
+            intraOpThreads = execProfile.intraOpThreads
         )
         val decodedCrop = try {
-            runVaeDecoder(
-                ortEnv = ortEnv,
-                session = vaeDecSession,
-                latent = denoisedLatent,
-                targetW = targetDims.width,
-                targetH = targetDims.height
-            )
+            OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
+                context = context,
+                stageName = "sd_vae_decoder",
+                resolutionPx = max(targetDims.width, targetDims.height)
+            ) {
+                runVaeDecoder(
+                    ortEnv = ortEnv,
+                    session = vaeDecSession,
+                    latent = denoisedLatent,
+                    targetW = targetDims.width,
+                    targetH = targetDims.height
+                )
+            }
         } finally {
             if (releaseEachStageAfterUse) {
                 closeComponentSession("vae_decoder")

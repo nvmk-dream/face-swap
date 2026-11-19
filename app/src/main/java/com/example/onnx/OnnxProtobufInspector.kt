@@ -513,6 +513,12 @@ object OnnxProtobufInspector {
     private const val KEY_PENDING_MODEL = "pending_model_key"
     private const val KEY_PENDING_RANK = "pending_stage_rank"
     private const val PREFIX_MIN_RANK = "min_safe_rank_"
+    private const val KEY_PENDING_RUNTIME_STAGE = "pending_runtime_stage"
+    private const val KEY_PENDING_RUNTIME_RES_PX = "pending_runtime_res_px"
+    private const val KEY_RUNTIME_LOW_RAM_LATCH = "runtime_low_ram_latch"
+    private const val KEY_RUNTIME_UNSAFE_EVEN_384 = "runtime_unsafe_even_384"
+    private const val KEY_RUNTIME_LATCH_STAGE = "runtime_latch_stage"
+    private const val KEY_RUNTIME_LATCHED_AT_RES_PX = "runtime_latched_at_res_px"
     private const val RANK_XNNPACK = 0
     private const val RANK_CPU_ALL_OPT = 1
     private const val RANK_CPU_BASIC = 2
@@ -527,17 +533,111 @@ object OnnxProtobufInspector {
         val ctx = context?.applicationContext ?: context ?: return
         appContextRef = ctx
         val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        val editor = prefs.edit()
+        var dirty = false
+
         val pendingKey = prefs.getString(KEY_PENDING_MODEL, null)
         val pendingRank = prefs.getInt(KEY_PENDING_RANK, -1)
         if (!pendingKey.isNullOrBlank() && pendingRank >= 0) {
             val prevMin = prefs.getInt("$PREFIX_MIN_RANK$pendingKey", 0)
             val nextSafeRank = maxOf(prevMin, pendingRank + 1).coerceAtMost(RANK_CPU_NO_OPT)
-            prefs.edit()
-                .putInt("$PREFIX_MIN_RANK$pendingKey", nextSafeRank)
+            editor.putInt("$PREFIX_MIN_RANK$pendingKey", nextSafeRank)
                 .remove(KEY_PENDING_MODEL)
                 .remove(KEY_PENDING_RANK)
+            dirty = true
+        }
+
+        val pendingRuntimeStage = prefs.getString(KEY_PENDING_RUNTIME_STAGE, null)
+        if (!pendingRuntimeStage.isNullOrBlank()) {
+            val crashedRes = prefs.getInt(KEY_PENDING_RUNTIME_RES_PX, 512).coerceAtLeast(1)
+            val prevLatchedRes = prefs.getInt(KEY_RUNTIME_LATCHED_AT_RES_PX, 0)
+            editor.putBoolean(KEY_RUNTIME_LOW_RAM_LATCH, true)
+                .putString(KEY_RUNTIME_LATCH_STAGE, pendingRuntimeStage)
+                .putInt(KEY_RUNTIME_LATCHED_AT_RES_PX, maxOf(prevLatchedRes, crashedRes))
+            if (crashedRes <= 384 && pendingRuntimeStage.startsWith("sd_")) {
+                editor.putBoolean(KEY_RUNTIME_UNSAFE_EVEN_384, true)
+            }
+            editor.remove(KEY_PENDING_RUNTIME_STAGE)
+                .remove(KEY_PENDING_RUNTIME_RES_PX)
+            dirty = true
+        }
+
+        if (dirty) {
+            editor.commit()
+        }
+    }
+
+    internal fun markPendingRuntimeStage(
+        context: Context? = appContextRef,
+        stageName: String,
+        resolutionPx: Int = 512
+    ) {
+        val ctx = (context?.applicationContext ?: context ?: appContextRef) ?: return
+        appContextRef = ctx
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        prefs.edit()
+            .putString(KEY_PENDING_RUNTIME_STAGE, stageName)
+            .putInt(KEY_PENDING_RUNTIME_RES_PX, resolutionPx.coerceAtLeast(1))
+            .commit()
+    }
+
+    internal fun clearPendingRuntimeStage(context: Context? = appContextRef) {
+        val ctx = (context?.applicationContext ?: context ?: appContextRef) ?: return
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        if (prefs.contains(KEY_PENDING_RUNTIME_STAGE) || prefs.contains(KEY_PENDING_RUNTIME_RES_PX)) {
+            prefs.edit()
+                .remove(KEY_PENDING_RUNTIME_STAGE)
+                .remove(KEY_PENDING_RUNTIME_RES_PX)
                 .commit()
         }
+    }
+
+    internal fun <T> runWithRuntimeCrashBreadcrumb(
+        context: Context? = appContextRef,
+        stageName: String,
+        resolutionPx: Int = 512,
+        block: () -> T
+    ): T {
+        markPendingRuntimeStage(context = context, stageName = stageName, resolutionPx = resolutionPx)
+        return try {
+            block()
+        } finally {
+            clearPendingRuntimeStage(context = context)
+        }
+    }
+
+    fun isRuntimeLowRamLatched(context: Context? = appContextRef): Boolean {
+        promoteStuckCrashBreadcrumbIfAny(context)
+        val ctx = (context?.applicationContext ?: context ?: appContextRef) ?: return false
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return false
+        return prefs.getBoolean(KEY_RUNTIME_LOW_RAM_LATCH, false)
+    }
+
+    fun isRuntime384UnsafeLatched(context: Context? = appContextRef): Boolean {
+        promoteStuckCrashBreadcrumbIfAny(context)
+        val ctx = (context?.applicationContext ?: context ?: appContextRef) ?: return false
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return false
+        return prefs.getBoolean(KEY_RUNTIME_UNSAFE_EVEN_384, false)
+    }
+
+    fun getLastRuntimeCrashStage(context: Context? = appContextRef): String? {
+        promoteStuckCrashBreadcrumbIfAny(context)
+        val ctx = (context?.applicationContext ?: context ?: appContextRef) ?: return null
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return null
+        return prefs.getString(KEY_RUNTIME_LATCH_STAGE, null)
+    }
+
+    fun clearRuntimeLowRamLatch(context: Context? = appContextRef) {
+        val ctx = (context?.applicationContext ?: context ?: appContextRef) ?: return
+        val prefs = runCatching { ctx.getSharedPreferences(CRASH_GUARD_PREFS, Context.MODE_PRIVATE) }.getOrNull() ?: return
+        prefs.edit()
+            .remove(KEY_PENDING_RUNTIME_STAGE)
+            .remove(KEY_PENDING_RUNTIME_RES_PX)
+            .remove(KEY_RUNTIME_LOW_RAM_LATCH)
+            .remove(KEY_RUNTIME_UNSAFE_EVEN_384)
+            .remove(KEY_RUNTIME_LATCH_STAGE)
+            .remove(KEY_RUNTIME_LATCHED_AT_RES_PX)
+            .commit()
     }
 
     internal fun getMinSafeRankForFile(file: File, context: Context? = appContextRef): Int {

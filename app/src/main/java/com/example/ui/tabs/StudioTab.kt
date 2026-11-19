@@ -1311,14 +1311,23 @@ private fun SafeguardsAndBlendingCard(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Sequential model unloading + 256x256 head tiles for low-RAM devices",
+                        text = if (uiState.runtimeLowRamLatched) {
+                            "Auto-enabled (384px) after native force-stop${uiState.runtimeLowRamCrashStage?.let { " at $it" }.orEmpty()}. Toggle OFF or Reset to clear."
+                        } else {
+                            "Sequential model unloading + 256x256 head tiles + 384px SD cap for low-RAM devices"
+                        },
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (uiState.runtimeLowRamLatched) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
                 }
                 Switch(
                     checked = uiState.lowMemoryMode,
-                    onCheckedChange = onLowMemoryChanged
+                    onCheckedChange = onLowMemoryChanged,
+                    modifier = Modifier.testTag("low_memory_mode_switch")
                 )
             }
 

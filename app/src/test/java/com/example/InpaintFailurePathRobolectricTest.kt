@@ -388,4 +388,113 @@ class InpaintFailurePathRobolectricTest {
         assertTrue(vm.uiState.value.errorBannerMessage?.contains("Source Image", ignoreCase = true) == true)
         assertFalse(vm.uiState.value.isInpainting)
     }
+
+    @Test
+    fun runtimeLmkdBreadcrumb_and3To4GbRamProfile_protectSdAndStage5() {
+        OnnxProtobufInspector.clearRuntimeLowRamLatch(context)
+        assertFalse(OnnxProtobufInspector.isRuntimeLowRamLatched(context))
+        assertFalse(OnnxProtobufInspector.isRuntime384UnsafeLatched(context))
+
+        // 1. Normal completion or CancellationException must NOT latch Low-RAM guard
+        val ok = OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(context, "sd_vae_decoder", 512) { 42 }
+        assertEquals(42, ok)
+        assertFalse(OnnxProtobufInspector.isRuntimeLowRamLatched(context))
+
+        try {
+            OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(context, "sd_unet", 512) {
+                throw CancellationException("user cancel")
+            }
+            fail("Expected CancellationException")
+        } catch (_: CancellationException) {
+            // Expected
+        }
+        assertFalse(OnnxProtobufInspector.isRuntimeLowRamLatched(context))
+
+        // 2. Simulate OS LMKD native kill mid-UNet session.run() (pending breadcrumb never cleared)
+        OnnxProtobufInspector.markPendingRuntimeStage(context, "sd_unet", resolutionPx = 512)
+        OnnxProtobufInspector.promoteStuckCrashBreadcrumbIfAny(context)
+        assertTrue(OnnxProtobufInspector.isRuntimeLowRamLatched(context))
+        assertFalse(OnnxProtobufInspector.isRuntime384UnsafeLatched(context))
+        assertEquals("sd_unet", OnnxProtobufInspector.getLastRuntimeCrashStage(context))
+
+        // Even with plenty of RAM reported, latched crash forces 384px & 2 threads + disables Stage 5 SD bridge
+        val healthyRam = SdInpaintOnnxEngine.DeviceRamStatus(availMb = 2800L, totalMb = 8192L, isLowMemory = false)
+        val latchedProfile = SdInpaintOnnxEngine.resolveExecutionProfile(
+            ramStatus = healthyRam,
+            fastMode = false,
+            maxPreferredResolutionPx = 768,
+            isRuntimeCrashLatched = true
+        )
+        assertTrue(latchedProfile.isLowRamConstrained)
+        assertEquals(384, latchedProfile.maxDimensionPx)
+        assertEquals(2, latchedProfile.intraOpThreads)
+        assertEquals(850L, latchedProfile.minRamBeforeVaeDecoderMbFor512)
+
+        val (stage5UseSdLatched, stage5ResLatched) = com.example.onnx.CleanEraseHeadReplacementEngine.resolveStage5BridgePlan(
+            lowMemoryMode = false,
+            ramStatus = healthyRam,
+            isRuntimeCrashLatched = true
+        )
+        assertFalse(stage5UseSdLatched)
+        assertEquals(384, stage5ResLatched)
+
+        // 3. ViewModel boots into Safe Low-RAM mode automatically when runtime latch is on disk, and reset clears it
+        val vmLatched = FaceSwapViewModel(context.applicationContext as Application)
+        val deadline = System.currentTimeMillis() + 3000L
+        while (vmLatched.uiState.value.isInspectingModels && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L)
+        }
+        assertTrue(vmLatched.uiState.value.runtimeLowRamLatched)
+        assertTrue(vmLatched.uiState.value.lowMemoryMode)
+        assertEquals(com.example.ui.ProcessingQualityLevel.FAST, vmLatched.uiState.value.qualityLevel)
+
+        vmLatched.resetRuntimeCrashGuard()
+        assertFalse(vmLatched.uiState.value.runtimeLowRamLatched)
+        assertFalse(OnnxProtobufInspector.isRuntimeLowRamLatched(context))
+
+        // 4. Simulate LMKD kill even at 384px -> flags unsafe_even_384 to prevent crash loops on 384-impossible phones
+        OnnxProtobufInspector.markPendingRuntimeStage(context, "sd_vae_decoder", resolutionPx = 384)
+        OnnxProtobufInspector.promoteStuckCrashBreadcrumbIfAny(context)
+        assertTrue(OnnxProtobufInspector.isRuntimeLowRamLatched(context))
+        assertTrue(OnnxProtobufInspector.isRuntime384UnsafeLatched(context))
+        OnnxProtobufInspector.clearRuntimeLowRamLatch(context)
+
+        // 5. 3GB-4GB RAM phone with 1300-1600 MB free RAM MUST pick 384px & 2 threads even without prior crash
+        val fourGbPhoneRam = SdInpaintOnnxEngine.DeviceRamStatus(availMb = 1480L, totalMb = 3900L, isLowMemory = false)
+        val fourGbProfile = SdInpaintOnnxEngine.resolveExecutionProfile(
+            ramStatus = fourGbPhoneRam,
+            fastMode = false,
+            maxPreferredResolutionPx = 768,
+            isRuntimeCrashLatched = false
+        )
+        assertTrue(fourGbProfile.isLowRamConstrained)
+        assertEquals(384, fourGbProfile.maxDimensionPx)
+        assertEquals(2, fourGbProfile.intraOpThreads)
+
+        // Stage 5 on 1480MB free RAM skips risky SD Diffusion bridge in favor of Fast 3D Seam Bridge
+        val (stage5On4GbTight, _) = com.example.onnx.CleanEraseHeadReplacementEngine.resolveStage5BridgePlan(
+            lowMemoryMode = false,
+            ramStatus = fourGbPhoneRam,
+            isRuntimeCrashLatched = false
+        )
+        assertFalse(stage5On4GbTight)
+
+        // 6. High-RAM phone with 3200MB free RAM keeps full 768px in HQ and 512px Stage 5 SD bridge
+        val flagShipRam = SdInpaintOnnxEngine.DeviceRamStatus(availMb = 3200L, totalMb = 7800L, isLowMemory = false)
+        val hqProfile = SdInpaintOnnxEngine.resolveExecutionProfile(
+            ramStatus = flagShipRam,
+            fastMode = false,
+            maxPreferredResolutionPx = 768,
+            isRuntimeCrashLatched = false
+        )
+        assertFalse(hqProfile.isLowRamConstrained)
+        assertEquals(768, hqProfile.maxDimensionPx)
+        val (stage5OnFlagship, stage5FlagshipDim) = com.example.onnx.CleanEraseHeadReplacementEngine.resolveStage5BridgePlan(
+            lowMemoryMode = false,
+            ramStatus = flagShipRam,
+            isRuntimeCrashLatched = false
+        )
+        assertTrue(stage5OnFlagship)
+        assertEquals(512, stage5FlagshipDim)
+    }
 }
