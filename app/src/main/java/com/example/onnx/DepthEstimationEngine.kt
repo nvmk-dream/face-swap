@@ -284,13 +284,20 @@ object DepthEstimationEngine {
         ortEnv: OrtEnvironment?,
         sourceBitmap: Bitmap,
         preferHardwareAccel: Boolean = false,
+        isCancelled: () -> Boolean = { false },
         onProgress: (String) -> Unit = {}
     ): DepthMapResult? {
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Depth estimation cancelled by user.")
         if (ortEnv == null) return null
         val candidates = resolveDepthCandidates(context)
         if (candidates.isEmpty()) return null
+        val ramStatus = SdInpaintOnnxEngine.queryDeviceRamStatus(context)
+        val isLowRam = OnnxProtobufInspector.isRuntimeLowRamLatched(context) ||
+            (ramStatus != null && (ramStatus.isLowMemory || ramStatus.totalMb in 1L..4600L || ramStatus.availMb < 1650L))
+        val intraOpThreads = if (isLowRam) 2 else Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
 
         for ((idx, candidate) in candidates.withIndex()) {
+            if (isCancelled()) throw java.util.concurrent.CancellationException("Depth estimation cancelled by user.")
             onProgress(
                 if (idx == 0) {
                     "Analyzing 3D depth (${candidate.family.displayLabel})..."
@@ -300,11 +307,19 @@ object DepthEstimationEngine {
             )
             val attempt = runCatching {
                 runSingleDepthModel(
+                    context = context,
                     ortEnv = ortEnv,
                     candidate = candidate,
                     sourceBitmap = sourceBitmap,
-                    preferHardwareAccel = preferHardwareAccel
+                    preferHardwareAccel = preferHardwareAccel,
+                    intraOpThreads = intraOpThreads,
+                    isCancelled = isCancelled
                 )
+            }
+            val err = attempt.exceptionOrNull()
+            if (err is java.util.concurrent.CancellationException || isCancelled()) {
+                throw (err as? java.util.concurrent.CancellationException
+                    ?: java.util.concurrent.CancellationException("Depth estimation cancelled by user."))
             }
             if (attempt.isSuccess) {
                 return attempt.getOrNull()
@@ -388,17 +403,22 @@ object DepthEstimationEngine {
     }
 
     private fun runSingleDepthModel(
+        context: Context,
         ortEnv: OrtEnvironment,
         candidate: InstalledDepthModel,
         sourceBitmap: Bitmap,
-        preferHardwareAccel: Boolean
+        preferHardwareAccel: Boolean,
+        intraOpThreads: Int = 2,
+        isCancelled: () -> Boolean = { false }
     ): DepthMapResult {
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Depth estimation cancelled by user.")
         val t0 = System.currentTimeMillis()
         val (depthSession, _) = try {
             OnnxProtobufInspector.createSessionWithFallback(
                 ortEnv = ortEnv,
                 modelFile = candidate.file,
-                preferHardwareAcceleration = preferHardwareAccel
+                preferHardwareAcceleration = preferHardwareAccel,
+                intraOpThreads = intraOpThreads
             )
         } catch (_: OutOfMemoryError) {
             OnnxProtobufInspector.clearCachedSessions()
@@ -406,10 +426,14 @@ object DepthEstimationEngine {
             OnnxProtobufInspector.createSessionWithFallback(
                 ortEnv = ortEnv,
                 modelFile = candidate.file,
-                preferHardwareAcceleration = preferHardwareAccel
+                preferHardwareAcceleration = preferHardwareAccel,
+                intraOpThreads = 2
             )
         }
         depthSession.use { session ->
+                if (isCancelled()) {
+                    throw java.util.concurrent.CancellationException("Depth estimation cancelled by user.")
+                }
                 val inputEntry = session.inputInfo.entries.firstOrNull()
                     ?: error("Depth model has no input tensor.")
                 val inputName = inputEntry.key
@@ -495,9 +519,17 @@ object DepthEstimationEngine {
                 }
 
                 val (outW, outH, rawDepth) = inputTensor.use { tensor ->
-                    session.run(mapOf(inputName to tensor)).use { results ->
-                        val outTensor = results[0] as? OnnxTensor
-                            ?: error("Depth model output is not an OnnxTensor.")
+                    if (isCancelled()) {
+                        throw java.util.concurrent.CancellationException("Depth estimation cancelled by user.")
+                    }
+                    OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
+                        context = context,
+                        stageName = "depth_estimate",
+                        resolutionPx = max(inW, inH)
+                    ) {
+                        session.run(mapOf(inputName to tensor)).use { results ->
+                            val outTensor = results[0] as? OnnxTensor
+                                ?: error("Depth model output is not an OnnxTensor.")
                         val outInfo = outTensor.info
                         val outShape = outInfo.shape
                         val hOut = when (outShape.size) {
@@ -524,7 +556,8 @@ object DepthEstimationEngine {
                             val copyLen = min(count, fb.remaining())
                             fb.get(arr, 0, copyLen)
                         }
-                        Triple(wOut, hOut, arr)
+                            Triple(wOut, hOut, arr)
+                        }
                     }
                 }
 

@@ -256,7 +256,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     private val swapCancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeSwapJob: kotlinx.coroutines.Job? = null
-    private val inpaintCancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile
+    private var activeInpaintCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeInpaintJob: kotlinx.coroutines.Job? = null
 
     val auditLogs: StateFlow<List<SwapAuditLog>> = auditRepository.allLogs.stateIn(
@@ -1880,12 +1881,15 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             val depthRes = withContext(Dispatchers.Default) {
                 modelService.releaseAllSessions()
-                DepthEstimationEngine.estimateDepth(
+                val res = DepthEstimationEngine.estimateDepth(
                     context = getApplication(),
                     ortEnv = ortEnv,
                     sourceBitmap = srcBmp,
                     preferHardwareAccel = state.preferHardwareAcceleration
                 )
+                OnnxProtobufInspector.clearCachedSessions()
+                System.gc()
+                res
             }
             _uiState.update {
                 if (depthRes != null) {
@@ -2197,10 +2201,12 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun cancelActiveInpaint() {
         val state = _uiState.value
-        if (!state.isInpainting && activeInpaintJob?.isActive != true) return
-        inpaintCancellationRequested.set(true)
-        activeInpaintJob?.cancel(java.util.concurrent.CancellationException("Inpaint cancelled by user."))
+        val job = activeInpaintJob
+        if (!state.isInpainting && job?.isActive != true) return
+        activeInpaintCancelToken.set(true)
+        job?.cancel(java.util.concurrent.CancellationException("Inpaint cancelled by user."))
         SdInpaintOnnxEngine.clearSessionCache()
+        OnnxProtobufInspector.clearCachedSessions()
         val appCtx = getApplication<Application>()
         val cancelMsg = "Inpaint cancelled."
         BackgroundProcessingCoordinator.updateInpaint {
@@ -2228,9 +2234,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun runInpaint() {
-        if (activeInpaintJob?.isActive == true) return
+        val prevJob = activeInpaintJob
+        if (_uiState.value.isInpainting && prevJob?.isActive == true) return
         val state = _uiState.value
-        if (state.isInpainting && activeInpaintJob?.isActive != true) {
+        if (state.isInpainting && prevJob?.isActive != true) {
             // Self-heal stale isInpainting flag if no job is actually active
             BackgroundProcessingCoordinator.updateInpaint { it.copy(isRunning = false, progressText = null) }
             _uiState.update { it.copy(isInpainting = false, inpaintProgressText = null) }
@@ -2286,7 +2293,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        inpaintCancellationRequested.set(false)
+        val jobCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
+        activeInpaintCancelToken = jobCancelToken
+        val previousJobToDrain = prevJob?.takeIf { !it.isCompleted }
         _uiState.update {
             it.copy(
                 isInpainting = true,
@@ -2304,9 +2313,17 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             detail = "Running offline AI inpainting (safe during screen lock & app switch)...",
             progressPercent = 5
         )
-        activeInpaintJob = BackgroundProcessingCoordinator.scope.launch {
+        val launchedJob = BackgroundProcessingCoordinator.scope.launch(
+            start = kotlinx.coroutines.CoroutineStart.LAZY
+        ) {
             try {
                 val res = withContext(Dispatchers.Default) {
+                    if (previousJobToDrain != null) {
+                        previousJobToDrain.join()
+                    }
+                    if (jobCancelToken.get()) {
+                        throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
+                    }
                     val ctx = getApplication<Application>()
                     val installedPacks = SdInpaintPackManager.discoverInstalledPacks(ctx)
                     val primaryPack = SdInpaintPackManager.resolvePackForOption(ctx, state.inpaintModelOption)
@@ -2323,21 +2340,47 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         modelService.releaseAllSessions()
                         SdInpaintOnnxEngine.clearSessionCache()
                     }
-                    if (inpaintCancellationRequested.get()) {
+                    if (jobCancelToken.get()) {
                         throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
                     }
                     val activeDepthMap = if (state.inpaintDepthGuardEnabled && state.inpaintDepthMap == null &&
                         DepthEstimationEngine.hasInstalledDepthModel(ctx)
                     ) {
-                        DepthEstimationEngine.estimateDepth(
+                        val depthRes = DepthEstimationEngine.estimateDepth(
                             context = ctx,
                             ortEnv = ortEnv,
                             sourceBitmap = srcBmp,
                             preferHardwareAccel = state.preferHardwareAcceleration,
-                            onProgress = { msg -> _uiState.update { s -> s.copy(inpaintProgressText = msg) } }
+                            isCancelled = { jobCancelToken.get() },
+                            onProgress = { msg ->
+                                if (!jobCancelToken.get() && activeInpaintCancelToken === jobCancelToken) {
+                                    _uiState.update { s -> s.copy(inpaintProgressText = msg) }
+                                    BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = msg) }
+                                }
+                            }
                         )
+                        // Release depth ONNX sessions & transient native heap buffers before heavy SD 1.5 loads
+                        OnnxProtobufInspector.clearCachedSessions()
+                        SdInpaintOnnxEngine.clearSessionCache()
+                        System.gc()
+                        if (jobCancelToken.get()) {
+                            throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
+                        }
+                        if (depthRes != null && activeInpaintCancelToken === jobCancelToken) {
+                            _uiState.update { cur ->
+                                if (cur.inpaintSourceBitmap === srcBmp && cur.inpaintDepthMap == null) {
+                                    cur.copy(inpaintDepthMap = depthRes)
+                                } else {
+                                    cur
+                                }
+                            }
+                        }
+                        depthRes
                     } else {
                         state.inpaintDepthMap
+                    }
+                    if (jobCancelToken.get()) {
+                        throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
                     }
                     val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
                     InteractiveInpaintEngine.inpaint(
@@ -2357,9 +2400,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         strength = state.inpaintStrength,
                         guidanceScale = state.inpaintCfgScale,
                         context = ctx,
-                        isCancelled = { inpaintCancellationRequested.get() },
+                        isCancelled = { jobCancelToken.get() },
                         onProgress = { progressMsg ->
-                            if (inpaintCancellationRequested.get()) return@inpaint
+                            if (jobCancelToken.get() || activeInpaintCancelToken !== jobCancelToken) return@inpaint
                             _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
                             BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }
                             val diffStepMatch = Regex("step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
@@ -2384,6 +2427,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         }
                     )
                 }
+                if (jobCancelToken.get() || activeInpaintCancelToken !== jobCancelToken) {
+                    throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
+                }
 
                 val historyPath = withContext(Dispatchers.IO) {
                     ImageGalleryHelper.saveBitmapToHistoryCache(getApplication(), res.outputBitmap)
@@ -2406,6 +2452,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         resultImagePath = historyPath
                     )
                 )
+
+                if (jobCancelToken.get() || activeInpaintCancelToken !== jobCancelToken) {
+                    throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
+                }
 
                 val sec = res.elapsedMs / 1000f
                 val doneMsg = "Inpaint finished in ${"%.2f".format(sec)}s (${res.engineUsed})."
@@ -2438,7 +2488,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedBody = doneMsg
                 )
             } catch (t: Throwable) {
-                val cancelled = t is java.util.concurrent.CancellationException || inpaintCancellationRequested.get()
+                val cancelled = t is java.util.concurrent.CancellationException || jobCancelToken.get()
+                if (activeInpaintCancelToken !== jobCancelToken) {
+                    // A newer inpaint run has already taken ownership; do not overwrite its UI state or active job.
+                    return@launch
+                }
                 if (cancelled) {
                     val cancelMsg = "Inpaint cancelled."
                     BackgroundProcessingCoordinator.updateInpaint {
@@ -2478,9 +2532,13 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     )
                 }
             } finally {
-                activeInpaintJob = null
+                if (activeInpaintCancelToken === jobCancelToken) {
+                    activeInpaintJob = null
+                }
             }
         }
+        activeInpaintJob = launchedJob
+        launchedJob.start()
     }
 
     fun saveBitmapToFolderUri(uri: Uri, bitmap: Bitmap) {

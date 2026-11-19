@@ -27,6 +27,10 @@ import android.net.Uri
 import java.io.File
 import java.util.concurrent.CancellationException
 
+import com.example.onnx.DepthEstimationEngine
+import android.graphics.Bitmap.CompressFormat
+import java.io.FileOutputStream
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class InpaintFailurePathRobolectricTest {
@@ -496,5 +500,98 @@ class InpaintFailurePathRobolectricTest {
         )
         assertTrue(stage5OnFlagship)
         assertEquals(512, stage5FlagshipDim)
+    }
+
+    @Test
+    fun depthEstimation_respectsCancellation_andViewModelCancelAllowsCleanRecreate() {
+        val src = sampleBitmap()
+        val mask = sampleMask()
+
+        // 1. DepthEstimationEngine must throw CancellationException immediately when cancelled before start
+        try {
+            DepthEstimationEngine.estimateDepth(
+                context = context,
+                ortEnv = null,
+                sourceBitmap = src,
+                isCancelled = { true }
+            )
+            fail("Expected CancellationException when depth estimation is pre-cancelled")
+        } catch (_: CancellationException) {
+            // Expected
+        }
+
+        // 2. Clean non-cancelled null-env call returns null gracefully
+        val nullEnvRes = DepthEstimationEngine.estimateDepth(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = src,
+            isCancelled = { false }
+        )
+        assertEquals(null, nullEnvRes)
+
+        // 3. ViewModel cancel -> immediate recreate flow uses isolated per-job cancel tokens
+        SdInpaintPackManager.getSdInpaintRootDir(context).deleteRecursively()
+        OnnxProtobufInspector.resolveModelFile(context, com.example.onnx.ModelSlot.INPAINTING).delete()
+        val dummyDepthFile = OnnxProtobufInspector.resolveModelFile(context, com.example.onnx.ModelSlot.DEPTH)
+        dummyDepthFile.parentFile?.mkdirs()
+        dummyDepthFile.writeBytes(ByteArray(2048) { 5 })
+
+        val srcPng = File(context.cacheDir, "vm_cancel_recreate_src.png")
+        FileOutputStream(srcPng).use { fos ->
+            src.compress(CompressFormat.PNG, 100, fos)
+        }
+
+        val mainLooperShadow = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+        val vm = FaceSwapViewModel(context.applicationContext as Application)
+        val initDeadline = System.currentTimeMillis() + 3000L
+        while (vm.uiState.value.isInspectingModels && System.currentTimeMillis() < initDeadline) {
+            mainLooperShadow.idle()
+            Thread.sleep(20L)
+        }
+        mainLooperShadow.idle()
+
+        vm.onInpaintSourceImageSelected(Uri.fromFile(srcPng))
+        val loadDeadline = System.currentTimeMillis() + 3000L
+        while (vm.uiState.value.inpaintSourceBitmap == null &&
+            vm.uiState.value.errorBannerMessage == null &&
+            System.currentTimeMillis() < loadDeadline
+        ) {
+            mainLooperShadow.idle()
+            Thread.sleep(20L)
+        }
+        mainLooperShadow.idle()
+        assertTrue(
+            "Expected inpaintSourceBitmap to load, err=${vm.uiState.value.errorBannerMessage}",
+            vm.uiState.value.inpaintSourceBitmap != null
+        )
+
+        vm.setInpaintMaskBitmap(mask)
+        vm.selectInpaintModelOption(InpaintModelOption.CV_FALLBACK)
+        vm.setInpaintDepthGuardEnabled(true)
+
+        // Start -> immediately cancel -> immediately start a fresh run
+        vm.runInpaint()
+        vm.cancelActiveInpaint()
+        assertFalse(vm.uiState.value.isInpainting)
+
+        vm.runInpaint()
+        val finishDeadline = System.currentTimeMillis() + 6000L
+        while ((vm.uiState.value.isInpainting ||
+                (vm.uiState.value.inpaintResultBitmap == null && vm.uiState.value.errorBannerMessage == null)) &&
+            System.currentTimeMillis() < finishDeadline
+        ) {
+            mainLooperShadow.idle()
+            Thread.sleep(25L)
+        }
+        mainLooperShadow.idle()
+
+        assertFalse(vm.uiState.value.isInpainting)
+        assertTrue(
+            "Expected recreated inpaint run to finish with result, got err=${vm.uiState.value.errorBannerMessage} status=${vm.uiState.value.statusBannerMessage}",
+            vm.uiState.value.inpaintResultBitmap != null
+        )
+
+        dummyDepthFile.delete()
+        srcPng.delete()
     }
 }
