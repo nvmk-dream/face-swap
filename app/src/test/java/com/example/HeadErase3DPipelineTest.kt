@@ -339,9 +339,9 @@ class HeadErase3DPipelineTest {
         assertTrue(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("unet.onnx")))
         assertFalse(OnnxProtobufInspector.shouldBypassXnnpackForFile(File("det_10g.onnx")))
 
-        // 2. Verify Stage 5 Diffusion Seam Bridge strength (0.25f fastMode) produces a focused 4-step plan
+        // 2. Verify Stage 5 Diffusion Seam Bridge strength (0.25f fastMode) produces a focused 3-step plan
         val plan = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.25f)
-        assertEquals(4, plan.denoiseSteps)
+        assertEquals(3, plan.denoiseSteps)
 
         // 3. Verify cooperative cancellation exits cleanly without hanging or swallowing CancellationException
         val (srcBmp, srcFace) = createPortrait(

@@ -107,13 +107,16 @@ object SdInpaintOnnxEngine {
 
         val maxDimPx = when {
             isConstrained -> min(maxPreferredResolutionPx, 384)
-            fastMode -> min(maxPreferredResolutionPx, BASE_SD_RES)
+            fastMode -> min(maxPreferredResolutionPx, 384)
             else -> maxPreferredResolutionPx
         }
+        val cores = Runtime.getRuntime().availableProcessors()
         val threads = if (isConstrained) {
             2
+        } else if (cores >= 6) {
+            min(cores - 1, 6)
         } else {
-            Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+            cores.coerceIn(2, 4)
         }
         return SdExecutionProfile(
             maxDimensionPx = maxDimPx,
@@ -168,16 +171,20 @@ object SdInpaintOnnxEngine {
         }
     }
 
+    private val vaeSpatialShapeCache = java.util.concurrent.ConcurrentHashMap<String, TensorInfo>()
+
     private fun getOrCreatePackSession(
         ortEnv: OrtEnvironment,
         pack: InstalledSdInpaintPack,
         componentName: String,
         modelFile: java.io.File,
         preferHardwareAccel: Boolean,
-        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
+        preferBasicOpt: Boolean = false,
+        enableMemoryPattern: Boolean = false
     ): Pair<OrtSession, String> {
-        val threads = intraOpThreads.coerceIn(1, 4)
-        val packKey = "${pack.packDir.absolutePath}|hw=$preferHardwareAccel|t=$threads"
+        val threads = intraOpThreads.coerceIn(1, 6)
+        val packKey = "${pack.packDir.absolutePath}|hw=$preferHardwareAccel|t=$threads|basic=$preferBasicOpt|mp=$enableMemoryPattern"
         val lastMod = modelFile.lastModified()
         synchronized(sessionLock) {
             if (cachedPackKey != null && cachedPackKey != packKey) {
@@ -207,7 +214,9 @@ object SdInpaintOnnxEngine {
                     ortEnv = ortEnv,
                     modelFile = modelFile,
                     preferHardwareAcceleration = false,
-                    intraOpThreads = threads
+                    intraOpThreads = threads,
+                    preferBasicOpt = preferBasicOpt,
+                    enableMemoryPattern = enableMemoryPattern
                 )
             } catch (oom: OutOfMemoryError) {
                 // Free other cached SD components first, keep only what we're loading now
@@ -223,7 +232,9 @@ object SdInpaintOnnxEngine {
                     ortEnv = ortEnv,
                     modelFile = modelFile,
                     preferHardwareAcceleration = false,
-                    intraOpThreads = min(threads, 2)
+                    intraOpThreads = min(threads, 2),
+                    preferBasicOpt = true,
+                    enableMemoryPattern = false
                 )
             }
 
@@ -293,7 +304,7 @@ object SdInpaintOnnxEngine {
     )
 
     internal fun computeDenoisePlan(fastMode: Boolean, strength: Float): DenoisePlan {
-        val baseSteps = if (fastMode) 16 else 24
+        val baseSteps = if (fastMode) 10 else 20
         val clampedStrength = strength.coerceIn(0.10f, 1.0f)
         val denoiseSteps = (baseSteps * clampedStrength).roundToInt().coerceIn(2, baseSteps)
         val startStepIndex = (baseSteps - denoiseSteps).coerceIn(0, baseSteps - 1)
@@ -303,6 +314,19 @@ object SdInpaintOnnxEngine {
             startStepIndex = startStepIndex,
             strength = clampedStrength
         )
+    }
+
+    internal fun shouldRunUncondCfgPass(
+        localStep: Int,
+        totalSteps: Int,
+        guidanceScale: Float,
+        fastMode: Boolean,
+        hasCachedUncond: Boolean
+    ): Boolean {
+        if (guidanceScale <= 1.05f) return false
+        if (!fastMode || !hasCachedUncond || totalSteps <= 3) return true
+        val fullCfgSteps = kotlin.math.ceil(totalSteps * 0.70).toInt().coerceAtLeast(2)
+        return localStep < fullCfgSteps
     }
 
     private fun logDebug(message: String) {
@@ -441,7 +465,8 @@ object SdInpaintOnnxEngine {
                 componentName = "text_encoder",
                 modelFile = pack.textEncoderOnnx,
                 preferHardwareAccel = preferHardwareAccel,
-                intraOpThreads = execProfile.intraOpThreads
+                intraOpThreads = execProfile.intraOpThreads,
+                preferBasicOpt = fastMode
             )
             val (uncondEmbed, condEmbed) = try {
                 OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
@@ -474,23 +499,27 @@ object SdInpaintOnnxEngine {
                 }
             }
 
-            // Pre-check VAE Decoder spatial shape upfront before running VAE Encoder + minutes of UNet denoising
+            // Pre-check VAE Decoder spatial shape using cached metadata first to avoid double session loading
             val candidateDims = computeAspectMatchedTargetResolution(
                 origW = origW,
                 origH = origH,
                 supportsDynamicShapes = true,
                 maxDimensionPx = effectiveMaxDimPx
             )
-            val vaeDecProbeInfo: TensorInfo? = try {
+            val vaeDecCacheKey = "${pack.vaeDecoderOnnx.absolutePath}|${pack.vaeDecoderOnnx.length()}|${pack.vaeDecoderOnnx.lastModified()}"
+            val vaeDecProbeInfo: TensorInfo? = vaeSpatialShapeCache[vaeDecCacheKey] ?: try {
                 val (probeDecSession, _) = getOrCreatePackSession(
                     ortEnv = ortEnv,
                     pack = pack,
                     componentName = "vae_decoder",
                     modelFile = pack.vaeDecoderOnnx,
                     preferHardwareAccel = preferHardwareAccel,
-                    intraOpThreads = execProfile.intraOpThreads
+                    intraOpThreads = execProfile.intraOpThreads,
+                    preferBasicOpt = fastMode
                 )
-                probeDecSession.inputInfo[probeDecSession.inputNames.first()]?.info as? TensorInfo
+                (probeDecSession.inputInfo[probeDecSession.inputNames.first()]?.info as? TensorInfo)?.also { info ->
+                    vaeSpatialShapeCache[vaeDecCacheKey] = info
+                }
             } finally {
                 if (releaseEachStageAfterUse) {
                     closeComponentSession("vae_decoder")
@@ -506,7 +535,8 @@ object SdInpaintOnnxEngine {
                 componentName = "vae_encoder",
                 modelFile = pack.vaeEncoderOnnx,
                 preferHardwareAccel = preferHardwareAccel,
-                intraOpThreads = execProfile.intraOpThreads
+                intraOpThreads = execProfile.intraOpThreads,
+                preferBasicOpt = fastMode
             )
             val vaeEncInfo = vaeEncSession.inputInfo[vaeEncSession.inputNames.first()]?.info as? TensorInfo
             var targetDims = selectCompatibleDims(candidateDims, vaeEncInfo, vaeDecProbeInfo)
@@ -529,7 +559,17 @@ object SdInpaintOnnxEngine {
                 activeVaeEncSession: OrtSession,
                 dims: TargetDimensions
             ): Triple<AspectRoi, FloatArray, Pair<FloatArray, FloatArray>> {
-                val r = computeAspectRoi(origW, origH, minX, minY, maxX, maxY, dims.width, dims.height)
+                val r = computeAspectRoi(
+                    imgW = origW,
+                    imgH = origH,
+                    minX = minX,
+                    minY = minY,
+                    maxX = maxX,
+                    maxY = maxY,
+                    targetW = dims.width,
+                    targetH = dims.height,
+                    fastMode = fastMode
+                )
                 val (cropBmpTarget, rawMaskTarget) = extractTargetCropAndMask(
                     source = sourceBitmap,
                     fullMaskAlpha = fullMaskAlpha,
@@ -602,13 +642,16 @@ object SdInpaintOnnxEngine {
 
             // 3. Load UNet alone in RAM and verify spatial dimensions before denoising
             onProgress("3/4 Loading UNet (${pack.packType.displayLabel})...")
+            val useMemoryPatternForUnet = !execProfile.isLowRamConstrained
             var (unetSession, unetEpLabel) = getOrCreatePackSession(
                 ortEnv = ortEnv,
                 pack = pack,
                 componentName = "unet",
                 modelFile = pack.unetOnnx,
                 preferHardwareAccel = preferHardwareAccel,
-                intraOpThreads = execProfile.intraOpThreads
+                intraOpThreads = execProfile.intraOpThreads,
+                preferBasicOpt = fastMode,
+                enableMemoryPattern = useMemoryPatternForUnet
             )
             val unetSampleName = unetSession.inputNames.firstOrNull { it.contains("sample", ignoreCase = true) }
                 ?: unetSession.inputNames.first()
@@ -646,7 +689,8 @@ object SdInpaintOnnxEngine {
                     componentName = "vae_encoder",
                     modelFile = pack.vaeEncoderOnnx,
                     preferHardwareAccel = preferHardwareAccel,
-                    intraOpThreads = execProfile.intraOpThreads
+                    intraOpThreads = execProfile.intraOpThreads,
+                    preferBasicOpt = fastMode
                 )
                 encodedTriple = try {
                     encodeLatentsAt(reEncSession, targetDims)
@@ -661,7 +705,9 @@ object SdInpaintOnnxEngine {
                     componentName = "unet",
                     modelFile = pack.unetOnnx,
                     preferHardwareAccel = preferHardwareAccel,
-                    intraOpThreads = execProfile.intraOpThreads
+                    intraOpThreads = execProfile.intraOpThreads,
+                    preferBasicOpt = fastMode,
+                    enableMemoryPattern = useMemoryPatternForUnet
                 )
                 unetSession = reloadedUnet.first
                 unetEpLabel = reloadedUnet.second
@@ -696,6 +742,7 @@ object SdInpaintOnnxEngine {
                         latentH = targetDims.latentH,
                         plan = plan,
                         guidanceScale = clampedCfg,
+                        fastMode = fastMode,
                         seed = seed,
                         isCancelled = isCancelled,
                         onStep = { step, total ->
@@ -753,7 +800,8 @@ object SdInpaintOnnxEngine {
             componentName = "vae_decoder",
             modelFile = pack.vaeDecoderOnnx,
             preferHardwareAccel = preferHardwareAccel,
-            intraOpThreads = execProfile.intraOpThreads
+            intraOpThreads = execProfile.intraOpThreads,
+            preferBasicOpt = fastMode
         )
         val decodedCrop = try {
             OnnxProtobufInspector.runWithRuntimeCrashBreadcrumb(
@@ -826,7 +874,8 @@ object SdInpaintOnnxEngine {
         maxX: Int,
         maxY: Int,
         targetW: Int,
-        targetH: Int
+        targetH: Int,
+        fastMode: Boolean = false
     ): AspectRoi {
         val targetAspect = targetW.toFloat() / targetH.toFloat()
         val maskW = (maxX - minX + 1).coerceAtLeast(1)
@@ -848,9 +897,11 @@ object SdInpaintOnnxEngine {
             }
         }
 
-        // Localized mask on a high-res photo: tightly frame mask with context matching targetAspect
-        var desiredW = max((maskW * 1.65f).roundToInt(), (imgW * 0.55f).roundToInt())
-        var desiredH = max((maskH * 1.65f).roundToInt(), (imgH * 0.55f).roundToInt())
+        // Localized mask on a high-res photo: tightly frame mask (even tighter in Fast Mode) with context matching targetAspect
+        val contextScale = if (fastMode) 1.85f else 1.65f
+        val minImgShare = if (fastMode) 0.38f else 0.55f
+        var desiredW = max((maskW * contextScale).roundToInt(), (imgW * minImgShare).roundToInt())
+        var desiredH = max((maskH * contextScale).roundToInt(), (imgH * minImgShare).roundToInt())
         if (desiredW / desiredH.coerceAtLeast(1).toFloat() < targetAspect) {
             desiredW = (desiredH * targetAspect).roundToInt()
         } else {
@@ -1118,6 +1169,7 @@ object SdInpaintOnnxEngine {
         latentH: Int,
         plan: DenoisePlan,
         guidanceScale: Float,
+        fastMode: Boolean = true,
         seed: Long,
         isCancelled: () -> Boolean = { false },
         onStep: (Int, Int) -> Unit
@@ -1156,10 +1208,22 @@ object SdInpaintOnnxEngine {
         logDebug(
             "UNet channels=$sampleChannels batchSize=$batchSize latent=${latentW}x${latentH} " +
                 "startIdx=${plan.startStepIndex}/${plan.baseSteps} denoiseSteps=${plan.denoiseSteps} " +
-                "sampleType=$sampleType timestepType=$timestepType encoderType=$encoderType"
+                "sampleType=$sampleType timestepType=$timestepType encoderType=$encoderType fastMode=$fastMode"
         )
 
         val sampleStride = sampleChannels * hwLatent
+        // Reusable direct ByteBuffer for FP16 sample inputs to avoid per-step native direct buffer allocations
+        val reusableSampleHalfBuf: ByteBuffer? = if (sampleType == OnnxJavaType.FLOAT16) {
+            ByteBuffer.allocateDirect(batchSize * sampleStride * 2).order(ByteOrder.nativeOrder())
+        } else {
+            null
+        }
+        val reusableSampleFloatBuf: FloatBuffer? = if (sampleType != OnnxJavaType.FLOAT16) {
+            FloatBuffer.allocate(batchSize * sampleStride)
+        } else {
+            null
+        }
+
         if (batchSize == 2) {
             val bothEmbeds = FloatArray(uncondEmbed.size + condEmbed.size)
             System.arraycopy(uncondEmbed, 0, bothEmbeds, 0, uncondEmbed.size)
@@ -1187,7 +1251,14 @@ object SdInpaintOnnxEngine {
                     }
                     System.arraycopy(sampleInput2, 0, sampleInput2, sampleStride, sampleStride)
 
-                    createFloatOrHalfTensor(ortEnv, sampleInput2, sampleShape2, sampleType).use { sTensor ->
+                    createFloatOrHalfTensor(
+                        ortEnv,
+                        sampleInput2,
+                        sampleShape2,
+                        sampleType,
+                        reusableHalfBuf = reusableSampleHalfBuf,
+                        reusableFloatBuf = reusableSampleFloatBuf
+                    ).use { sTensor ->
                         createTimestepTensor(ortEnv, timestep, timestepShape, timestepType).use { tTensor ->
                             val bothPred = session.run(
                                 mapOf(
@@ -1230,9 +1301,16 @@ object SdInpaintOnnxEngine {
             val encoderShape = longArrayOf(1L, embedTokenCount, 768L)
             val sampleShape = longArrayOf(1L, sampleChannels.toLong(), latentH.toLong(), latentW.toLong())
             val sampleInput = FloatArray(sampleStride)
+            val needsAnyCfg = guidanceScale > 1.05f
+            var lastUncondPred: FloatArray? = null
 
-            createFloatOrHalfTensor(ortEnv, uncondEmbed, encoderShape, encoderType).use { uncondTensor ->
-                createFloatOrHalfTensor(ortEnv, condEmbed, encoderShape, encoderType).use { condTensor ->
+            createFloatOrHalfTensor(ortEnv, condEmbed, encoderShape, encoderType).use { condTensor ->
+                val uncondTensor: OnnxTensor? = if (needsAnyCfg) {
+                    createFloatOrHalfTensor(ortEnv, uncondEmbed, encoderShape, encoderType)
+                } else {
+                    null
+                }
+                try {
                     for ((localStep, stepIdx) in (plan.startStepIndex until plan.baseSteps).withIndex()) {
                         if (isCancelled()) throw java.util.concurrent.CancellationException("Diffusion cancelled by user.")
                         onStep(localStep + 1, plan.denoiseSteps)
@@ -1258,17 +1336,37 @@ object SdInpaintOnnxEngine {
                             }
                         }
 
-                        createFloatOrHalfTensor(ortEnv, sampleInput, sampleShape, sampleType).use { sTensor ->
+                        createFloatOrHalfTensor(
+                            ortEnv,
+                            sampleInput,
+                            sampleShape,
+                            sampleType,
+                            reusableHalfBuf = reusableSampleHalfBuf,
+                            reusableFloatBuf = reusableSampleFloatBuf
+                        ).use { sTensor ->
                             createTimestepTensor(ortEnv, timestep, timestepShape, timestepType).use { tTensor ->
-                                val uncondPred = session.run(
-                                    mapOf(
-                                        sampleName to sTensor,
-                                        timestepName to tTensor,
-                                        encoderName to uncondTensor
-                                    )
-                                ).use { res ->
-                                    readTensorAsFloats(res[0] as OnnxTensor)
+                                val runUncond = uncondTensor != null && shouldRunUncondCfgPass(
+                                    localStep = localStep,
+                                    totalSteps = plan.denoiseSteps,
+                                    guidanceScale = guidanceScale,
+                                    fastMode = fastMode,
+                                    hasCachedUncond = lastUncondPred != null
+                                )
+                                val uncondPred: FloatArray? = if (runUncond && uncondTensor != null) {
+                                    session.run(
+                                        mapOf(
+                                            sampleName to sTensor,
+                                            timestepName to tTensor,
+                                            encoderName to uncondTensor
+                                        )
+                                    ).use { res ->
+                                        readTensorAsFloats(res[0] as OnnxTensor)
+                                    }.also { lastUncondPred = it }
+                                } else {
+                                    lastUncondPred
                                 }
+
+                                if (isCancelled()) throw java.util.concurrent.CancellationException("Diffusion cancelled by user.")
 
                                 val condPred = session.run(
                                     mapOf(
@@ -1281,16 +1379,25 @@ object SdInpaintOnnxEngine {
                                 }
 
                                 val dt = nextSigma - sigma
-                                for (i in 0 until latentSize) {
-                                    val u = uncondPred[i]
-                                    val c = condPred[i]
-                                    val noisePred = if (u.isFinite() && c.isFinite()) {
-                                        u + guidanceScale * (c - u)
-                                    } else {
-                                        0f
+                                if (!needsAnyCfg || uncondPred == null) {
+                                    for (i in 0 until latentSize) {
+                                        val c = condPred[i]
+                                        val noisePred = if (c.isFinite()) c else 0f
+                                        val updated = latents[i] + noisePred * dt
+                                        latents[i] = if (updated.isFinite()) updated.coerceIn(-25f, 25f) else latents[i]
                                     }
-                                    val updated = latents[i] + noisePred * dt
-                                    latents[i] = if (updated.isFinite()) updated.coerceIn(-25f, 25f) else latents[i]
+                                } else {
+                                    for (i in 0 until latentSize) {
+                                        val u = uncondPred[i]
+                                        val c = condPred[i]
+                                        val noisePred = if (u.isFinite() && c.isFinite()) {
+                                            u + guidanceScale * (c - u)
+                                        } else {
+                                            0f
+                                        }
+                                        val updated = latents[i] + noisePred * dt
+                                        latents[i] = if (updated.isFinite()) updated.coerceIn(-25f, 25f) else latents[i]
+                                    }
                                 }
 
                                 if (sampleChannels < 9) {
@@ -1306,6 +1413,8 @@ object SdInpaintOnnxEngine {
                             }
                         }
                     }
+                } finally {
+                    runCatching { uncondTensor?.close() }
                 }
             }
         }
@@ -1582,16 +1691,31 @@ object SdInpaintOnnxEngine {
         env: OrtEnvironment,
         data: FloatArray,
         shape: LongArray,
-        type: OnnxJavaType
+        type: OnnxJavaType,
+        reusableHalfBuf: ByteBuffer? = null,
+        reusableFloatBuf: FloatBuffer? = null
     ): OnnxTensor {
         if (type == OnnxJavaType.FLOAT16) {
-            val byteBuf = ByteBuffer.allocateDirect(data.size * 2).order(ByteOrder.nativeOrder())
+            val neededBytes = data.size * 2
+            val byteBuf = if (reusableHalfBuf != null && reusableHalfBuf.capacity() >= neededBytes) {
+                reusableHalfBuf.clear()
+                reusableHalfBuf.limit(neededBytes)
+                reusableHalfBuf
+            } else {
+                ByteBuffer.allocateDirect(neededBytes).order(ByteOrder.nativeOrder())
+            }
             val shortView = byteBuf.asShortBuffer()
             for (i in data.indices) {
                 shortView.put(floatToHalfBits(data[i]))
             }
             byteBuf.rewind()
             return OnnxTensor.createTensor(env, byteBuf, shape, OnnxJavaType.FLOAT16)
+        }
+        if (reusableFloatBuf != null && reusableFloatBuf.capacity() >= data.size) {
+            reusableFloatBuf.clear()
+            reusableFloatBuf.put(data)
+            reusableFloatBuf.flip()
+            return OnnxTensor.createTensor(env, reusableFloatBuf, shape)
         }
         return OnnxTensor.createTensor(env, FloatBuffer.wrap(data), shape)
     }

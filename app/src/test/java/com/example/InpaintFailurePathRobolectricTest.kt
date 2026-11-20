@@ -483,8 +483,18 @@ class InpaintFailurePathRobolectricTest {
         )
         assertFalse(stage5On4GbTight)
 
-        // 6. High-RAM phone with 3200MB free RAM keeps full 768px in HQ and 512px Stage 5 SD bridge
+        // 6. High-RAM phone picks 384px in Fast Mode for 2-3x speedup, and keeps full 768px in HQ Mode
         val flagShipRam = SdInpaintOnnxEngine.DeviceRamStatus(availMb = 3200L, totalMb = 7800L, isLowMemory = false)
+        val fastFlagshipProfile = SdInpaintOnnxEngine.resolveExecutionProfile(
+            ramStatus = flagShipRam,
+            fastMode = true,
+            maxPreferredResolutionPx = 768,
+            isRuntimeCrashLatched = false
+        )
+        assertFalse(fastFlagshipProfile.isLowRamConstrained)
+        assertEquals(384, fastFlagshipProfile.maxDimensionPx)
+        assertTrue(fastFlagshipProfile.intraOpThreads in 2..6)
+
         val hqProfile = SdInpaintOnnxEngine.resolveExecutionProfile(
             ramStatus = flagShipRam,
             fastMode = false,

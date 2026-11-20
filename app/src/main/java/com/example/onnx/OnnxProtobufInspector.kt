@@ -778,13 +778,14 @@ object OnnxProtobufInspector {
         intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
         useXnnpack: Boolean = !preferHardwareAcceleration,
         useNnapi: Boolean = preferHardwareAcceleration,
-        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT
+        optLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT,
+        enableMemoryPattern: Boolean = false
     ): OrtSession.SessionOptions {
-        val threads = intraOpThreads.coerceIn(1, 4)
+        val threads = intraOpThreads.coerceIn(1, 6)
         val (effectiveNnapi, effectiveXnnpack) = resolveEffectiveEpFlags(useNnapi = useNnapi, useXnnpack = useXnnpack)
         val opts = OrtSession.SessionOptions()
         opts.setIntraOpNumThreads(threads)
-        opts.setMemoryPatternOptimization(false)
+        opts.setMemoryPatternOptimization(enableMemoryPattern)
         opts.setCPUArenaAllocator(false)
         opts.setOptimizationLevel(optLevel)
         if (effectiveNnapi) {
@@ -810,9 +811,11 @@ object OnnxProtobufInspector {
         ortEnv: OrtEnvironment,
         modelFile: File,
         preferHardwareAcceleration: Boolean = false,
-        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        intraOpThreads: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
+        preferBasicOpt: Boolean = false,
+        enableMemoryPattern: Boolean = false
     ): Pair<OrtSession, String> {
-        val threads = intraOpThreads.coerceIn(1, 4)
+        val threads = intraOpThreads.coerceIn(1, 6)
         val minSafeRank = getMinSafeRankForFile(modelFile).coerceAtMost(RANK_CPU_NO_OPT)
 
         data class Attempt(
@@ -831,13 +834,19 @@ object OnnxProtobufInspector {
                 if (!bypassXnnpack) {
                     add(Attempt(RANK_CPU_ALL_OPT, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
                 }
-                add(Attempt(RANK_CPU_BASIC, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                if (!preferBasicOpt) {
+                    add(Attempt(RANK_CPU_BASIC, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                } else {
+                    add(Attempt(RANK_CPU_BASIC, "CPU(BASIC)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
+                }
                 add(Attempt(RANK_CPU_NO_OPT, "CPU(NO_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.NO_OPT))
             } else {
                 if (!bypassXnnpack) {
                     add(Attempt(RANK_XNNPACK, "XNNPACK", nnapi = false, xnnpack = true, OrtSession.SessionOptions.OptLevel.ALL_OPT))
                 }
-                add(Attempt(RANK_CPU_ALL_OPT, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                if (!preferBasicOpt) {
+                    add(Attempt(RANK_CPU_ALL_OPT, "CPU(ALL_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.ALL_OPT))
+                }
                 add(Attempt(RANK_CPU_BASIC, "CPU(BASIC)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.BASIC_OPT))
                 add(Attempt(RANK_CPU_NO_OPT, "CPU(NO_OPT)", nnapi = false, xnnpack = false, OrtSession.SessionOptions.OptLevel.NO_OPT))
             }
@@ -856,7 +865,8 @@ object OnnxProtobufInspector {
                         intraOpThreads = threads,
                         useXnnpack = attempt.xnnpack,
                         useNnapi = attempt.nnapi,
-                        optLevel = attempt.optLevel
+                        optLevel = attempt.optLevel,
+                        enableMemoryPattern = enableMemoryPattern
                     ).use { opts ->
                         ortEnv.createSession(modelFile.absolutePath, opts) to attempt.label
                     }

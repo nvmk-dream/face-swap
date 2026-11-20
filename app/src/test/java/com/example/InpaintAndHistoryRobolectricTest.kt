@@ -314,18 +314,25 @@ class InpaintAndHistoryRobolectricTest {
         assertEquals(512, staticDims.height)
 
         val fastDefault = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.70f)
-        assertEquals(16, fastDefault.baseSteps)
-        assertEquals(11, fastDefault.denoiseSteps)
-        assertEquals(5, fastDefault.startStepIndex)
+        assertEquals(10, fastDefault.baseSteps)
+        assertEquals(7, fastDefault.denoiseSteps)
+        assertEquals(3, fastDefault.startStepIndex)
 
         val hdMax = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = false, strength = 1.00f)
-        assertEquals(24, hdMax.baseSteps)
-        assertEquals(24, hdMax.denoiseSteps)
+        assertEquals(20, hdMax.baseSteps)
+        assertEquals(20, hdMax.denoiseSteps)
         assertEquals(0, hdMax.startStepIndex)
 
         val fastMin = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.10f)
-        assertEquals(16, fastMin.baseSteps)
+        assertEquals(10, fastMin.baseSteps)
         assertEquals(2, fastMin.denoiseSteps)
+
+        // Smart CFG skip/reuse: CFG <= 1.05 never runs 2nd UNet pass; Fast Mode reuses uncond after 70% steps
+        assertFalse(SdInpaintOnnxEngine.shouldRunUncondCfgPass(0, 7, 1.0f, fastMode = true, hasCachedUncond = false))
+        assertTrue(SdInpaintOnnxEngine.shouldRunUncondCfgPass(0, 7, 7.0f, fastMode = true, hasCachedUncond = false))
+        assertTrue(SdInpaintOnnxEngine.shouldRunUncondCfgPass(4, 7, 7.0f, fastMode = true, hasCachedUncond = true))
+        assertFalse(SdInpaintOnnxEngine.shouldRunUncondCfgPass(5, 7, 7.0f, fastMode = true, hasCachedUncond = true))
+        assertTrue(SdInpaintOnnxEngine.shouldRunUncondCfgPass(5, 7, 7.0f, fastMode = false, hasCachedUncond = true))
 
         val mask = FloatArray(32 * 32)
         mask[16 * 32 + 16] = 1.0f
