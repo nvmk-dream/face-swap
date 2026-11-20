@@ -636,31 +636,88 @@ object FaceMesh3DEngine {
         val tgtDirY = (rawCanvasPts[1].y - rawCanvasPts[0].y) / tgtEyeDist
         val poseScale = tgtEyeDist / srcEyeDist
 
-        val tgtCanvasPts = Array(CONTROL_POINT_COUNT) { i ->
+        val rawProjectedPts = Array(CONTROL_POINT_COUNT) { i ->
             val vx = srcCtrl[i].x - srcEyeMidX
             val vy = srcCtrl[i].y - srcEyeMidY
             val localU = (vx * srcDirX + vy * srcDirY) * poseScale
             val localV = (-vx * srcDirY + vy * srcDirX) * poseScale
-            val projectedSrcPt = PointF(
+            PointF(
                 tgtEyeMidX + localU * tgtDirX - localV * tgtDirY,
                 tgtEyeMidY + localU * tgtDirY + localV * tgtDirX
             )
+        }
 
+        // Compute Source-vs-Target cranial-to-chin axis delta & 3D yaw difference so head tilt &
+        // perspective match Target's neck/shoulder axis coherently without distorting inner features.
+        val srcChinProj = rawProjectedPts[17]
+        val tgtChinRaw = rawCanvasPts[17]
+        val srcAxisAngle = kotlin.math.atan2(
+            (srcChinProj.y - tgtEyeMidY).toDouble(),
+            (srcChinProj.x - tgtEyeMidX).toDouble()
+        ).toFloat()
+        val tgtAxisAngle = kotlin.math.atan2(
+            (tgtChinRaw.y - tgtEyeMidY).toDouble(),
+            (tgtChinRaw.x - tgtEyeMidX).toDouble()
+        ).toFloat()
+        var deltaAxisRad = tgtAxisAngle - srcAxisAngle
+        while (deltaAxisRad > Math.PI.toFloat()) deltaAxisRad -= (2.0 * Math.PI).toFloat()
+        while (deltaAxisRad < -Math.PI.toFloat()) deltaAxisRad += (2.0 * Math.PI).toFloat()
+        val axisSyncRad = (deltaAxisRad * 0.55f).coerceIn(-0.18f, 0.18f)
+        val yawDeltaNorm = ((targetMesh.headPose.yawDeg - sourceMesh.headPose.yawDeg) / 55f).coerceIn(-0.48f, 0.48f)
+
+        fun rotateAndPerspectiveSync(p: PointF, rotFraction: Float, yawPerspStrength: Float): PointF {
+            val dx = p.x - tgtEyeMidX
+            val dy = p.y - tgtEyeMidY
+            val ang = axisSyncRad * rotFraction
+            val c = kotlin.math.cos(ang.toDouble()).toFloat()
+            val s = kotlin.math.sin(ang.toDouble()).toFloat()
+            var rx = dx * c - dy * s
+            val ry = dx * s + dy * c
+            if (yawPerspStrength > 0.001f) {
+                // Asymmetric horizontal cheek/jaw compression when Source yaw differs from Target yaw
+                val sideSign = if (rx >= 0f) 1f else -1f
+                val horizScale = (1f - sideSign * yawDeltaNorm * yawPerspStrength).coerceIn(0.84f, 1.18f)
+                rx = rx * horizScale + yawDeltaNorm * tgtEyeDist * 0.16f * yawPerspStrength
+            }
+            return PointF(tgtEyeMidX + rx, tgtEyeMidY + ry)
+        }
+
+        val tgtCanvasPts = Array(CONTROL_POINT_COUNT) { i ->
+            val projectedSrcPt = rawProjectedPts[i]
             val basePt = when {
-                // Keep inner facial features (eyes, nose, lips, teeth, brows, cheeks) undistorted to prevent
-                // triangular creases/V-notches when Source smiles more widely than Target.
-                i in 0..14 -> projectedSrcPt
-                // Gently harmonize outer jawline/chin width & length slightly (18%) toward Target's pose angle
-                i in 15..17 -> PointF(
-                    projectedSrcPt.x * 0.82f + rawCanvasPts[i].x * 0.18f,
-                    projectedSrcPt.y * 0.82f + rawCanvasPts[i].y * 0.18f
-                )
-                // Keep cranial crown & hair wings (18..24) true to Source skull silhouette
-                i in 18..24 -> projectedSrcPt
-                // Anchor lower neck & collar junction (25..30) cleanly onto Target neck/collar position
+                // Keep inner facial features (eyes, nose, lips, teeth, brows) distortion-free for Source identity,
+                // gently aligning only temples (13..14) with cranial axis.
+                i in 0..12 -> projectedSrcPt
+                i in 13..14 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.45f, yawPerspStrength = 0.22f)
+                // Smoothly align outer jawline/chin (15..17) with Target's 3D tilt angle & neck center (32% Target)
+                i in 15..17 -> {
+                    val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.85f, yawPerspStrength = 0.30f)
+                    PointF(
+                        synced.x * 0.68f + rawCanvasPts[i].x * 0.32f,
+                        synced.y * 0.68f + rawCanvasPts[i].y * 0.32f
+                    )
+                }
+                // Keep cranial dome/crown (18..24) cohesive with aligned head tilt & subtle wing alignment
+                i in 18..22 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.78f, yawPerspStrength = 0.18f)
+                i in 23..24 -> {
+                    val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.85f, yawPerspStrength = 0.24f)
+                    PointF(
+                        synced.x * 0.86f + rawCanvasPts[i].x * 0.14f,
+                        synced.y * 0.86f + rawCanvasPts[i].y * 0.14f
+                    )
+                }
+                // Upper neck (25..27): smooth continuous 58% Target bridge from jaw (32%) to lower collar (84%)
+                i in 25..27 -> {
+                    val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.90f, yawPerspStrength = 0.20f)
+                    PointF(
+                        synced.x * 0.42f + rawCanvasPts[i].x * 0.58f,
+                        synced.y * 0.42f + rawCanvasPts[i].y * 0.58f
+                    )
+                }
+                // Anchor lower neck & collar junction (28..30) cleanly onto Target neck/collar axis (84% Target)
                 else -> PointF(
-                    projectedSrcPt.x * 0.28f + rawCanvasPts[i].x * 0.72f,
-                    projectedSrcPt.y * 0.28f + rawCanvasPts[i].y * 0.72f
+                    projectedSrcPt.x * 0.16f + rawCanvasPts[i].x * 0.84f,
+                    projectedSrcPt.y * 0.16f + rawCanvasPts[i].y * 0.84f
                 )
             }
             // Apply user scaleAdjust & offset around eye midpoint

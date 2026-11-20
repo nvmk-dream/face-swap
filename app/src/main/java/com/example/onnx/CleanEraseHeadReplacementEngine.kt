@@ -425,27 +425,53 @@ object CleanEraseHeadReplacementEngine {
                         .toFloat().coerceAtLeast(14f)
                     val mMidYT = if (tgtCanvasPts5.size >= 5) (tgtCanvasPts5[3].y + tgtCanvasPts5[4].y) * 0.5f else tEyeMidY + rawEyeDistT
                     val tEyeDist = max(rawEyeDistT, abs(mMidYT - tEyeMidY) * 0.88f)
+                    val tChinEstY = mMidYT + (mMidYT - tEyeMidY) * 0.60f
                     val earCenterShiftX = -tgtYawRatio * tEyeDist * 0.42f
-                    val earRxSpan = tEyeDist * (1.58f + abs(tgtYawRatio) * 0.40f)
+                    val earRxSpan = tEyeDist * (1.46f + abs(tgtYawRatio) * 0.34f)
 
                     val cleanEraseMask = FloatArray(canvasSize * canvasSize) { i ->
                         val y = i / canvasSize
                         val x = i % canvasSize
-                        // Include Target ear/earring/glasses-temple envelope shifted toward visible ear/back-skull
+                        // Keep ear erasure focused on upper/mid ear level so dangling earrings below mouth line
+                        // aren't punched into dark smudge holes next to the neck/jaw.
                         val earDx = (x - (tEyeMidX + earCenterShiftX)) / earRxSpan
-                        val earDy = (y - (tEyeMidY + tEyeDist * 0.45f)) / (tEyeDist * 0.94f)
+                        val earDy = (y - (tEyeMidY + tEyeDist * 0.34f)) / (tEyeDist * 0.68f)
                         val earR = sqrt(earDx * earDx + earDy * earDy)
                         val earBoost = when {
-                            earR <= 0.85f -> 0.95f
+                            earR <= 0.82f -> 0.92f
                             earR >= 1.0f -> 0f
-                            else -> ((1f - earR) / 0.15f).coerceIn(0f, 0.95f)
+                            else -> ((1f - earR) / 0.18f).coerceIn(0f, 0.92f)
                         }
                         val placedProtect = alreadyPlacedCanvasMask?.get(i) ?: 0f
+
+                        // Preserve Target's natural lower neck (below chin + 0.14*eyeDist) when skin/neck pixels exist,
+                        // AND protect Target's draped shoulder hair & dangling gold earrings outside the jaw contour.
+                        var lowerNeckKeep = 0f
+                        if (y > tChinEstY + tEyeDist * 0.12f && abs(x - tEyeMidX) <= tEyeDist * 0.88f && tgtMasks.skinAndNeckWeight[i] > 0.38f) {
+                            val neckT = ((y - (tChinEstY + tEyeDist * 0.12f)) / (tEyeDist * 0.30f)).coerceIn(0f, 1f)
+                            lowerNeckKeep = (neckT * neckT * (3f - 2f * neckT) * 0.92f)
+                        }
+                        var shoulderHairOrJewelryKeep = 0f
+                        if (y > mMidYT + tEyeDist * 0.14f && abs(x - tEyeMidX) > tEyeDist * 0.94f) {
+                            val tc = alignedTgtPx[i]
+                            val tr = (tc ushr 16) and 0xFF
+                            val tg = (tc ushr 8) and 0xFF
+                            val tb = tc and 0xFF
+                            val tLum = 0.299f * tr + 0.587f * tg + 0.114f * tb
+                            val isGoldEarring = tr > 125 && tg > 90 && tr > tb * 1.45f
+                            val isDrapedHair = tgtMasks.fullHeadAlpha[i] > 0.42f && tgtMasks.skinAndNeckWeight[i] < 0.28f && tLum < 74f
+                            if (isGoldEarring || isDrapedHair) {
+                                val drapeT = ((y - (mMidYT + tEyeDist * 0.14f)) / (tEyeDist * 0.38f)).coerceIn(0f, 1f)
+                                shoulderHairOrJewelryKeep = (drapeT * drapeT * (3f - 2f * drapeT) * 0.90f)
+                            }
+                        }
 
                         val baseErase = max(dilatedTargetEraseMask[i], earBoost)
                         (baseErase *
                             (1f - clothProtectMask[i]) *
                             (1f - decorProtectMask[i]) *
+                            (1f - lowerNeckKeep) *
+                            (1f - shoulderHairOrJewelryKeep) *
                             (1f - placedProtect * 0.96f) *
                             tgtInBoundsMask[i] *
                             borderEnvelope[i]).coerceIn(0f, 1f)
@@ -958,6 +984,27 @@ object CleanEraseHeadReplacementEngine {
             )
         }
 
+        // =========================================================================
+        // STAGE 7 (Post-Swap Cross-Check, Error Auto-Fix & Natural Beautification)
+        // =========================================================================
+        if (ortEnv != null) {
+            onProgress(
+                SwapStageProgress(
+                    stepIndex = 6,
+                    totalSteps = 6,
+                    stageTitle = "Stage 6/6: Cross-Check & Beautify",
+                    detailMessage = "Running post-swap neck-seam check, artifact repair & natural studio polish...",
+                    progressFraction = 0.99f
+                )
+            )
+        }
+        val postCheckReport = runPostSwapCrossCheckAndBeautifyPass(
+            outputBitmap = step3Res.outputBitmap,
+            originalTargetBitmap = targetBitmap,
+            placedFaces = resolvedFacesOnIntermediate,
+            enhancementStrength = enhancementStrength
+        )
+
         val step3Canvas512 = firstTgtCanvasMatrix?.let { mCanvas ->
             val m512 = FloatArray(6) { i -> mCanvas[i] * (512f / canvasSize.toFloat()) }
             FaceAlignment.warpAffineCrop(step3Res.outputBitmap, m512, 512)
@@ -979,6 +1026,7 @@ object CleanEraseHeadReplacementEngine {
             append(") -> Step2(3D Portrait")
             if (usedDiffusionBridge) append("+SD1.5 Seam") else append("+SeamBridge")
             append(") -> Step3(${step3Res.engineUsed} ArcFace+HyperSwap+GFPGAN512)")
+            append(" -> PostSwap(CrossCheck+Beautify:$postCheckReport)")
             if (portraitBlurStrength > 0.03f) append(" + Bokeh ${(portraitBlurStrength * 100).toInt()}%")
             append(" | engineUsed=${step3Res.engineUsed}")
         }
@@ -1678,14 +1726,34 @@ object CleanEraseHeadReplacementEngine {
                 var b = (c and 0xFF).toFloat()
                 val lum = 0.299f * r + 0.587f * g + 0.114f * b
 
-                // Smoothly fade Source's lower neck & strip blouse/necklace below chin into Target's collar/dupatta
-                if (y > chinApproxY + eyeDist * 0.10f && abs(x - eyeMidX) <= eyeDist * 0.76f) {
-                    val neckFadeT = ((y - (chinApproxY + eyeDist * 0.10f)) / (eyeDist * 0.30f)).coerceIn(0f, 1f)
+                // Smoothly blend Source's upper neck into Target's preserved lower neck & color-harmonize
+                // the transition belt so the jaw never floats with a U-shaped cut seam above the collar.
+                if (y > chinApproxY + eyeDist * 0.04f && abs(x - eyeMidX) <= eyeDist * 0.82f) {
+                    val neckFadeT = ((y - (chinApproxY + eyeDist * 0.04f)) / (eyeDist * 0.34f)).coerceIn(0f, 1f)
                     val smoothNeckFade = neckFadeT * neckFadeT * (3f - 2f * neckFadeT)
-                    val colCenter = (1f - ((abs(x - eyeMidX) - eyeDist * 0.42f) / (eyeDist * 0.34f)).coerceIn(0f, 1f))
-                    val lowBlouseT = ((y - (chinApproxY + eyeDist * 0.20f)) / (eyeDist * 0.18f)).coerceIn(0f, 1f)
+                    val colCenter = (1f - ((abs(x - eyeMidX) - eyeDist * 0.46f) / (eyeDist * 0.36f)).coerceIn(0f, 1f))
+                    val lowBlouseT = ((y - (chinApproxY + eyeDist * 0.18f)) / (eyeDist * 0.18f)).coerceIn(0f, 1f)
                     val isNonSkinFabric = ((0.30f - sw) / 0.20f).coerceIn(0f, 1f)
-                    val dropFactor = max(smoothNeckFade * 0.96f, lowBlouseT * isNonSkinFabric * 0.98f) * colCenter
+
+                    if (sw > 0.30f && tgtSkinWeight[idx] > 0.32f && clothProtectMask[idx] < 0.65f) {
+                        val tc = tgtPx[idx]
+                        val tr = ((tc ushr 16) and 0xFF).toFloat()
+                        val tg = ((tc ushr 8) and 0xFF).toFloat()
+                        val tb = (tc and 0xFF).toFloat()
+                        val tLum = 0.299f * tr + 0.587f * tg + 0.114f * tb
+                        if (tLum > 42f && lum > 42f) {
+                            val toneMatchW = (smoothNeckFade * 0.82f * colCenter).coerceIn(0f, 0.82f)
+                            r = r * (1f - toneMatchW) + tr * toneMatchW
+                            g = g * (1f - toneMatchW) + tg * toneMatchW
+                            b = b * (1f - toneMatchW) + tb * toneMatchW
+                            srcPx[idx] = (0xFF shl 24) or
+                                (r.toInt().coerceIn(0, 255) shl 16) or
+                                (g.toInt().coerceIn(0, 255) shl 8) or
+                                b.toInt().coerceIn(0, 255)
+                        }
+                    }
+
+                    val dropFactor = max(smoothNeckFade * 0.94f, lowBlouseT * isNonSkinFabric * 0.98f) * colCenter
                     a *= (1f - dropFactor).coerceIn(0f, 1f)
                 }
 
@@ -1790,10 +1858,10 @@ object CleanEraseHeadReplacementEngine {
                         abs(nx) * (1.0f - 0.12f * lowerProgress)
                     }
                     if (effRadial >= 1.0f) {
-                        // Trim any stray choppy outer crown hair spikes beyond the clean silhouette ellipse
+                        // Gently soften any stray outer crown hair spikes beyond the silhouette ellipse without jagged cuts
                         if (y < eyeMidY && outSkinWeight[idx] < 0.16f && origOutAlpha[idx] > 0.01f) {
-                            val trimT = ((effRadial - 1.0f) / 0.10f).coerceIn(0f, 1f)
-                            outAlpha[idx] = origOutAlpha[idx] * (1f - trimT)
+                            val trimT = ((effRadial - 1.0f) / 0.18f).coerceIn(0f, 1f)
+                            outAlpha[idx] = origOutAlpha[idx] * (1f - trimT * trimT * (3f - 2f * trimT))
                         }
                         continue
                     }
@@ -1802,10 +1870,10 @@ object CleanEraseHeadReplacementEngine {
                     if (curReady >= 0.94f) continue
 
                     var domeAlpha = when {
-                        effRadial <= 0.88f -> 1.0f
-                        effRadial >= 0.985f -> 0.0f
+                        effRadial <= 0.80f -> 1.0f
+                        effRadial >= 0.995f -> 0.0f
                         else -> {
-                            val t = (effRadial - 0.88f) / 0.105f
+                            val t = (effRadial - 0.80f) / 0.195f
                             (0.5f * (1f + kotlin.math.cos(Math.PI * t))).toFloat()
                         }
                     } * tgtInBoundsMask[idx] * borderEnvelope[idx]
@@ -1873,11 +1941,18 @@ object CleanEraseHeadReplacementEngine {
                     }
 
                     if (hasTgtDarkHair) {
-                        val targetWeight = if (y > eyeMidY + eyeDist * 0.55f) 0.85f else 0.50f
-                        val lumScale = (hairLum.coerceAtLeast(14f) / tLum.coerceAtLeast(14f)).coerceIn(0.82f, 1.18f)
+                        val targetWeight = if (y > eyeMidY + eyeDist * 0.55f) 0.88f else 0.58f
+                        val lumScale = (hairLum.coerceAtLeast(14f) / tLum.coerceAtLeast(14f)).coerceIn(0.84f, 1.16f)
                         synR = synR * (1f - targetWeight) + (tR * lumScale).coerceIn(0f, 82f) * targetWeight
                         synG = synG * (1f - targetWeight) + (tG * lumScale).coerceIn(0f, 82f) * targetWeight
                         synB = synB * (1f - targetWeight) + (tB * lumScale).coerceIn(0f, 82f) * targetWeight
+                    } else {
+                        // Add fine natural hair-strand luminance modulation so crown never looks flatly painted
+                        val strandMod = (1.0f + sin(x * 0.85f + y * 0.14f) * 0.085f + (((x * 11 + y * 3) and 0x7) - 3.5f) * 0.015f)
+                            .coerceIn(0.84f, 1.16f)
+                        synR = (synR * strandMod).coerceIn(6f, 96f)
+                        synG = (synG * strandMod).coerceIn(6f, 96f)
+                        synB = (synB * strandMod).coerceIn(6f, 96f)
                     }
 
                     val mix = (1.0f - curReady).coerceIn(0f, 1f)
@@ -2511,5 +2586,331 @@ object CleanEraseHeadReplacementEngine {
             return true to if (is4GbOrTight) 384 else 512
         }
         return true to 512
+    }
+
+    /**
+     * Stage 7: Post-Swap Quality Cross-Check, Artifact Auto-Repair & Natural Beautification Pass.
+     *
+     * Runs over every placed head region in the final portrait:
+     *  1. **Neck-to-Collar Seam Cross-Check & Repair**: detects dark shadow troughs or tone jumps
+     *     between the new chin/jaw and the target's lower neck/shoulders and heals them smoothly
+     *     along a skin-tone arch while preserving chains/necklaces/clothing.
+     *  2. **Ear/Jaw Dark Cutout & Halo Repair**: detects unnatural low-luminance smudge holes left
+     *     by aggressive ear/background removal and reconciles them with crisp target pixels.
+     *  3. **Crown & Hair Edge Anti-Staircase Micro-Feather**: smooths harsh jagged hair-to-background steps.
+     *  4. **Natural Studio Beautification**: subtle range-preserving skin clarity (skipping eyes, brows,
+     *     lips, bindi) plus gentle high-frequency crispness on ocular & hair details.
+     */
+    internal fun runPostSwapCrossCheckAndBeautifyPass(
+        outputBitmap: Bitmap,
+        originalTargetBitmap: Bitmap,
+        placedFaces: List<DetectedFace>,
+        enhancementStrength: Float = 0.85f
+    ): String {
+        val w = outputBitmap.width
+        val h = outputBitmap.height
+        if (w < 16 || h < 16 || originalTargetBitmap.width != w || originalTargetBitmap.height != h) {
+            return "Skipped"
+        }
+        val outPx = IntArray(w * h)
+        val origPx = IntArray(w * h)
+        outputBitmap.getPixels(outPx, 0, w, 0, 0, w, h)
+        originalTargetBitmap.getPixels(origPx, 0, w, 0, 0, w, h)
+
+        var neckHealedPx = 0
+        var earCutoutHealedPx = 0
+        var crownSmoothedPx = 0
+        var beautifiedPx = 0
+
+        for (face in placedFaces) {
+            if (face.landmarks5.size < 5) continue
+            val lEye = face.landmarks5[0]
+            val rEye = face.landmarks5[1]
+            val nose = face.landmarks5[2]
+            val lMouth = face.landmarks5[3]
+            val rMouth = face.landmarks5[4]
+
+            val eyeMidX = (lEye.x + rEye.x) * 0.5f
+            val eyeMidY = (lEye.y + rEye.y) * 0.5f
+            val rawEyeDist = hypot((rEye.x - lEye.x).toDouble(), (rEye.y - lEye.y).toDouble())
+                .toFloat().coerceAtLeast(12f)
+            val mouthMidX = (lMouth.x + rMouth.x) * 0.5f
+            val mouthMidY = (lMouth.y + rMouth.y) * 0.5f
+            val eyeDist = max(rawEyeDist, abs(mouthMidY - eyeMidY) * 0.88f)
+            val chinY = mouthMidY + (mouthMidY - eyeMidY) * 0.60f
+
+            // --- 1. Cross-Check Neck-to-Shoulder Transition & Heal Dark Seam Troughs ---
+            var upperR = 0f
+            var upperG = 0f
+            var upperB = 0f
+            var upperCnt = 0
+            val ucY0 = (chinY - eyeDist * 0.16f).toInt().coerceIn(2, h - 3)
+            val ucY1 = (chinY + eyeDist * 0.04f).toInt().coerceIn(ucY0, h - 3)
+            val ucX0 = (mouthMidX - eyeDist * 0.42f).toInt().coerceIn(2, w - 3)
+            val ucX1 = (mouthMidX + eyeDist * 0.42f).toInt().coerceIn(ucX0, w - 3)
+            for (y in ucY0..ucY1 step 2) {
+                val row = y * w
+                for (x in ucX0..ucX1 step 2) {
+                    val c = outPx[row + x]
+                    val r = (c ushr 16) and 0xFF
+                    val g = (c ushr 8) and 0xFF
+                    val b = c and 0xFF
+                    val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                    if (lum in 55f..242f && r >= b) {
+                        upperR += r
+                        upperG += g
+                        upperB += b
+                        upperCnt++
+                    }
+                }
+            }
+
+            var lowerR = 0f
+            var lowerG = 0f
+            var lowerB = 0f
+            var lowerCnt = 0
+            val lnY0 = (chinY + eyeDist * 0.24f).toInt().coerceIn(2, h - 3)
+            val lnY1 = (chinY + eyeDist * 0.54f).toInt().coerceIn(lnY0, h - 3)
+            val lnX0 = (mouthMidX - eyeDist * 0.48f).toInt().coerceIn(2, w - 3)
+            val lnX1 = (mouthMidX + eyeDist * 0.48f).toInt().coerceIn(lnX0, w - 3)
+            for (y in lnY0..lnY1 step 2) {
+                val row = y * w
+                for (x in lnX0..lnX1 step 2) {
+                    val c = origPx[row + x]
+                    val r = (c ushr 16) and 0xFF
+                    val g = (c ushr 8) and 0xFF
+                    val b = c and 0xFF
+                    val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                    // Sample healthy skin pixels only (ignore bright gold chains & dark hair/cloth)
+                    if (lum in 55f..238f && r >= g && r >= b && (r - b) in 8..95) {
+                        lowerR += r
+                        lowerG += g
+                        lowerB += b
+                        lowerCnt++
+                    }
+                }
+            }
+
+            if (upperCnt >= 4 && lowerCnt >= 4) {
+                val uR = upperR / upperCnt
+                val uG = upperG / upperCnt
+                val uB = upperB / upperCnt
+                val lR = lowerR / lowerCnt
+                val lG = lowerG / lowerCnt
+                val lB = lowerB / lowerCnt
+                val seamY0 = (chinY + eyeDist * 0.01f).toInt().coerceIn(2, h - 3)
+                val seamY1 = (chinY + eyeDist * 0.40f).toInt().coerceIn(seamY0, h - 3)
+                val seamX0 = (mouthMidX - eyeDist * 0.72f).toInt().coerceIn(2, w - 3)
+                val seamX1 = (mouthMidX + eyeDist * 0.72f).toInt().coerceIn(seamX0, w - 3)
+                val spanY = (seamY1 - seamY0).coerceAtLeast(1).toFloat()
+
+                for (y in seamY0..seamY1) {
+                    val row = y * w
+                    val ty = ((y - seamY0) / spanY).coerceIn(0f, 1f)
+                    val expR = uR * (1f - ty) + lR * ty
+                    val expG = uG * (1f - ty) + lG * ty
+                    val expB = uB * (1f - ty) + lB * ty
+                    val expLum = 0.299f * expR + 0.587f * expG + 0.114f * expB
+                    val vertArch = sin(ty * Math.PI).toFloat().coerceIn(0f, 1f)
+
+                    for (x in seamX0..seamX1) {
+                        val horizW = (1f - (abs(x - mouthMidX) / (eyeDist * 0.72f)).coerceIn(0f, 1f))
+                        if (horizW <= 0.02f) continue
+                        val idx = row + x
+                        val oc = origPx[idx]
+                        val or = (oc ushr 16) and 0xFF
+                        val og = (oc ushr 8) and 0xFF
+                        val ob = oc and 0xFF
+                        // Strictly skip Target cloth/embroidery or vivid gold necklaces
+                        val isOrigClothOrDecor = (ob > or + 12) || (og > or + 14) ||
+                            (or > 165 && og > 125 && ob < 75)
+                        if (isOrigClothOrDecor) continue
+
+                        val c = outPx[idx]
+                        val r = (c ushr 16) and 0xFF
+                        val g = (c ushr 8) and 0xFF
+                        val b = c and 0xFF
+                        val curLum = 0.299f * r + 0.587f * g + 0.114f * b
+                        val lumDeficit = (expLum - curLum)
+                        val colorDrift = abs(r - expR) + abs(g - expG) + abs(b - expB)
+                        if (lumDeficit > 7f || colorDrift > 20f) {
+                            val severity = max(
+                                ((lumDeficit - 7f) / 36f).coerceIn(0f, 1f),
+                                ((colorDrift - 20f) / 68f).coerceIn(0f, 1f)
+                            )
+                            val healW = (0.76f * severity * (0.35f + 0.65f * vertArch) * horizW).coerceIn(0f, 0.78f)
+                            // Preserve original high-frequency skin micro-texture delta
+                            val nr = (r * (1f - healW) + expR * healW).toInt().coerceIn(0, 255)
+                            val ng = (g * (1f - healW) + expG * healW).toInt().coerceIn(0, 255)
+                            val nb = (b * (1f - healW) + expB * healW).toInt().coerceIn(0, 255)
+                            outPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                            neckHealedPx++
+                        }
+                    }
+                }
+            }
+
+            // --- 2. Cross-Check Ear/Jaw Flanks for Abnormal Dark Cutout Smudges ---
+            val flankY0 = (eyeMidY - eyeDist * 0.15f).toInt().coerceIn(2, h - 3)
+            val flankY1 = (chinY + eyeDist * 0.28f).toInt().coerceIn(flankY0, h - 3)
+            val flankX0 = (eyeMidX - eyeDist * 1.68f).toInt().coerceIn(2, w - 3)
+            val flankX1 = (eyeMidX + eyeDist * 1.68f).toInt().coerceIn(flankX0, w - 3)
+            for (y in flankY0..flankY1) {
+                val row = y * w
+                for (x in flankX0..flankX1) {
+                    val dxAbs = abs(x - eyeMidX)
+                    if (dxAbs < eyeDist * 0.96f) continue
+                    val idx = row + x
+                    val oc = origPx[idx]
+                    val or = (oc ushr 16) and 0xFF
+                    val og = (oc ushr 8) and 0xFF
+                    val ob = oc and 0xFF
+                    val oLum = 0.299f * or + 0.587f * og + 0.114f * ob
+
+                    val c = outPx[idx]
+                    val r = (c ushr 16) and 0xFF
+                    val g = (c ushr 8) and 0xFF
+                    val b = c and 0xFF
+                    val curLum = 0.299f * r + 0.587f * g + 0.114f * b
+
+                    val isGoldOrWarmOrig = (or > 110 && or > ob * 1.35f) || oLum > 78f
+                    if (isGoldOrWarmOrig && curLum < 52f && (oLum - curLum) > 22f) {
+                        val radialOut = ((dxAbs - eyeDist * 0.96f) / (eyeDist * 0.35f)).coerceIn(0f, 1f)
+                        val restoreW = (radialOut * 0.72f).coerceIn(0f, 0.72f)
+                        val nr = (r * (1f - restoreW) + or * restoreW).toInt().coerceIn(0, 255)
+                        val ng = (g * (1f - restoreW) + og * restoreW).toInt().coerceIn(0, 255)
+                        val nb = (b * (1f - restoreW) + ob * restoreW).toInt().coerceIn(0, 255)
+                        outPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                        earCutoutHealedPx++
+                    }
+                }
+            }
+
+            // --- 3. Crown & Side Hair Anti-Staircase Edge Smoothing ---
+            val crownY0 = (eyeMidY - eyeDist * 2.15f).toInt().coerceIn(2, h - 3)
+            val crownY1 = (eyeMidY - eyeDist * 0.25f).toInt().coerceIn(crownY0, h - 3)
+            val crownX0 = (eyeMidX - eyeDist * 1.75f).toInt().coerceIn(2, w - 3)
+            val crownX1 = (eyeMidX + eyeDist * 1.75f).toInt().coerceIn(crownX0, w - 3)
+            val crownSrc = outPx.copyOf()
+            for (y in crownY0..crownY1) {
+                val row = y * w
+                for (x in crownX0..crownX1) {
+                    val nx = (x - eyeMidX) / (eyeDist * 1.48f)
+                    val ny = (y - (eyeMidY - eyeDist * 0.35f)) / (eyeDist * 1.72f)
+                    val rr = sqrt(nx * nx + ny * ny)
+                    if (rr !in 0.72f..1.18f) continue
+                    val idx = row + x
+                    val c = crownSrc[idx]
+                    val cr = (c ushr 16) and 0xFF
+                    val cg = (c ushr 8) and 0xFF
+                    val cb = c and 0xFF
+                    val cLum = 0.299f * cr + 0.587f * cg + 0.114f * cb
+
+                    val n = crownSrc[(y - 1) * w + x]
+                    val s = crownSrc[(y + 1) * w + x]
+                    val l = crownSrc[row + x - 1]
+                    val rt = crownSrc[row + x + 1]
+                    val minN = min(
+                        min((n ushr 16 and 0xFF), (s ushr 16 and 0xFF)),
+                        min((l ushr 16 and 0xFF), (rt ushr 16 and 0xFF))
+                    )
+                    val maxN = max(
+                        max((n ushr 16 and 0xFF), (s ushr 16 and 0xFF)),
+                        max((l ushr 16 and 0xFF), (rt ushr 16 and 0xFF))
+                    )
+                    if (maxN - minN > 28 && cLum < 120f) {
+                        val avgR = (((n ushr 16 and 0xFF) + (s ushr 16 and 0xFF) + (l ushr 16 and 0xFF) + (rt ushr 16 and 0xFF)) * 0.25f)
+                        val avgG = (((n ushr 8 and 0xFF) + (s ushr 8 and 0xFF) + (l ushr 8 and 0xFF) + (rt ushr 8 and 0xFF)) * 0.25f)
+                        val avgB = (((n and 0xFF) + (s and 0xFF) + (l and 0xFF) + (rt and 0xFF)) * 0.25f)
+                        val nr = (cr * 0.58f + avgR * 0.42f).toInt().coerceIn(0, 255)
+                        val ng = (cg * 0.58f + avgG * 0.42f).toInt().coerceIn(0, 255)
+                        val nb = (cb * 0.58f + avgB * 0.42f).toInt().coerceIn(0, 255)
+                        outPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                        crownSmoothedPx++
+                    }
+                }
+            }
+
+            // --- 4. Post-Swap Natural Beautification (Edge-Preserving Skin Clarity + Eye/Lip Crispness) ---
+            val clampEnh = enhancementStrength.coerceIn(0.25f, 1.0f)
+            val bY0 = (eyeMidY - eyeDist * 1.15f).toInt().coerceIn(3, h - 4)
+            val bY1 = (chinY + eyeDist * 0.12f).toInt().coerceIn(bY0, h - 4)
+            val bX0 = (eyeMidX - eyeDist * 1.12f).toInt().coerceIn(3, w - 4)
+            val bX1 = (eyeMidX + eyeDist * 1.12f).toInt().coerceIn(bX0, w - 4)
+            val beautSrc = outPx.copyOf()
+            val crispAmount = (0.14f + 0.14f * clampEnh).coerceIn(0.12f, 0.28f)
+            val clarityMix = (0.18f + 0.14f * clampEnh).coerceIn(0.16f, 0.32f)
+
+            for (y in bY0..bY1) {
+                val row = y * w
+                for (x in bX0..bX1) {
+                    val fdx = (x - eyeMidX) / (eyeDist * 1.05f)
+                    val fdy = (y - (eyeMidY + eyeDist * 0.42f)) / (eyeDist * 1.32f)
+                    if (fdx * fdx + fdy * fdy > 1.0f) continue
+
+                    val dLeftEye = hypot((x - lEye.x).toDouble(), (y - lEye.y).toDouble()).toFloat() / eyeDist
+                    val dRightEye = hypot((x - rEye.x).toDouble(), (y - rEye.y).toDouble()).toFloat() / eyeDist
+                    val dMouth = hypot((x - mouthMidX).toDouble(), (y - mouthMidY).toDouble()).toFloat() / eyeDist
+                    val dNose = hypot((x - nose.x).toDouble(), (y - nose.y).toDouble()).toFloat() / eyeDist
+                    val isDetailFeature = dLeftEye < 0.28f || dRightEye < 0.28f || dMouth < 0.36f || dNose < 0.22f
+
+                    val idx = row + x
+                    val c = beautSrc[idx]
+                    val cr = (c ushr 16) and 0xFF
+                    val cg = (c ushr 8) and 0xFF
+                    val cb = c and 0xFF
+                    val cLum = 0.299f * cr + 0.587f * cg + 0.114f * cb
+
+                    val n = beautSrc[(y - 2) * w + x]
+                    val s = beautSrc[(y + 2) * w + x]
+                    val l = beautSrc[row + x - 2]
+                    val rt = beautSrc[row + x + 2]
+
+                    if (isDetailFeature) {
+                        // Gentle crispness on eyes, brows, nostrils & smile without touching bindi/lipstick hue
+                        val avgR = (((n ushr 16 and 0xFF) + (s ushr 16 and 0xFF) + (l ushr 16 and 0xFF) + (rt ushr 16 and 0xFF)) * 0.25f)
+                        val avgG = (((n ushr 8 and 0xFF) + (s ushr 8 and 0xFF) + (l ushr 8 and 0xFF) + (rt ushr 8 and 0xFF)) * 0.25f)
+                        val avgB = (((n and 0xFF) + (s and 0xFF) + (l and 0xFF) + (rt and 0xFF)) * 0.25f)
+                        val nr = (cr + (cr - avgR) * crispAmount).toInt().coerceIn(0, 255)
+                        val ng = (cg + (cg - avgG) * crispAmount).toInt().coerceIn(0, 255)
+                        val nb = (cb + (cb - avgB) * crispAmount).toInt().coerceIn(0, 255)
+                        outPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                        beautifiedPx++
+                    } else if (cLum in 58f..240f) {
+                        // Edge-preserving bilateral skin polish (keeps high-contrast moles/bindi intact)
+                        val neighbors = intArrayOf(n, s, l, rt)
+                        var sumR = cr.toFloat()
+                        var sumG = cg.toFloat()
+                        var sumB = cb.toFloat()
+                        var wSum = 1.0f
+                        for (nc in neighbors) {
+                            val nr = (nc ushr 16) and 0xFF
+                            val ng = (nc ushr 8) and 0xFF
+                            val nb = nc and 0xFF
+                            val nLum = 0.299f * nr + 0.587f * ng + 0.114f * nb
+                            val diff = abs(nLum - cLum)
+                            if (diff < 16f) {
+                                val bw = 1f - (diff / 16f)
+                                sumR += nr * bw
+                                sumG += ng * bw
+                                sumB += nb * bw
+                                wSum += bw
+                            }
+                        }
+                        val smR = sumR / wSum
+                        val smG = sumG / wSum
+                        val smB = sumB / wSum
+                        val nr = (cr * (1f - clarityMix) + smR * clarityMix).toInt().coerceIn(0, 255)
+                        val ng = (cg * (1f - clarityMix) + smG * clarityMix).toInt().coerceIn(0, 255)
+                        val nb = (cb * (1f - clarityMix) + smB * clarityMix).toInt().coerceIn(0, 255)
+                        outPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                        beautifiedPx++
+                    }
+                }
+            }
+        }
+
+        outputBitmap.setPixels(outPx, 0, w, 0, 0, w, h)
+        return "neck=$neckHealedPx,ear=$earCutoutHealedPx,crown=$crownSmoothedPx,polish=$beautifiedPx"
     }
 }

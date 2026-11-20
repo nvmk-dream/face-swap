@@ -976,5 +976,141 @@ class HeadErase3DPipelineTest {
         tgtBmp.recycle()
         result.outputBitmap.recycle()
     }
+
+    @Test
+    fun `postSwapCrossCheckAndBeautifyPass heals dark neck seam and ear cutout smudges while protecting clothing`() {
+        val w = 256
+        val h = 256
+        val orig = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val origPx = IntArray(w * h) { Color.rgb(180, 145, 110) }
+        val outPx = IntArray(w * h) { Color.rgb(180, 145, 110) }
+
+        val eyeDist = 44f
+        val cx = 128f
+        val eyeY = 96f
+        val mouthY = eyeY + eyeDist * 1.05f // ~142
+        val chinY = mouthY + (mouthY - eyeY) * 0.60f // ~170
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val idx = y * w + x
+                // Healthy lower neck & face skin
+                if (kotlin.math.abs(x - cx) < 55f && y in 60..210) {
+                    val c = Color.rgb(215, 170, 142)
+                    origPx[idx] = c
+                    outPx[idx] = c
+                }
+                // Blue cloth collar below y = 212
+                if (y >= 212) {
+                    val cloth = Color.rgb(12, 130, 140)
+                    origPx[idx] = cloth
+                    outPx[idx] = cloth
+                }
+            }
+        }
+
+        // Inject synthetic dark U-shaped neck seam trough right under chin (y = 176..184)
+        for (y in 176..184) {
+            for (x in 108..148) {
+                outPx[y * w + x] = Color.rgb(75, 55, 45)
+            }
+        }
+        // Inject synthetic dark ear-flank cutout hole where orig had warm gold earring / background
+        for (y in 115..135) {
+            for (x in 178..190) {
+                origPx[y * w + x] = Color.rgb(212, 168, 72)
+                outPx[y * w + x] = Color.rgb(22, 18, 16)
+            }
+        }
+
+        orig.setPixels(origPx, 0, w, 0, 0, w, h)
+        out.setPixels(outPx, 0, w, 0, 0, w, h)
+
+        val face = DetectedFace(
+            index = 0,
+            boundingBox = RectF(cx - 50f, eyeY - 40f, cx + 50f, chinY + 10f),
+            score = 0.99f,
+            landmarks5 = listOf(
+                PointF(cx - eyeDist * 0.5f, eyeY),
+                PointF(cx + eyeDist * 0.5f, eyeY),
+                PointF(cx, eyeY + eyeDist * 0.55f),
+                PointF(cx - eyeDist * 0.42f, mouthY),
+                PointF(cx + eyeDist * 0.42f, mouthY)
+            ),
+            detectorSource = "TestCrossCheck"
+        )
+
+        val report = CleanEraseHeadReplacementEngine.runPostSwapCrossCheckAndBeautifyPass(
+            outputBitmap = out,
+            originalTargetBitmap = orig,
+            placedFaces = listOf(face),
+            enhancementStrength = 0.90f
+        )
+
+        val healedNeckPx = out.getPixel(128, 180)
+        assertTrue(
+            "Expected dark neck seam trough (r=75) to heal significantly, got r=${Color.red(healedNeckPx)}, report=$report",
+            Color.red(healedNeckPx) > 135
+        )
+        val healedEarPx = out.getPixel(184, 125)
+        assertTrue(
+            "Expected dark ear cutout hole (r=22) to be repaired toward gold/bg, got r=${Color.red(healedEarPx)}, report=$report",
+            Color.red(healedEarPx) > 110
+        )
+        // Collar clothing must stay untouched
+        assertEquals(Color.rgb(12, 130, 140), out.getPixel(128, 220))
+        assertTrue("Expected report to include neck/ear/polish stats: $report", report.contains("polish="))
+
+        orig.recycle()
+        out.recycle()
+    }
+
+    @Test
+    fun `execute emits PostSwap cross-check summary and preserves tilted 3D alignment cleanly`() {
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(25, 30, 40),
+            skinColor = Color.rgb(228, 182, 152),
+            hairColor = Color.rgb(30, 22, 20),
+            rollDegrees = -15f
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(210, 225, 240),
+            skinColor = Color.rgb(212, 168, 140),
+            hairColor = Color.rgb(32, 24, 22),
+            rollDegrees = 12f
+        )
+
+        val result = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(tgtFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+
+        assertTrue(
+            "Expected PostSwap CrossCheck+Beautify in summary, got: ${result.pipelineSummary}",
+            result.pipelineSummary.contains("PostSwap(CrossCheck+Beautify:")
+        )
+        assertEquals(256, result.outputBitmap.width)
+        assertEquals(tgtBmp.getPixel(5, 5), result.outputBitmap.getPixel(5, 5))
+
+        srcBmp.recycle()
+        tgtBmp.recycle()
+        result.outputBitmap.recycle()
+    }
 }
+
 

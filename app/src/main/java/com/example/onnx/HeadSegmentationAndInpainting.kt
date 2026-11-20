@@ -780,6 +780,10 @@ object HeadSegmentationAndInpainting {
     ): Bitmap {
         if (isCancelled()) throw java.util.concurrent.CancellationException("LaMa erase cancelled by user.")
         val origSize = cropBitmap.width
+        val origHw = origSize * origSize
+        val origPixels = IntArray(origHw)
+        cropBitmap.getPixels(origPixels, 0, origSize, 0, 0, origSize, origSize)
+
         val modelSize = 512
         val scaled = if (origSize == modelSize) {
             cropBitmap
@@ -843,13 +847,33 @@ object HeadSegmentationAndInpainting {
                             }
                             val bmp512 = Bitmap.createBitmap(modelSize, modelSize, Bitmap.Config.ARGB_8888)
                             bmp512.setPixels(outPx, 0, modelSize, 0, 0, modelSize, modelSize)
-                            return if (origSize == modelSize) {
+                            val upscaledLama = if (origSize == modelSize) {
                                 bmp512
                             } else {
-                                val resized = Bitmap.createScaledBitmap(bmp512, origSize, origSize, true)
-                                bmp512.recycle()
-                                resized
+                                Bitmap.createScaledBitmap(bmp512, origSize, origSize, true).also {
+                                    bmp512.recycle()
+                                }
                             }
+                            val lamaFullPx = IntArray(origHw)
+                            upscaledLama.getPixels(lamaFullPx, 0, origSize, 0, 0, origSize, origSize)
+                            // Restore 100% crisp high-resolution pixels outside the erased mask
+                            for (i in 0 until origHw) {
+                                val gm = gapMask[i]
+                                if (gm <= 0.02f) {
+                                    lamaFullPx[i] = origPixels[i]
+                                } else if (gm < 0.28f) {
+                                    val a = ((gm - 0.02f) / 0.26f).coerceIn(0f, 1f)
+                                    val invA = 1f - a
+                                    val lc = lamaFullPx[i]
+                                    val oc = origPixels[i]
+                                    val r = (((lc ushr 16) and 0xFF) * a + ((oc ushr 16) and 0xFF) * invA).toInt().coerceIn(0, 255)
+                                    val g = (((lc ushr 8) and 0xFF) * a + ((oc ushr 8) and 0xFF) * invA).toInt().coerceIn(0, 255)
+                                    val b = ((lc and 0xFF) * a + (oc and 0xFF) * invA).toInt().coerceIn(0, 255)
+                                    lamaFullPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                                }
+                            }
+                            upscaledLama.setPixels(lamaFullPx, 0, origSize, 0, 0, origSize, origSize)
+                            return upscaledLama
                         }
                     }
                 }
