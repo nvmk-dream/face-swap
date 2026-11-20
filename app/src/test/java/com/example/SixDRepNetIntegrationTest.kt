@@ -5,18 +5,27 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
 import androidx.test.core.app.ApplicationProvider
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.example.onnx.DetectedFace
 import com.example.onnx.Face3DReconstruction
 import com.example.onnx.HeadPoseEstimationEngine
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxProtobufInspector
+import com.example.ui.tabs.ModelsInspectorTab
+import com.example.ui.theme.MyApplicationTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.File
 import java.util.concurrent.CancellationException
 import kotlin.math.abs
@@ -24,10 +33,15 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class SixDRepNetIntegrationTest {
+
+    @get:Rule
+    val composeTestRule = createComposeRule()
 
     @Test
     fun `matchSlotForFileName maps SixDRepNet and head pose filenames to ModelSlot HEAD_POSE`() {
+        assertEquals(ModelSlot.HEAD_POSE, OnnxProtobufInspector.matchSlotForFileName("6DRepNet360_Slim.onnx"))
         assertEquals(ModelSlot.HEAD_POSE, OnnxProtobufInspector.matchSlotForFileName("SixDRepNet.onnx"))
         assertEquals(ModelSlot.HEAD_POSE, OnnxProtobufInspector.matchSlotForFileName("6DRepNet_360.onnx"))
         assertEquals(ModelSlot.HEAD_POSE, OnnxProtobufInspector.matchSlotForFileName("head_pose_resnet50.onnx"))
@@ -152,5 +166,30 @@ class SixDRepNetIntegrationTest {
         assertNotNull(headPoseInspection)
         assertEquals("SixDRepNet.onnx", headPoseInspection!!.slot.canonicalFileName)
         assertEquals("head_pose", headPoseInspection.slot.subdirectory)
+    }
+
+    @Test
+    fun `settings Models tab displays 6DRepNet360_Slim upload card and triggers HEAD_POSE import`() {
+        var importedSlot: ModelSlot? = null
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                ModelsInspectorTab(
+                    inspections = emptyList(),
+                    isInspecting = false,
+                    onImportModelForSlot = { importedSlot = it },
+                    onRefreshModels = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("models_sixdrepnet_slim_card")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeTestRule.onNodeWithTag("models_import_sixdrepnet_slim_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+
+        assertEquals(ModelSlot.HEAD_POSE, importedSlot)
     }
 }

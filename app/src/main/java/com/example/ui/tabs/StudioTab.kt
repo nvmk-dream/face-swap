@@ -839,7 +839,7 @@ private fun HeroPipelineStatusCard(
                                 tamilRole = "3D தலை அமைப்பு (Optional FaceMesh V2 468-Pt): Target கழுத்து & தலையின் 3D கோணத்திற்கு ஏற்ப Source தலையைத் திருப்பிப் பொருத்த."
                             )
                             StudioTamilModelRow(
-                                fileName = "SixDRepNet.onnx",
+                                fileName = "6DRepNet360_Slim.onnx / SixDRepNet.onnx",
                                 isInRam = uiState.memoryServiceState.headPoseLoaded,
                                 tamilRole = "6D தலை கோணம் (Optional Head Pose ±85°): பக்கவாட்டு முகம், தொப்பி & கண்ணாடி அணிந்த தலையின் Pitch/Yaw/Roll கோணங்களைத் துல்லியமாகக் கணிக்க."
                             )
@@ -2941,7 +2941,7 @@ private fun SixDRepNetSettingsUploadCard(
                         modifier = Modifier.size(22.dp)
                     )
                     Text(
-                        text = "6D Head Pose ONNX (SixDRepNet.onnx)",
+                        text = "6D Head Pose ONNX (6DRepNet360_Slim.onnx / SixDRepNet.onnx)",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = accent
@@ -2966,7 +2966,7 @@ private fun SixDRepNetSettingsUploadCard(
             }
 
             Text(
-                text = "SixDRepNet.onnx upload செய்தால் பக்கவாட்டு முகம் (Extreme Profile ±85°), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll கோணங்களை மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்கும்.",
+                text = "6DRepNet360_Slim.onnx (அல்லது SixDRepNet.onnx) upload செய்தால் பக்கவாட்டு முகம் (Extreme Profile ±85°), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll கோணங்களை மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்கும்.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -2983,7 +2983,7 @@ private fun SixDRepNetSettingsUploadCard(
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
-                        text = if (isHeadPoseReady) "Replace SixDRepNet.onnx" else "Upload SixDRepNet.onnx",
+                        text = if (isHeadPoseReady) "Replace 6DRepNet360_Slim.onnx" else "Upload 6DRepNet360_Slim.onnx",
                         fontWeight = FontWeight.Bold
                     )
                 }

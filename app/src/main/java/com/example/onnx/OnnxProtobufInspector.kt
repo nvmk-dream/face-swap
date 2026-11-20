@@ -217,17 +217,17 @@ enum class ModelSlot(
         id = "sixdrepnet",
         subdirectory = "head_pose",
         canonicalFileName = "SixDRepNet.onnx",
-        displayName = "SixDRepNet.onnx (6D Head Pose Estimation)",
+        displayName = "6DRepNet360_Slim.onnx / SixDRepNet.onnx (6D Head Pose)",
         categoryTitle = "models/head_pose/",
-        approximateSizeLabel = "~90–145 MB",
+        approximateSizeLabel = "~8–25 MB (Slim) / ~90–145 MB",
         requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
-        tamilTitle = "12. 6D தலை கோண கணிப்பு மாடல் (SixDRepNet Head Pose)",
-        tamilRoleSummary = "பக்கவாட்டு முகம் (Extreme Profile), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll 3D கோணங்களை (±85° வரை) மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்குகிறது.",
-        roleSummary = "Optional 6D Rotation Representation Head Pose ONNX model (SixDRepNet / Hopenet / WHENet). Predicts accurate Pitch/Yaw/Roll (±85° profile) even under hats, sunglasses, or partial occlusion. Falls back to FaceMesh / 5-Point PnP if absent.",
+        tamilTitle = "12. 6D தலை கோண கணிப்பு (6DRepNet360_Slim / SixDRepNet)",
+        tamilRoleSummary = "6DRepNet360_Slim.onnx அல்லது SixDRepNet.onnx: பக்கவாட்டு முகம் (Extreme Profile), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll 3D கோணங்களை (±85° வரை) மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்குகிறது.",
+        roleSummary = "Optional 6D Rotation Head Pose ONNX model (6DRepNet360_Slim.onnx / SixDRepNet.onnx / Hopenet / WHENet). Predicts accurate Pitch/Yaw/Roll (±85° profile) even under hats, sunglasses, or partial occlusion. Falls back to FaceMesh / 5-Point PnP if absent.",
         expectedInputSignature = "input: FLOAT[1, 3, 224, 224] (ImageNet normalized RGB)",
         expectedOutputSignature = "output: FLOAT[1, 3] (or [1, 6] 6D rotation / [1, 3, 3] matrix / yaw,pitch,roll)",
         licenseSummary = "MIT License (thohemp/6DRepNet)",
-        downloadSourceUrl = "https://github.com/PINTO0309/PINTO_model_zoo (SixDRepNet)"
+        downloadSourceUrl = "https://github.com/PINTO0309/PINTO_model_zoo (6DRepNet360_Slim / SixDRepNet)"
     )
 }
 
@@ -1374,9 +1374,12 @@ object OnnxProtobufInspector {
                 "2d106det.onnx"
             ),
             ModelSlot.HEAD_POSE to listOf(
+                "6DRepNet360_Slim.onnx",
+                "6drepnet360_slim.onnx",
                 "SixDRepNet.onnx",
                 "sixdrepnet.onnx",
                 "6drepnet.onnx",
+                "6DRepNet_360.onnx",
                 "sixdrepnet_300w_lp.onnx",
                 "head_pose.onnx"
             )
@@ -1504,6 +1507,15 @@ object OnnxProtobufInspector {
                 legacyRootFile.delete()
             }
 
+            // Record original picked filename (e.g., 6DRepNet360_Slim.onnx) for clear UI reporting
+            val pickedName = queryDisplayName(context, uri)?.trim()
+            val variantMarker = File(subDir, ".imported_variant_name")
+            if (!pickedName.isNullOrBlank()) {
+                runCatching { variantMarker.writeText(pickedName) }
+            } else if (variantMarker.exists()) {
+                runCatching { variantMarker.delete() }
+            }
+
             clearCrashGuardForFile(destFile, context)
             Result.success(destFile)
         } catch (oom: OutOfMemoryError) {
@@ -1565,13 +1577,25 @@ object OnnxProtobufInspector {
         val ortValid: Boolean
         var ortNote: String
 
+        val variantMarker = file.parentFile?.let { File(it, ".imported_variant_name") }
+        val recordedVariant = if (variantMarker != null && variantMarker.exists()) {
+            runCatching { variantMarker.readText().trim() }.getOrNull()?.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+        val displayFileLabel = if (recordedVariant != null && !recordedVariant.equals(file.name, ignoreCase = true)) {
+            "$recordedVariant (${file.name})"
+        } else {
+            file.name
+        }
+
         if (cachedEntry != null) {
             runtimeInputs = runCatching { extractDescriptors(cachedEntry.session.inputInfo) }
                 .getOrDefault(defaultInputDescriptors(slot))
             runtimeOutputs = runCatching { extractDescriptors(cachedEntry.session.outputInfo) }
                 .getOrDefault(defaultOutputDescriptors(slot))
             ortValid = true
-            ortNote = "Installed & verified in ONNX Runtime Mobile (${file.name})."
+            ortNote = "Installed & verified in ONNX Runtime Mobile ($displayFileLabel)."
         } else {
             // Fast header validation without allocating hundreds of MBs in native OrtSession
             val validHeader = (headerMeta.irVersion != null && headerMeta.irVersion in 1L..25L) ||
@@ -1582,7 +1606,7 @@ object OnnxProtobufInspector {
             ortNote = if (ortValid) {
                 val irStr = headerMeta.irVersion?.let { "IR v$it" } ?: "ONNX Graph"
                 val opsetStr = headerMeta.opsetVersion?.let { ", Opset $it" } ?: ""
-                "Installed & ready (${file.name}, $irStr$opsetStr)."
+                "Installed & ready ($displayFileLabel, $irStr$opsetStr)."
             } else {
                 "Invalid or truncated ONNX model file."
             }
