@@ -159,6 +159,7 @@ data class FaceSwapUiState(
     val inpaintPrompt: String = "",
     val inpaintNegativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
     val inpaintFastMode: Boolean = true,
+    val inpaintTurboMode: Boolean = false,
     val inpaintStrength: Float = 0.70f,
     val inpaintCfgScale: Float = 7.0f,
     val inpaintDepthGuardEnabled: Boolean = false,
@@ -1952,6 +1953,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(inpaintFastMode = fastMode) }
     }
 
+    fun setInpaintTurboMode(turboMode: Boolean) {
+        _uiState.update { it.copy(inpaintTurboMode = turboMode) }
+    }
+
     fun setInpaintStrength(strength: Float) {
         _uiState.update { it.copy(inpaintStrength = strength.coerceIn(0.10f, 1.00f)) }
     }
@@ -2513,6 +2518,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             prompt = state.inpaintPrompt,
                             negativePrompt = state.inpaintNegativePrompt,
                             fastMode = state.inpaintFastMode,
+                            turboMode = state.inpaintTurboMode,
                             lamaModelFile = if (lamaFile.exists()) lamaFile else null,
                             preferHardwareAccel = state.preferHardwareAcceleration,
                             selectedOption = state.inpaintModelOption,

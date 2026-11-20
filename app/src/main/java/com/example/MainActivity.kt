@@ -681,6 +681,7 @@ fun FaceSwapStudioApp(
                     onInpaintNegativePromptChanged = viewModel::setInpaintNegativePrompt,
                     onResetInpaintNegativePrompt = viewModel::resetInpaintNegativePromptToDefault,
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,
+                    onInpaintTurboModeChanged = viewModel::setInpaintTurboMode,
                     onInpaintStrengthChanged = viewModel::setInpaintStrength,
                     onInpaintCfgScaleChanged = viewModel::setInpaintCfgScale,
                     onInpaintDepthGuardChanged = viewModel::setInpaintDepthGuardEnabled,

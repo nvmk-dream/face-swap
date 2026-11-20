@@ -57,6 +57,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
@@ -148,6 +150,7 @@ fun InpaintPage(
     onNegativePromptChanged: (String) -> Unit = {},
     onResetNegativePrompt: () -> Unit = {},
     onFastModeChanged: (Boolean) -> Unit,
+    onTurboModeChanged: (Boolean) -> Unit = {},
     onStrengthChanged: (Float) -> Unit = {},
     onCfgScaleChanged: (Float) -> Unit = {},
     onDepthGuardChanged: (Boolean) -> Unit = {},
@@ -720,6 +723,24 @@ fun InpaintPage(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        FilterChip(
+                            selected = uiState.inpaintTurboMode,
+                            onClick = { onTurboModeChanged(!uiState.inpaintTurboMode) },
+                            label = {
+                                Text(
+                                    text = if (uiState.inpaintTurboMode) "⚡ Turbo ON" else "⚡ Turbo",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFD97706),
+                                selectedLabelColor = Color.White,
+                                containerColor = Color(0xFFF1F5F9),
+                                labelColor = darkSlate
+                            ),
+                            modifier = Modifier.testTag("inpaint_turbo_mode_chip")
+                        )
                         Text(
                             text = "Fast Mode",
                             color = darkSlate,
