@@ -50,8 +50,15 @@ class ProcessingForegroundService : Service() {
         } else {
             0
         }
-        runCatching {
+        val startedForeground = runCatching {
             ServiceCompat.startForeground(this, ONGOING_NOTIFICATION_ID, notification, serviceType)
+        }.isSuccess
+        if (!startedForeground) {
+            serviceActive = false
+            startRequestedAtMs = 0L
+            releaseCpuWakeLock()
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
         if (pendingStopRequested) {
             pendingStopRequested = false
@@ -66,6 +73,25 @@ class ProcessingForegroundService : Service() {
         serviceActive = true
         acquireOrRenewCpuWakeLock(forceRenew = false)
         return START_NOT_STICKY
+    }
+
+    override fun onTimeout(startId: Int) {
+        handleSystemTimeout(startId)
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handleSystemTimeout(startId)
+    }
+
+    private fun handleSystemTimeout(startId: Int) {
+        pendingStopRequested = true
+        serviceActive = false
+        startRequestedAtMs = 0L
+        releaseCpuWakeLock()
+        runCatching {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        }
+        stopSelf(startId)
     }
 
     override fun onDestroy() {

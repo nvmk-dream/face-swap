@@ -594,4 +594,16 @@ class InpaintFailurePathRobolectricTest {
         dummyDepthFile.delete()
         srcPng.delete()
     }
+
+    @Test
+    fun folderSaveHolder_andForegroundTimeout_workSafely() {
+        val vm = FaceSwapViewModel(context.applicationContext as Application)
+        val bmp = sampleBitmap()
+        vm.prepareBitmapForFolderSave(bmp)
+        assertEquals(bmp, vm.consumePendingFolderSaveBitmap())
+        assertEquals(null, vm.consumePendingFolderSaveBitmap())
+
+        val service = org.robolectric.Robolectric.setupService(com.example.service.ProcessingForegroundService::class.java)
+        service.onTimeout(1, 1)
+    }
 }

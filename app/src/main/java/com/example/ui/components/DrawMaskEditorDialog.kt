@@ -56,6 +56,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -226,6 +227,14 @@ fun DrawMaskEditorDialog(
                 aBmp.recycle()
             }
             combined
+        }
+    }
+
+    DisposableEffect(previewAutoMaskBitmap) {
+        onDispose {
+            if (previewAutoMaskBitmap != null && !previewAutoMaskBitmap.isRecycled) {
+                previewAutoMaskBitmap.recycle()
+            }
         }
     }
 

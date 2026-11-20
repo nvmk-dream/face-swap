@@ -528,50 +528,61 @@ object ImageGalleryHelper {
                 bitmap
             }
 
-            val ext = if (isHd) "png" else "jpg"
-            val mime = if (isHd) "image/png" else "image/jpeg"
-            val prefix = if (isHd) "FaceSwap_HD" else "FaceSwap"
-            val fileName = "${prefix}_${System.currentTimeMillis()}.$ext"
-            val resolver = context.contentResolver
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Images.Media.MIME_TYPE, mime)
+            val exportW = exportBitmap.width
+            val exportH = exportBitmap.height
+            var imageUri: Uri? = null
+            try {
+                val ext = if (isHd) "png" else "jpg"
+                val mime = if (isHd) "image/png" else "image/jpeg"
+                val prefix = if (isHd) "FaceSwap_HD" else "FaceSwap"
+                val fileName = "${prefix}_${System.currentTimeMillis()}.$ext"
+                val resolver = context.contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, mime)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(
+                            MediaStore.Images.Media.RELATIVE_PATH,
+                            "${Environment.DIRECTORY_PICTURES}/FaceSwapStudio"
+                        )
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                }
+
+                val createdUri = resolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    contentValues
+                ) ?: error("Could not create MediaStore entry in Android Gallery.")
+                imageUri = createdUri
+
+                val outputStream: OutputStream = resolver.openOutputStream(createdUri)
+                    ?: error("Could not open MediaStore output stream.")
+
+                outputStream.use { out ->
+                    val format = if (isHd) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                    val quality = if (isHd) 100 else 95
+                    if (!exportBitmap.compress(format, quality, out)) {
+                        error("Failed to compress output bitmap.")
+                    }
+                }
+
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(
-                        MediaStore.Images.Media.RELATIVE_PATH,
-                        "${Environment.DIRECTORY_PICTURES}/FaceSwapStudio"
-                    )
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(createdUri, contentValues, null, null)
+                }
+
+                "Pictures/FaceSwapStudio/$fileName (${exportW}×${exportH})"
+            } catch (t: Throwable) {
+                imageUri?.let { orphanUri ->
+                    runCatching { context.contentResolver.delete(orphanUri, null, null) }
+                }
+                throw t
+            } finally {
+                if (exportBitmap !== bitmap && !exportBitmap.isRecycled) {
+                    exportBitmap.recycle()
                 }
             }
-
-            val imageUri = resolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
-            ) ?: error("Could not create MediaStore entry in Android Gallery.")
-
-            val outputStream: OutputStream = resolver.openOutputStream(imageUri)
-                ?: error("Could not open MediaStore output stream.")
-
-            outputStream.use { out ->
-                val format = if (isHd) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
-                val quality = if (isHd) 100 else 95
-                if (!exportBitmap.compress(format, quality, out)) {
-                    error("Failed to compress output bitmap.")
-                }
-            }
-
-            if (exportBitmap !== bitmap) {
-                exportBitmap.recycle()
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                contentValues.clear()
-                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-                resolver.update(imageUri, contentValues, null, null)
-            }
-
-            "Pictures/FaceSwapStudio/$fileName (${exportBitmap.width}×${exportBitmap.height})"
         }
     }
 
@@ -600,14 +611,21 @@ object ImageGalleryHelper {
                 contentValues
             ) ?: error("Could not prepare shareable MediaStore URI.")
 
-            resolver.openOutputStream(imageUri)?.use { out ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-            } ?: error("Could not write shareable image stream.")
+            try {
+                resolver.openOutputStream(imageUri)?.use { out ->
+                    if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                        error("Failed to compress shareable PNG bitmap.")
+                    }
+                } ?: error("Could not write shareable image stream.")
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                contentValues.clear()
-                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-                resolver.update(imageUri, contentValues, null, null)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(imageUri, contentValues, null, null)
+                }
+            } catch (t: Throwable) {
+                runCatching { resolver.delete(imageUri, null, null) }
+                throw t
             }
 
             val sendIntent = Intent(Intent.ACTION_SEND).apply {

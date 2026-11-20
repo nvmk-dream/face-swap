@@ -109,7 +109,6 @@ fun FaceSwapStudioApp(
     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
 
     var pendingImportSlot by remember { mutableStateOf(ModelSlot.DETECTOR) }
-    var pendingSaveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var zoomViewerState by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -271,15 +270,14 @@ fun FaceSwapStudioApp(
     val folderSaveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("image/png")
     ) { uri ->
-        val bmp = pendingSaveBitmap
-        pendingSaveBitmap = null
+        val bmp = viewModel.consumePendingFolderSaveBitmap()
         if (uri != null && bmp != null) {
             viewModel.saveBitmapToFolderUri(uri, bmp)
         }
     }
 
     val requestSaveToFolder: (Bitmap) -> Unit = { bmp ->
-        pendingSaveBitmap = bmp
+        viewModel.prepareBitmapForFolderSave(bmp)
         folderSaveLauncher.launch("FaceSwapStudio_${System.currentTimeMillis()}.png")
     }
 

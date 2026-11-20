@@ -260,6 +260,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     @Volatile
     private var activeInpaintCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeInpaintJob: kotlinx.coroutines.Job? = null
+    private var pendingFolderSaveBitmap: Bitmap? = null
 
     val auditLogs: StateFlow<List<SwapAuditLog>> = auditRepository.allLogs.stateIn(
         scope = viewModelScope,
@@ -2640,6 +2641,32 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         completedTitle = "Inpaint Cancelled",
                         completedBody = cancelMsg
                     )
+                } else if (t is OutOfMemoryError) {
+                    modelService.releaseAllSessions()
+                    SdInpaintOnnxEngine.clearSessionCache()
+                    OnnxProtobufInspector.clearCachedSessions()
+                    System.gc()
+                    val errMsg = "Insufficient RAM during Inpaint. Cleared cached ONNX models & switched to Fast / Low-Memory Mode — please tap Create again."
+                    BackgroundProcessingCoordinator.updateInpaint {
+                        it.copy(isRunning = false, progressText = null, errorMessage = errMsg)
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isInpainting = false,
+                            inpaintProgressText = null,
+                            inpaintFastMode = true,
+                            lowMemoryMode = true,
+                            qualityLevel = ProcessingQualityLevel.FAST,
+                            memoryServiceState = modelService.getMemoryState(),
+                            errorBannerMessage = errMsg
+                        )
+                    }
+                    ProcessingForegroundService.finishAndNotify(
+                        context = appCtx,
+                        showCompletionNotification = true,
+                        completedTitle = "Inpaint Paused (Low RAM)",
+                        completedBody = errMsg
+                    )
                 } else {
                     val errMsg = t.message ?: "Inpaint failed: ${t.javaClass.simpleName}"
                     BackgroundProcessingCoordinator.updateInpaint {
@@ -2667,6 +2694,16 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
         activeInpaintJob = launchedJob
         launchedJob.start()
+    }
+
+    fun prepareBitmapForFolderSave(bitmap: Bitmap) {
+        pendingFolderSaveBitmap = bitmap
+    }
+
+    fun consumePendingFolderSaveBitmap(): Bitmap? {
+        val bmp = pendingFolderSaveBitmap
+        pendingFolderSaveBitmap = null
+        return bmp
     }
 
     fun saveBitmapToFolderUri(uri: Uri, bitmap: Bitmap) {
