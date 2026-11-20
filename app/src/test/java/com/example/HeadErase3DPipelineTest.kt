@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -16,9 +17,13 @@ import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.ui.FaceSwapUiState
+import com.example.ui.FaceSwapViewModel
+import com.example.ui.ProcessingQualityLevel
+import com.example.util.ImageGalleryHelper
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -814,6 +819,162 @@ class HeadErase3DPipelineTest {
             "Expected wide red hat brim erased toward sky background, got RGB=(${Color.red(erasedHatBrim)},${Color.green(erasedHatBrim)},${Color.blue(erasedHatBrim)})",
             Color.blue(erasedHatBrim) > 150
         )
+    }
+
+    @Test
+    fun `No5 capBitmapMaxDimension and DetectedFace scaled preserve small inputs and cap large 12MP photos cleanly`() {
+        val smallBmp = Bitmap.createBitmap(1024, 1536, Bitmap.Config.ARGB_8888)
+        val noScale = ImageGalleryHelper.capBitmapMaxDimension(smallBmp, 2048)
+        assertFalse(noScale.wasScaled)
+        assertSame(smallBmp, noScale.bitmap)
+        assertEquals(1.0f, noScale.scaleX, 0.0001f)
+        assertEquals(1.0f, noScale.scaleY, 0.0001f)
+        assertFalse(smallBmp.isRecycled)
+
+        val large12Mp = Bitmap.createBitmap(3000, 4000, Bitmap.Config.ARGB_8888)
+        val capped2048 = ImageGalleryHelper.capBitmapMaxDimension(large12Mp, 2048)
+        assertTrue(capped2048.wasScaled)
+        assertEquals(1536, capped2048.bitmap.width)
+        assertEquals(2048, capped2048.bitmap.height)
+        assertEquals(1536f / 3000f, capped2048.scaleX, 0.0005f)
+        assertEquals(2048f / 4000f, capped2048.scaleY, 0.0005f)
+        assertFalse("Caller bitmap must never be recycled by capBitmapMaxDimension", large12Mp.isRecycled)
+
+        val capped1280 = ImageGalleryHelper.capBitmapMaxDimension(large12Mp, 1280)
+        assertTrue(capped1280.wasScaled)
+        assertEquals(960, capped1280.bitmap.width)
+        assertEquals(1280, capped1280.bitmap.height)
+        capped2048.bitmap.recycle()
+        capped1280.bitmap.recycle()
+        smallBmp.recycle()
+        large12Mp.recycle()
+
+        val originalFace = DetectedFace(
+            index = 1,
+            boundingBox = RectF(1000f, 800f, 2000f, 2200f),
+            score = 0.95f,
+            landmarks5 = listOf(
+                PointF(1300f, 1200f),
+                PointF(1700f, 1200f),
+                PointF(1500f, 1500f),
+                PointF(1340f, 1800f),
+                PointF(1660f, 1800f)
+            ),
+            detectorSource = "TestLarge",
+            faceContourPoints = listOf(PointF(1200f, 1000f), PointF(1800f, 2000f)),
+            eulerX = 5f,
+            eulerY = -10f,
+            eulerZ = 3f
+        )
+        assertSame(originalFace, originalFace.scaled(1.0f, 1.0f))
+
+        val scaledFace = originalFace.scaled(0.512f, 0.512f)
+        assertEquals(512f, scaledFace.boundingBox.left, 0.01f)
+        assertEquals(409.6f, scaledFace.boundingBox.top, 0.01f)
+        assertEquals(665.6f, scaledFace.landmarks5[0].x, 0.05f)
+        assertEquals(614.4f, scaledFace.faceContourPoints[0].x, 0.05f)
+        assertEquals(5f, scaledFace.eulerX, 0.001f)
+        assertEquals(-10f, scaledFace.eulerY, 0.001f)
+        assertEquals(3f, scaledFace.eulerZ, 0.001f)
+    }
+
+    @Test
+    fun `No5 resolveSafeProcessingMaxDimensionPx enforces 1280 low-RAM cap and 2048 working cap`() {
+        val vm = FaceSwapViewModel(ApplicationProvider.getApplicationContext<Application>())
+
+        assertEquals(
+            2048,
+            vm.resolveSafeProcessingMaxDimensionPx(
+                FaceSwapUiState(
+                    lowMemoryMode = false,
+                    runtimeLowRamLatched = false,
+                    qualityLevel = ProcessingQualityLevel.HIGH_QUALITY
+                )
+            )
+        )
+        assertEquals(
+            2048,
+            vm.resolveSafeProcessingMaxDimensionPx(
+                FaceSwapUiState(
+                    lowMemoryMode = false,
+                    runtimeLowRamLatched = false,
+                    qualityLevel = ProcessingQualityLevel.BALANCED
+                )
+            )
+        )
+        assertEquals(
+            1280,
+            vm.resolveSafeProcessingMaxDimensionPx(
+                FaceSwapUiState(
+                    lowMemoryMode = false,
+                    runtimeLowRamLatched = false,
+                    qualityLevel = ProcessingQualityLevel.FAST
+                )
+            )
+        )
+        assertEquals(
+            1280,
+            vm.resolveSafeProcessingMaxDimensionPx(
+                FaceSwapUiState(
+                    lowMemoryMode = true,
+                    runtimeLowRamLatched = false,
+                    qualityLevel = ProcessingQualityLevel.HIGH_QUALITY
+                )
+            )
+        )
+        assertEquals(
+            1280,
+            vm.resolveSafeProcessingMaxDimensionPx(
+                FaceSwapUiState(
+                    lowMemoryMode = false,
+                    runtimeLowRamLatched = true,
+                    qualityLevel = ProcessingQualityLevel.HIGH_QUALITY
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `No5 CleanEraseHeadReplacementEngine auto-caps oversized bitmaps and leaves caller inputs unrecycled`() {
+        val (srcBmp, srcFace) = createPortrait(
+            width = 1920,
+            height = 1440,
+            bgColor = Color.rgb(25, 30, 40),
+            skinColor = Color.rgb(225, 180, 150),
+            hairColor = Color.rgb(30, 20, 20),
+            eyeDist = 180f
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 2400,
+            height = 1800,
+            bgColor = Color.rgb(215, 230, 245),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(45, 30, 20),
+            eyeDist = 220f
+        )
+
+        val result = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(tgtFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+
+        assertEquals(1280, result.outputBitmap.width)
+        assertEquals(960, result.outputBitmap.height)
+        assertFalse(srcBmp.isRecycled)
+        assertFalse(tgtBmp.isRecycled)
+        srcBmp.recycle()
+        tgtBmp.recycle()
+        result.outputBitmap.recycle()
     }
 }
 

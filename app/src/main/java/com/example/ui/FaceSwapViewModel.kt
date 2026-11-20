@@ -334,6 +334,19 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    internal fun resolveSafeProcessingMaxDimensionPx(
+        state: FaceSwapUiState = _uiState.value
+    ): Int {
+        return if (state.lowMemoryMode ||
+            state.runtimeLowRamLatched ||
+            state.qualityLevel == ProcessingQualityLevel.FAST
+        ) {
+            1280
+        } else {
+            minOf(state.qualityLevel.maxDecodeDimensionPx, 2048)
+        }
+    }
+
     private fun detectDeviceRamProfile(
         context: Context
     ): Triple<Boolean, ProcessingQualityLevel, Pair<Float, Long>> {
@@ -941,7 +954,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun onSourceImageSelected(uri: Uri) {
         viewModelScope.launch {
-            val maxDim = _uiState.value.qualityLevel.maxDecodeDimensionPx
+            val maxDim = resolveSafeProcessingMaxDimensionPx()
             _uiState.update {
                 it.copy(
                     isDetectingSource = true,
@@ -978,7 +991,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun onTargetImageSelected(uri: Uri) {
         viewModelScope.launch {
-            val maxDim = _uiState.value.qualityLevel.maxDecodeDimensionPx
+            val maxDim = resolveSafeProcessingMaxDimensionPx()
             _uiState.update {
                 it.copy(
                     isDetectingTarget = true,
@@ -1385,13 +1398,134 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         throw java.util.concurrent.CancellationException("Processing cancelled by user.")
                     }
                     SdInpaintOnnxEngine.clearSessionCache()
-                    when (state.studioMode) {
-                        StudioMode.FACE_SWAP -> if (state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD) {
-                            modelService.replaceFullHead(
-                                sourceBitmap = srcBitmap,
-                                sourceFace = selectedSourceFace,
-                                targetBitmap = tgtBitmap,
-                                targetFacesToReplace = targetsToSwap,
+                    val safeProcMaxDim = resolveSafeProcessingMaxDimensionPx(state)
+                    val cappedSrc = ImageGalleryHelper.capBitmapMaxDimension(srcBitmap, safeProcMaxDim)
+                    val cappedTgt = ImageGalleryHelper.capBitmapMaxDimension(tgtBitmap, safeProcMaxDim)
+                    val procSrcBitmap = cappedSrc.bitmap
+                    val procTgtBitmap = cappedTgt.bitmap
+                    val procSrcFace = if (cappedSrc.wasScaled) {
+                        selectedSourceFace.scaled(cappedSrc.scaleX, cappedSrc.scaleY)
+                    } else {
+                        selectedSourceFace
+                    }
+                    val procTargetsToSwap = if (cappedTgt.wasScaled) {
+                        targetsToSwap.map { it.scaled(cappedTgt.scaleX, cappedTgt.scaleY) }
+                    } else {
+                        targetsToSwap
+                    }
+                    var localResult: FaceSwapExecutionResult? = null
+                    try {
+                        localResult = when (state.studioMode) {
+                            StudioMode.FACE_SWAP -> if (state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD) {
+                                modelService.replaceFullHead(
+                                    sourceBitmap = procSrcBitmap,
+                                    sourceFace = procSrcFace,
+                                    targetBitmap = procTgtBitmap,
+                                    targetFacesToReplace = procTargetsToSwap,
+                                    enableColorTransfer = state.enableColorTransfer,
+                                    enableProvenanceWatermark = state.enableProvenanceWatermark,
+                                    allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
+                                    lowMemoryMode = state.lowMemoryMode || (state.qualityLevel == ProcessingQualityLevel.FAST),
+                                    preferHardwareAccel = state.preferHardwareAcceleration,
+                                    skinToneMode = state.skinToneMode,
+                                    faceReactionMode = state.faceReactionMode,
+                                    portraitBlurStrength = state.portraitBlurStrength,
+                                    blendStrength = state.blendStrength,
+                                    enhancementStrength = state.enhancementStrength,
+                                    offsetX = state.faceOffsetX,
+                                    offsetY = state.faceOffsetY,
+                                    scaleAdjust = state.faceScaleAdjust,
+                                    autoBodyAgeMatch = state.autoBodyAgeMatch,
+                                    faceAgingFactor = state.faceAgingFactor,
+                                    headPipelineMode = state.headPipelineMode,
+                                    isCancelled = { jobCancelToken.get() },
+                                    onProgress = { progress ->
+                                        if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@replaceFullHead
+                                        _uiState.update { s -> s.copy(swapProgress = progress) }
+                                        ProcessingForegroundService.startOrUpdate(
+                                            context = appCtx,
+                                            title = "${state.studioMode.title} (Opt B+C) • ${progress.stageTitle}",
+                                            detail = progress.detailMessage,
+                                            progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                        )
+                                    }
+                                )
+                            } else {
+                                modelService.swapFaces(
+                                    sourceBitmap = procSrcBitmap,
+                                    sourceFace = procSrcFace,
+                                    targetBitmap = procTgtBitmap,
+                                    targetFacesToReplace = procTargetsToSwap,
+                                    enableColorTransfer = state.enableColorTransfer,
+                                    enableProvenanceWatermark = state.enableProvenanceWatermark,
+                                    allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
+                                    preferHardwareAccel = state.preferHardwareAcceleration,
+                                    skinToneMode = state.skinToneMode,
+                                    faceReactionMode = state.faceReactionMode,
+                                    enableOcclusionProtection = state.enableOcclusionProtection,
+                                    portraitBlurStrength = state.portraitBlurStrength,
+                                    blendStrength = state.blendStrength,
+                                    enhancementStrength = state.enhancementStrength,
+                                    offsetX = state.faceOffsetX,
+                                    offsetY = state.faceOffsetY,
+                                    scaleAdjust = state.faceScaleAdjust,
+                                    identityPreservationMode = false,
+                                    autoBodyAgeMatch = state.autoBodyAgeMatch,
+                                    faceAgingFactor = state.faceAgingFactor,
+                                    swapStrategyOption = state.swapStrategyOption,
+                                    isCancelled = { jobCancelToken.get() },
+                                    onProgress = { progress ->
+                                        if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
+                                        _uiState.update { s -> s.copy(swapProgress = progress) }
+                                        ProcessingForegroundService.startOrUpdate(
+                                            context = appCtx,
+                                            title = "${state.studioMode.title} (Opt ${state.swapStrategyOption.shortCode}) • ${progress.stageTitle}",
+                                            detail = progress.detailMessage,
+                                            progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                        )
+                                    }
+                                )
+                            }
+
+                            StudioMode.IDENTITY_PRESERVED -> modelService.swapFaces(
+                                sourceBitmap = procSrcBitmap,
+                                sourceFace = procSrcFace,
+                                targetBitmap = procTgtBitmap,
+                                targetFacesToReplace = procTargetsToSwap,
+                                enableColorTransfer = state.enableColorTransfer,
+                                enableProvenanceWatermark = state.enableProvenanceWatermark,
+                                allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
+                                preferHardwareAccel = state.preferHardwareAcceleration,
+                                skinToneMode = state.skinToneMode,
+                                faceReactionMode = state.faceReactionMode,
+                                enableOcclusionProtection = state.enableOcclusionProtection,
+                                portraitBlurStrength = state.portraitBlurStrength,
+                                blendStrength = state.blendStrength,
+                                enhancementStrength = 0.0f, // No synthetic GAN enhancement
+                                offsetX = state.faceOffsetX,
+                                offsetY = state.faceOffsetY,
+                                scaleAdjust = state.faceScaleAdjust,
+                                identityPreservationMode = true,
+                                autoBodyAgeMatch = false,
+                                faceAgingFactor = 0.0f,
+                                isCancelled = { jobCancelToken.get() },
+                                onProgress = { progress ->
+                                    if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
+                                    _uiState.update { s -> s.copy(swapProgress = progress) }
+                                    ProcessingForegroundService.startOrUpdate(
+                                        context = appCtx,
+                                        title = "${state.studioMode.title} • ${progress.stageTitle}",
+                                        detail = progress.detailMessage,
+                                        progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
+                                    )
+                                }
+                            )
+
+                            StudioMode.HEAD_REPLACEMENT -> modelService.replaceFullHead(
+                                sourceBitmap = procSrcBitmap,
+                                sourceFace = procSrcFace,
+                                targetBitmap = procTgtBitmap,
+                                targetFacesToReplace = procTargetsToSwap,
                                 enableColorTransfer = state.enableColorTransfer,
                                 enableProvenanceWatermark = state.enableProvenanceWatermark,
                                 allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
@@ -1414,116 +1548,21 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                     _uiState.update { s -> s.copy(swapProgress = progress) }
                                     ProcessingForegroundService.startOrUpdate(
                                         context = appCtx,
-                                        title = "${state.studioMode.title} (Opt B+C) • ${progress.stageTitle}",
-                                        detail = progress.detailMessage,
-                                        progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
-                                    )
-                                }
-                            )
-                        } else {
-                            modelService.swapFaces(
-                                sourceBitmap = srcBitmap,
-                                sourceFace = selectedSourceFace,
-                                targetBitmap = tgtBitmap,
-                                targetFacesToReplace = targetsToSwap,
-                                enableColorTransfer = state.enableColorTransfer,
-                                enableProvenanceWatermark = state.enableProvenanceWatermark,
-                                allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
-                                preferHardwareAccel = state.preferHardwareAcceleration,
-                                skinToneMode = state.skinToneMode,
-                                faceReactionMode = state.faceReactionMode,
-                                enableOcclusionProtection = state.enableOcclusionProtection,
-                                portraitBlurStrength = state.portraitBlurStrength,
-                                blendStrength = state.blendStrength,
-                                enhancementStrength = state.enhancementStrength,
-                                offsetX = state.faceOffsetX,
-                                offsetY = state.faceOffsetY,
-                                scaleAdjust = state.faceScaleAdjust,
-                                identityPreservationMode = false,
-                                autoBodyAgeMatch = state.autoBodyAgeMatch,
-                                faceAgingFactor = state.faceAgingFactor,
-                                swapStrategyOption = state.swapStrategyOption,
-                                isCancelled = { jobCancelToken.get() },
-                                onProgress = { progress ->
-                                    if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
-                                    _uiState.update { s -> s.copy(swapProgress = progress) }
-                                    ProcessingForegroundService.startOrUpdate(
-                                        context = appCtx,
-                                        title = "${state.studioMode.title} (Opt ${state.swapStrategyOption.shortCode}) • ${progress.stageTitle}",
+                                        title = "${state.studioMode.title} • ${progress.stageTitle}",
                                         detail = progress.detailMessage,
                                         progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
                                     )
                                 }
                             )
                         }
-
-                        StudioMode.IDENTITY_PRESERVED -> modelService.swapFaces(
-                            sourceBitmap = srcBitmap,
-                            sourceFace = selectedSourceFace,
-                            targetBitmap = tgtBitmap,
-                            targetFacesToReplace = targetsToSwap,
-                            enableColorTransfer = state.enableColorTransfer,
-                            enableProvenanceWatermark = state.enableProvenanceWatermark,
-                            allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
-                            preferHardwareAccel = state.preferHardwareAcceleration,
-                            skinToneMode = state.skinToneMode,
-                            faceReactionMode = state.faceReactionMode,
-                            enableOcclusionProtection = state.enableOcclusionProtection,
-                            portraitBlurStrength = state.portraitBlurStrength,
-                            blendStrength = state.blendStrength,
-                            enhancementStrength = 0.0f, // No synthetic GAN enhancement
-                            offsetX = state.faceOffsetX,
-                            offsetY = state.faceOffsetY,
-                            scaleAdjust = state.faceScaleAdjust,
-                            identityPreservationMode = true,
-                            autoBodyAgeMatch = false,
-                            faceAgingFactor = 0.0f,
-                            isCancelled = { jobCancelToken.get() },
-                            onProgress = { progress ->
-                                if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
-                                _uiState.update { s -> s.copy(swapProgress = progress) }
-                                ProcessingForegroundService.startOrUpdate(
-                                    context = appCtx,
-                                    title = "${state.studioMode.title} • ${progress.stageTitle}",
-                                    detail = progress.detailMessage,
-                                    progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
-                                )
-                            }
-                        )
-
-                        StudioMode.HEAD_REPLACEMENT -> modelService.replaceFullHead(
-                            sourceBitmap = srcBitmap,
-                            sourceFace = selectedSourceFace,
-                            targetBitmap = tgtBitmap,
-                            targetFacesToReplace = targetsToSwap,
-                            enableColorTransfer = state.enableColorTransfer,
-                            enableProvenanceWatermark = state.enableProvenanceWatermark,
-                            allowTwoModelFallback = state.allowTwoModelFallbackForTesting,
-                            lowMemoryMode = state.lowMemoryMode || (state.qualityLevel == ProcessingQualityLevel.FAST),
-                            preferHardwareAccel = state.preferHardwareAcceleration,
-                            skinToneMode = state.skinToneMode,
-                            faceReactionMode = state.faceReactionMode,
-                            portraitBlurStrength = state.portraitBlurStrength,
-                            blendStrength = state.blendStrength,
-                            enhancementStrength = state.enhancementStrength,
-                            offsetX = state.faceOffsetX,
-                            offsetY = state.faceOffsetY,
-                            scaleAdjust = state.faceScaleAdjust,
-                            autoBodyAgeMatch = state.autoBodyAgeMatch,
-                            faceAgingFactor = state.faceAgingFactor,
-                            headPipelineMode = state.headPipelineMode,
-                            isCancelled = { jobCancelToken.get() },
-                            onProgress = { progress ->
-                                if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@replaceFullHead
-                                _uiState.update { s -> s.copy(swapProgress = progress) }
-                                ProcessingForegroundService.startOrUpdate(
-                                    context = appCtx,
-                                    title = "${state.studioMode.title} • ${progress.stageTitle}",
-                                    detail = progress.detailMessage,
-                                    progressPercent = (progress.progressFraction * 100f).toInt().coerceIn(5, 99)
-                                )
-                            }
-                        )
+                        localResult
+                    } finally {
+                        if (procSrcBitmap !== srcBitmap) {
+                            procSrcBitmap.recycle()
+                        }
+                        if (procTgtBitmap !== tgtBitmap && localResult?.outputBitmap !== procTgtBitmap) {
+                            procTgtBitmap.recycle()
+                        }
                     }
                 }
                 if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) {
@@ -1848,7 +1887,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun onInpaintSourceImageSelected(uri: Uri) {
         viewModelScope.launch {
-            val maxDim = _uiState.value.qualityLevel.maxDecodeDimensionPx
+            val maxDim = resolveSafeProcessingMaxDimensionPx()
             _uiState.update {
                 it.copy(errorBannerMessage = null, statusBannerMessage = null)
             }
@@ -2408,89 +2447,113 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     if (jobCancelToken.get()) {
                         throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
                     }
-                    val activeDepthMap = if (state.inpaintDepthGuardEnabled && state.inpaintDepthMap == null &&
-                        DepthEstimationEngine.hasInstalledDepthModel(ctx)
+                    val safeInpaintMaxDim = resolveSafeProcessingMaxDimensionPx(state)
+                    val cappedInpaintSrc = ImageGalleryHelper.capBitmapMaxDimension(srcBmp, safeInpaintMaxDim)
+                    val procSrcBmp = cappedInpaintSrc.bitmap
+                    val procMaskBmp = if (cappedInpaintSrc.wasScaled ||
+                        maskBmp.width != procSrcBmp.width ||
+                        maskBmp.height != procSrcBmp.height
                     ) {
-                        val depthRes = DepthEstimationEngine.estimateDepth(
-                            context = ctx,
-                            ortEnv = ortEnv,
-                            sourceBitmap = srcBmp,
-                            preferHardwareAccel = state.preferHardwareAcceleration,
-                            isCancelled = { jobCancelToken.get() },
-                            onProgress = { msg ->
-                                if (!jobCancelToken.get() && activeInpaintCancelToken === jobCancelToken) {
-                                    _uiState.update { s -> s.copy(inpaintProgressText = msg) }
-                                    BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = msg) }
+                        Bitmap.createScaledBitmap(maskBmp, procSrcBmp.width, procSrcBmp.height, true)
+                    } else {
+                        maskBmp
+                    }
+                    var localInpaintRes: com.example.onnx.InpaintExecutionResult? = null
+                    try {
+                        val activeDepthMap = if (state.inpaintDepthGuardEnabled && state.inpaintDepthMap == null &&
+                            DepthEstimationEngine.hasInstalledDepthModel(ctx)
+                        ) {
+                            val depthRes = DepthEstimationEngine.estimateDepth(
+                                context = ctx,
+                                ortEnv = ortEnv,
+                                sourceBitmap = procSrcBmp,
+                                preferHardwareAccel = state.preferHardwareAcceleration,
+                                isCancelled = { jobCancelToken.get() },
+                                onProgress = { msg ->
+                                    if (!jobCancelToken.get() && activeInpaintCancelToken === jobCancelToken) {
+                                        _uiState.update { s -> s.copy(inpaintProgressText = msg) }
+                                        BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = msg) }
+                                    }
+                                }
+                            )
+                            // Release depth ONNX sessions & transient native heap buffers before heavy SD 1.5 loads
+                            OnnxProtobufInspector.clearCachedSessions()
+                            SdInpaintOnnxEngine.clearSessionCache()
+                            System.gc()
+                            if (jobCancelToken.get()) {
+                                throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
+                            }
+                            if (!cappedInpaintSrc.wasScaled && depthRes != null && activeInpaintCancelToken === jobCancelToken) {
+                                _uiState.update { cur ->
+                                    if (cur.inpaintSourceBitmap === srcBmp && cur.inpaintDepthMap == null) {
+                                        cur.copy(inpaintDepthMap = depthRes)
+                                    } else {
+                                        cur
+                                    }
                                 }
                             }
-                        )
-                        // Release depth ONNX sessions & transient native heap buffers before heavy SD 1.5 loads
-                        OnnxProtobufInspector.clearCachedSessions()
-                        SdInpaintOnnxEngine.clearSessionCache()
-                        System.gc()
+                            depthRes
+                        } else if (!cappedInpaintSrc.wasScaled) {
+                            state.inpaintDepthMap
+                        } else {
+                            null
+                        }
                         if (jobCancelToken.get()) {
                             throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
                         }
-                        if (depthRes != null && activeInpaintCancelToken === jobCancelToken) {
-                            _uiState.update { cur ->
-                                if (cur.inpaintSourceBitmap === srcBmp && cur.inpaintDepthMap == null) {
-                                    cur.copy(inpaintDepthMap = depthRes)
-                                } else {
-                                    cur
+                        val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+                        localInpaintRes = InteractiveInpaintEngine.inpaint(
+                            ortEnv = ortEnv,
+                            sourceBitmap = procSrcBmp,
+                            maskBitmap = procMaskBmp,
+                            prompt = state.inpaintPrompt,
+                            negativePrompt = state.inpaintNegativePrompt,
+                            fastMode = state.inpaintFastMode,
+                            lamaModelFile = if (lamaFile.exists()) lamaFile else null,
+                            preferHardwareAccel = state.preferHardwareAcceleration,
+                            selectedOption = state.inpaintModelOption,
+                            primarySdPack = primaryPack,
+                            secondarySdPack = secondaryPack,
+                            depthMap = activeDepthMap,
+                            enableDepthGuard = state.inpaintDepthGuardEnabled,
+                            strength = state.inpaintStrength,
+                            guidanceScale = state.inpaintCfgScale,
+                            context = ctx,
+                            isCancelled = { jobCancelToken.get() },
+                            onProgress = { progressMsg ->
+                                if (jobCancelToken.get() || activeInpaintCancelToken !== jobCancelToken) return@inpaint
+                                _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
+                                BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }
+                                val diffStepMatch = Regex("step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
+                                val pct = when {
+                                    diffStepMatch != null -> {
+                                        val curS = diffStepMatch.groupValues[1].toIntOrNull() ?: 1
+                                        val totS = diffStepMatch.groupValues[2].toIntOrNull()?.coerceAtLeast(1) ?: 8
+                                        (25 + (curS * 63) / totS).coerceIn(25, 88)
+                                    }
+                                    progressMsg.contains("1/4") -> 10
+                                    progressMsg.contains("2/4") -> 20
+                                    progressMsg.contains("4/4") -> 92
+                                    progressMsg.contains("LaMa", ignoreCase = true) -> 50
+                                    else -> -1
                                 }
+                                ProcessingForegroundService.startOrUpdate(
+                                    context = appCtx,
+                                    title = "Inpaint Generating (Background Active)",
+                                    detail = progressMsg,
+                                    progressPercent = pct
+                                )
                             }
+                        )
+                        localInpaintRes
+                    } finally {
+                        if (procSrcBmp !== srcBmp && localInpaintRes?.outputBitmap !== procSrcBmp) {
+                            procSrcBmp.recycle()
                         }
-                        depthRes
-                    } else {
-                        state.inpaintDepthMap
-                    }
-                    if (jobCancelToken.get()) {
-                        throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")
-                    }
-                    val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
-                    InteractiveInpaintEngine.inpaint(
-                        ortEnv = ortEnv,
-                        sourceBitmap = srcBmp,
-                        maskBitmap = maskBmp,
-                        prompt = state.inpaintPrompt,
-                        negativePrompt = state.inpaintNegativePrompt,
-                        fastMode = state.inpaintFastMode,
-                        lamaModelFile = if (lamaFile.exists()) lamaFile else null,
-                        preferHardwareAccel = state.preferHardwareAcceleration,
-                        selectedOption = state.inpaintModelOption,
-                        primarySdPack = primaryPack,
-                        secondarySdPack = secondaryPack,
-                        depthMap = activeDepthMap,
-                        enableDepthGuard = state.inpaintDepthGuardEnabled,
-                        strength = state.inpaintStrength,
-                        guidanceScale = state.inpaintCfgScale,
-                        context = ctx,
-                        isCancelled = { jobCancelToken.get() },
-                        onProgress = { progressMsg ->
-                            if (jobCancelToken.get() || activeInpaintCancelToken !== jobCancelToken) return@inpaint
-                            _uiState.update { s -> s.copy(inpaintProgressText = progressMsg) }
-                            BackgroundProcessingCoordinator.updateInpaint { s -> s.copy(progressText = progressMsg) }
-                            val diffStepMatch = Regex("step\\s+(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).find(progressMsg)
-                            val pct = when {
-                                diffStepMatch != null -> {
-                                    val curS = diffStepMatch.groupValues[1].toIntOrNull() ?: 1
-                                    val totS = diffStepMatch.groupValues[2].toIntOrNull()?.coerceAtLeast(1) ?: 8
-                                    (25 + (curS * 63) / totS).coerceIn(25, 88)
-                                }
-                                progressMsg.contains("1/4") -> 10
-                                progressMsg.contains("2/4") -> 20
-                                progressMsg.contains("4/4") -> 92
-                                progressMsg.contains("LaMa", ignoreCase = true) -> 50
-                                else -> -1
-                            }
-                            ProcessingForegroundService.startOrUpdate(
-                                context = appCtx,
-                                title = "Inpaint Generating (Background Active)",
-                                detail = progressMsg,
-                                progressPercent = pct
-                            )
+                        if (procMaskBmp !== maskBmp) {
+                            procMaskBmp.recycle()
                         }
-                    )
+                    }
                 }
                 if (jobCancelToken.get() || activeInpaintCancelToken !== jobCancelToken) {
                     throw java.util.concurrent.CancellationException("Inpaint cancelled by user.")

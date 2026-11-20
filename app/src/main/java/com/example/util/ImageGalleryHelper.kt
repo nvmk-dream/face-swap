@@ -27,6 +27,40 @@ object ImageGalleryHelper {
 
     private const val MAX_IMAGE_DIMENSION = 1600
 
+    data class ScaledBitmapResult(
+        val bitmap: Bitmap,
+        val scaleX: Float,
+        val scaleY: Float
+    ) {
+        val wasScaled: Boolean get() = scaleX != 1.0f || scaleY != 1.0f
+    }
+
+    /**
+     * Downscales [bitmap] proportionally only when its longest edge exceeds [maxDimensionPx].
+     * Never recycles the caller-supplied [bitmap]. Returns exact X/Y scale factors for landmark scaling.
+     */
+    fun capBitmapMaxDimension(
+        bitmap: Bitmap,
+        maxDimensionPx: Int
+    ): ScaledBitmapResult {
+        val safeMaxDim = maxDimensionPx.coerceIn(512, 4096)
+        val w = bitmap.width.coerceAtLeast(1)
+        val h = bitmap.height.coerceAtLeast(1)
+        val longest = max(w, h)
+        if (longest <= safeMaxDim) {
+            return ScaledBitmapResult(bitmap = bitmap, scaleX = 1.0f, scaleY = 1.0f)
+        }
+        val scale = safeMaxDim.toFloat() / longest.toFloat()
+        val newW = (w * scale).toInt().coerceAtLeast(1)
+        val newH = (h * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+        return ScaledBitmapResult(
+            bitmap = scaled,
+            scaleX = newW.toFloat() / w.toFloat(),
+            scaleY = newH.toFloat() / h.toFloat()
+        )
+    }
+
     /**
      * Memory-safely decodes a gallery or document image Uri into a software ARGB_8888 Bitmap,
      * applying EXIF orientation and capping the maximum dimension at 1600px.
@@ -169,7 +203,10 @@ object ImageGalleryHelper {
 
             val rotationDegrees = readExifRotationFromFile(tempFile)
             val oriented = applyRotationIfNeeded(rawBitmap, rotationDegrees)
-            return ensureArgb8888(oriented)
+            val argb = ensureArgb8888(oriented)
+            val capped = capBitmapMaxDimension(argb, maxDimensionPx)
+            if (capped.bitmap !== argb) argb.recycle()
+            return capped.bitmap
         } finally {
             runCatching { tempFile.delete() }
         }
@@ -219,7 +256,10 @@ object ImageGalleryHelper {
             }.getOrDefault(0f)
 
             val oriented = applyRotationIfNeeded(rawBitmap, rotationDegrees)
-            return ensureArgb8888(oriented)
+            val argb = ensureArgb8888(oriented)
+            val capped = capBitmapMaxDimension(argb, maxDimensionPx)
+            if (capped.bitmap !== argb) argb.recycle()
+            return capped.bitmap
         }
     }
 

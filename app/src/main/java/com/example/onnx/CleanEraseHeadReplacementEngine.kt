@@ -6,6 +6,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
+import com.example.util.ImageGalleryHelper
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -73,11 +74,98 @@ object CleanEraseHeadReplacementEngine {
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
-        val tStart = System.currentTimeMillis()
         require(targetFacesToReplace.isNotEmpty()) {
             "Please select at least one detected target head to replace."
         }
+        val safeMaxWorkingDim = if (lowMemoryMode) 1280 else 2048
+        val cappedSource = ImageGalleryHelper.capBitmapMaxDimension(sourceBitmap, safeMaxWorkingDim)
+        val cappedTarget = ImageGalleryHelper.capBitmapMaxDimension(targetBitmap, safeMaxWorkingDim)
+        val procSourceFace = if (cappedSource.wasScaled) {
+            sourceFace.scaled(cappedSource.scaleX, cappedSource.scaleY)
+        } else {
+            sourceFace
+        }
+        val procTargetFaces = if (cappedTarget.wasScaled) {
+            targetFacesToReplace.map { it.scaled(cappedTarget.scaleX, cappedTarget.scaleY) }
+        } else {
+            targetFacesToReplace
+        }
+        var result: FaceSwapExecutionResult? = null
+        try {
+            result = executeCapped(
+                context = context,
+                ortEnv = ortEnv,
+                sourceBitmap = cappedSource.bitmap,
+                sourceFace = procSourceFace,
+                targetBitmap = cappedTarget.bitmap,
+                targetFacesToReplace = procTargetFaces,
+                pipelineMode = pipelineMode,
+                enableColorTransfer = enableColorTransfer,
+                enableProvenanceWatermark = enableProvenanceWatermark,
+                allowTwoModelFallbackForTesting = allowTwoModelFallbackForTesting,
+                lowMemoryMode = lowMemoryMode,
+                preferHardwareAccel = preferHardwareAccel,
+                skinToneMode = skinToneMode,
+                faceReactionMode = faceReactionMode,
+                portraitBlurStrength = portraitBlurStrength,
+                blendStrength = blendStrength,
+                enhancementStrength = enhancementStrength,
+                offsetX = offsetX,
+                offsetY = offsetY,
+                scaleAdjust = scaleAdjust,
+                preloadedArcFaceSession = preloadedArcFaceSession,
+                preloadedSwapSession = preloadedSwapSession,
+                preloadedSegformerSession = preloadedSegformerSession,
+                preloadedGfpganSession = preloadedGfpganSession,
+                preloadedEmap512x512 = preloadedEmap512x512,
+                autoBodyAgeMatch = autoBodyAgeMatch,
+                faceAgingFactor = faceAgingFactor,
+                isCancelled = isCancelled,
+                onProgress = onProgress
+            )
+            return result
+        } finally {
+            if (cappedSource.bitmap !== sourceBitmap) {
+                cappedSource.bitmap.recycle()
+            }
+            if (cappedTarget.bitmap !== targetBitmap && result?.outputBitmap !== cappedTarget.bitmap) {
+                cappedTarget.bitmap.recycle()
+            }
+        }
+    }
 
+    private fun executeCapped(
+        context: Context,
+        ortEnv: OrtEnvironment?,
+        sourceBitmap: Bitmap,
+        sourceFace: DetectedFace,
+        targetBitmap: Bitmap,
+        targetFacesToReplace: List<DetectedFace>,
+        pipelineMode: HeadReplacementPipelineMode,
+        enableColorTransfer: Boolean,
+        enableProvenanceWatermark: Boolean,
+        allowTwoModelFallbackForTesting: Boolean,
+        lowMemoryMode: Boolean,
+        preferHardwareAccel: Boolean,
+        skinToneMode: SkinToneSourceMode,
+        faceReactionMode: FaceReactionSourceMode,
+        portraitBlurStrength: Float,
+        blendStrength: Float,
+        enhancementStrength: Float,
+        offsetX: Float,
+        offsetY: Float,
+        scaleAdjust: Float,
+        preloadedArcFaceSession: OrtSession?,
+        preloadedSwapSession: OrtSession?,
+        preloadedSegformerSession: OrtSession?,
+        preloadedGfpganSession: OrtSession?,
+        preloadedEmap512x512: FloatArray?,
+        autoBodyAgeMatch: Boolean,
+        faceAgingFactor: Float,
+        isCancelled: () -> Boolean,
+        onProgress: (SwapStageProgress) -> Unit
+    ): FaceSwapExecutionResult {
+        val tStart = System.currentTimeMillis()
         val canvasSize = if (lowMemoryMode) 320 else 768
         val detFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.DETECTOR)
         val segFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.SEGMENTATION)
@@ -189,8 +277,8 @@ object CleanEraseHeadReplacementEngine {
 
         val targetW = targetBitmap.width
         val targetH = targetBitmap.height
-        val compositePixels = IntArray(targetW * targetH)
-        targetBitmap.getPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
+        var compositePixels: IntArray? = IntArray(targetW * targetH)
+        targetBitmap.getPixels(compositePixels!!, 0, targetW, 0, 0, targetW, targetH)
         val borderEnvelope = computeCanvasBorderEnvelope(canvasSize)
 
         var firstTargetHeadPreview: Bitmap? = null
@@ -652,7 +740,7 @@ object CleanEraseHeadReplacementEngine {
 
                     // Warp Step 2 intermediate portrait onto compositePixels
                     GhostHeadReplacementEngine.warpHeadCropBackToTarget(
-                        targetPixels = compositePixels,
+                        targetPixels = compositePixels!!,
                         targetWidth = targetW,
                         targetHeight = targetH,
                         headCrop = step2PortraitHeadCanvas!!,
@@ -665,7 +753,7 @@ object CleanEraseHeadReplacementEngine {
                     )
 
                     if (idx + 1 < targetFacesToReplace.size) {
-                        workingTargetBitmap.setPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
+                        workingTargetBitmap.setPixels(compositePixels!!, 0, targetW, 0, 0, targetW, targetH)
                         if (placedHeadsTargetMask != null) {
                             accumulateCanvasMaskOntoTarget(
                                 targetMask = placedHeadsTargetMask,
@@ -744,7 +832,10 @@ object CleanEraseHeadReplacementEngine {
         // on the Step 2 Intermediate Full Portrait
         // =========================================================================
         val intermediatePortraitBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        intermediatePortraitBitmap.setPixels(compositePixels, 0, targetW, 0, 0, targetW, targetH)
+        intermediatePortraitBitmap.setPixels(compositePixels!!, 0, targetW, 0, 0, targetW, targetH)
+        // Release the multi-megapixel pixel buffer before Stage 6 loads ArcFace/HyperSwap/GFPGAN
+        @Suppress("UNUSED_VALUE")
+        compositePixels = null
 
         // Release heavy Step 1/2 temporary ONNX sessions (LaMa/Depth/FaceMesh/SD) so Step 3 has full RAM
         if (ortEnv != null && preloadedArcFaceSession == null && preloadedSwapSession == null && preloadedGfpganSession == null) {

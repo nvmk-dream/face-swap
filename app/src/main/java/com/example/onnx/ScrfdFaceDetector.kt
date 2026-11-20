@@ -46,6 +46,26 @@ data class DetectedFace(
     val height: Float get() = boundingBox.height()
     val area: Float get() = width * height
     val headPose3D: HeadPose3D get() = reconstructed3D.headPose
+
+    fun scaled(scaleX: Float, scaleY: Float = scaleX): DetectedFace {
+        if (scaleX == 1.0f && scaleY == 1.0f) return this
+        return DetectedFace(
+            index = index,
+            boundingBox = RectF(
+                boundingBox.left * scaleX,
+                boundingBox.top * scaleY,
+                boundingBox.right * scaleX,
+                boundingBox.bottom * scaleY
+            ),
+            score = score,
+            landmarks5 = landmarks5.map { PointF(it.x * scaleX, it.y * scaleY) },
+            detectorSource = detectorSource,
+            faceContourPoints = faceContourPoints.map { PointF(it.x * scaleX, it.y * scaleY) },
+            eulerX = eulerX,
+            eulerY = eulerY,
+            eulerZ = eulerZ
+        )
+    }
 }
 
 /**
