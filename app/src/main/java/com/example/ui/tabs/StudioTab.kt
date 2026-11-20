@@ -138,6 +138,7 @@ fun StudioTab(
     onToggleCompareOriginal: (Boolean) -> Unit,
     onOpenModelsTab: () -> Unit,
     onImportAllFromFolder: () -> Unit = {},
+    onImportModelForSlot: (ModelSlot) -> Unit = { _ -> onOpenModelsTab() },
     onSkinToneModeChanged: (SkinToneSourceMode) -> Unit = {},
     onFaceReactionModeChanged: (FaceReactionSourceMode) -> Unit = {},
     onNegativeArtifactSuppressionChanged: (Boolean) -> Unit = {},
@@ -364,6 +365,12 @@ fun StudioTab(
                     onLcmInpaintingChanged = onLcmInpaintingChanged,
                     onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
                     onFaceAgingFactorChanged = onFaceAgingFactorChanged
+                )
+                SixDRepNetSettingsUploadCard(
+                    isHeadPoseReady = uiState.isHeadPoseReady,
+                    isLoadedInRam = uiState.memoryServiceState.headPoseLoaded,
+                    onImportSixDRepNet = { onImportModelForSlot(ModelSlot.HEAD_POSE) },
+                    onImportFolder = onImportAllFromFolder
                 )
             } else {
                 // Page B: Alignment Preview, Multi-Face Selection, Interactive Before/After & Visual Validation
@@ -828,6 +835,11 @@ private fun HeroPipelineStatusCard(
                                 fileName = "facemesh-v2-v1.onnx",
                                 isInRam = uiState.memoryServiceState.faceMeshLoaded,
                                 tamilRole = "3D தலை அமைப்பு (Optional FaceMesh V2 468-Pt): Target கழுத்து & தலையின் 3D கோணத்திற்கு ஏற்ப Source தலையைத் திருப்பிப் பொருத்த."
+                            )
+                            StudioTamilModelRow(
+                                fileName = "SixDRepNet.onnx",
+                                isInRam = uiState.memoryServiceState.headPoseLoaded,
+                                tamilRole = "6D தலை கோணம் (Optional Head Pose ±85°): பக்கவாட்டு முகம், தொப்பி & கண்ணாடி அணிந்த தலையின் Pitch/Yaw/Roll கோணங்களைத் துல்லியமாகக் கணிக்க."
                             )
                         }
                     }
@@ -2889,6 +2901,102 @@ fun AdvancedNegativeAndStyleSettingsCard(
         }
     }
 }
+
+@Composable
+private fun SixDRepNetSettingsUploadCard(
+    isHeadPoseReady: Boolean,
+    isLoadedInRam: Boolean,
+    onImportSixDRepNet: () -> Unit,
+    onImportFolder: () -> Unit
+) {
+    val accent = if (isHeadPoseReady) NeonEmerald else ElectricCyan
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("settings_sixdrepnet_card"),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.2.dp, accent.copy(alpha = 0.55f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isHeadPoseReady) Icons.Default.CheckCircle else Icons.Default.Radar,
+                        contentDescription = "SixDRepNet Head Pose ONNX",
+                        tint = accent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Text(
+                        text = "6D Head Pose ONNX (SixDRepNet.onnx)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = accent
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = accent.copy(alpha = 0.16f)
+                ) {
+                    Text(
+                        text = when {
+                            isLoadedInRam -> "RAM Ready ✓"
+                            isHeadPoseReady -> "Installed ✓"
+                            else -> "Optional"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = accent,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = "SixDRepNet.onnx upload செய்தால் பக்கவாட்டு முகம் (Extreme Profile ±85°), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll கோணங்களை மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்கும்.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onImportSixDRepNet,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("settings_import_sixdrepnet_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = if (isHeadPoseReady) "Replace SixDRepNet.onnx" else "Upload SixDRepNet.onnx",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                OutlinedButton(
+                    onClick = onImportFolder,
+                    modifier = Modifier.testTag("settings_import_sixdrepnet_folder_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Auto-Folder")
+                }
+            }
+        }
+    }
+}
+
 
 
 

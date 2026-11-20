@@ -185,6 +185,12 @@ fun ModelsInspectorTab(
                             isLoaded = memoryServiceState.faceMeshLoaded,
                             note = memoryServiceState.loadedSessions[ModelSlot.FACE_MESH_3D]?.statusNote
                         )
+                        MemorySlotRow(
+                            label = "9. SixDRepNet.onnx (6D Head Pose Estimator)",
+                            tamilPurpose = ModelSlot.HEAD_POSE.tamilTitle + " — " + ModelSlot.HEAD_POSE.tamilRoleSummary,
+                            isLoaded = memoryServiceState.headPoseLoaded,
+                            note = memoryServiceState.loadedSessions[ModelSlot.HEAD_POSE]?.statusNote
+                        )
                     }
 
                     Row(
@@ -335,6 +341,7 @@ fun ModelsInspectorTab(
                                 "├── age_estimation/ (mivolo_v2_age.onnx — MiVOLO v2 Face+Body Age)\n" +
                                 "├── re_aging/       (face_reaging.onnx — FRAN U-Net / CV Fallback)\n" +
                                 "├── face_mesh/      (facemesh-v2-v1.onnx — 468-Pt 3D Mesh / PnP-106)\n" +
+                                "├── head_pose/      (SixDRepNet.onnx — 6D Pitch/Yaw/Roll Pose)\n" +
                                 "└── enhancement/    (gfpgan_1.4.onnx / gfpgan-v1.4-w16-v1.onnx)",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface

@@ -212,6 +212,22 @@ enum class ModelSlot(
         expectedOutputSignature = "landmarks: FLOAT[1, 1404+] (468 3D (x, y, z) vertices)",
         licenseSummary = "Apache-2.0 (MediaPipe / omebly-tools-models)",
         downloadSourceUrl = "https://huggingface.co/hussain5049/omebly-tools-models"
+    ),
+    HEAD_POSE(
+        id = "sixdrepnet",
+        subdirectory = "head_pose",
+        canonicalFileName = "SixDRepNet.onnx",
+        displayName = "SixDRepNet.onnx (6D Head Pose Estimation)",
+        categoryTitle = "models/head_pose/",
+        approximateSizeLabel = "~90–145 MB",
+        requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
+        tamilTitle = "12. 6D தலை கோண கணிப்பு மாடல் (SixDRepNet Head Pose)",
+        tamilRoleSummary = "பக்கவாட்டு முகம் (Extreme Profile), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll 3D கோணங்களை (±85° வரை) மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்குகிறது.",
+        roleSummary = "Optional 6D Rotation Representation Head Pose ONNX model (SixDRepNet / Hopenet / WHENet). Predicts accurate Pitch/Yaw/Roll (±85° profile) even under hats, sunglasses, or partial occlusion. Falls back to FaceMesh / 5-Point PnP if absent.",
+        expectedInputSignature = "input: FLOAT[1, 3, 224, 224] (ImageNet normalized RGB)",
+        expectedOutputSignature = "output: FLOAT[1, 3] (or [1, 6] 6D rotation / [1, 3, 3] matrix / yaw,pitch,roll)",
+        licenseSummary = "MIT License (thohemp/6DRepNet)",
+        downloadSourceUrl = "https://github.com/PINTO0309/PINTO_model_zoo (SixDRepNet)"
     )
 }
 
@@ -274,6 +290,7 @@ object OnnxProtobufInspector {
         "age_estimation",
         "re_aging",
         "face_mesh",
+        "head_pose",
         "head_swap"
     )
 
@@ -942,6 +959,11 @@ object OnnxProtobufInspector {
                 lower.contains("2d106det") || lower.contains("3ddfa") ||
                 lower.contains("mb1_120x120") ->
                 ModelSlot.FACE_MESH_3D
+            lower.contains("sixdrepnet") || lower.contains("6drepnet") ||
+                lower.contains("head_pose") || lower.contains("headpose") ||
+                lower.contains("head-pose") || lower.contains("whenet") ||
+                lower.contains("hopenet") ->
+                ModelSlot.HEAD_POSE
             else -> null
         }
     }
@@ -1130,6 +1152,7 @@ object OnnxProtobufInspector {
                 ModelSlot.MATTING,
                 ModelSlot.INPAINTING,
                 ModelSlot.FACE_MESH_3D,
+                ModelSlot.HEAD_POSE,
                 ModelSlot.AGE_ESTIMATOR,
                 ModelSlot.FACE_REAGING
             )
@@ -1349,6 +1372,13 @@ object OnnxProtobufInspector {
                 "facemesh.onnx",
                 "1k3d68.onnx",
                 "2d106det.onnx"
+            ),
+            ModelSlot.HEAD_POSE to listOf(
+                "SixDRepNet.onnx",
+                "sixdrepnet.onnx",
+                "6drepnet.onnx",
+                "sixdrepnet_300w_lp.onnx",
+                "head_pose.onnx"
             )
         )
 
@@ -1606,6 +1636,9 @@ object OnnxProtobufInspector {
             ModelSlot.FACE_MESH_3D -> listOf(
                 TensorDescriptor("input", "FLOAT", listOf(1, 3, 192, 192))
             )
+            ModelSlot.HEAD_POSE -> listOf(
+                TensorDescriptor("input", "FLOAT", listOf(1, 3, 224, 224))
+            )
         }
     }
 
@@ -1626,6 +1659,7 @@ object OnnxProtobufInspector {
             ModelSlot.AGE_ESTIMATOR -> listOf(TensorDescriptor("age", "FLOAT", listOf(1, 1)))
             ModelSlot.FACE_REAGING -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
             ModelSlot.FACE_MESH_3D -> listOf(TensorDescriptor("landmarks", "FLOAT", listOf(1, 1404)))
+            ModelSlot.HEAD_POSE -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3)))
         }
     }
 

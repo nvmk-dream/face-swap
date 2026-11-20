@@ -210,6 +210,9 @@ data class FaceSwapUiState(
     val isFaceMeshReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.FACE_MESH_3D && it.isValidOnnx }
 
+    val isHeadPoseReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.HEAD_POSE && it.isValidOnnx }
+
     val isEnhancerReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.ENHANCEMENT && it.isValidOnnx }
 
@@ -753,7 +756,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             }
                         )
                     }
-                    if (slot == ModelSlot.DETECTOR && valid) {
+                    if ((slot == ModelSlot.DETECTOR || slot == ModelSlot.HEAD_POSE) && valid) {
                         _uiState.value.sourceBitmap?.let { bmp -> detectFacesForBitmap(bmp, isSource = true) }
                         _uiState.value.targetBitmap?.let { bmp -> detectFacesForBitmap(bmp, isSource = false) }
                     }

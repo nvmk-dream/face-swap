@@ -655,6 +655,10 @@ fun FaceSwapStudioApp(
                     onConfirmSwapStrategySelection = viewModel::confirmSwapStrategySelection,
                     onDismissSwapStrategyPopup = viewModel::dismissSwapStrategyPopup,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
+                    onImportModelForSlot = { slot ->
+                        pendingImportSlot = slot
+                        onnxDocumentPicker.launch(arrayOf("*/*"))
+                    },
                     onImportAllFromFolder = {
                         onnxFolderTreePicker.launch(null)
                     },

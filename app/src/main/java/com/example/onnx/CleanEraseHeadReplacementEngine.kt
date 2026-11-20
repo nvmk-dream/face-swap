@@ -172,9 +172,15 @@ object CleanEraseHeadReplacementEngine {
         val matFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.MATTING)
         val lamaFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.INPAINTING)
         val faceMeshFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_MESH_3D)
+        val headPoseFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.HEAD_POSE)
+        val activeHeadPoseFile = if (ortEnv != null && headPoseFile.exists() && headPoseFile.length() > 1024L) {
+            headPoseFile
+        } else {
+            null
+        }
 
         // =========================================================================
-        // STAGE 1/6: 3D FaceMesh V2 Extraction + Body Age Harmony Plan
+        // STAGE 1/6: 3D FaceMesh V2 + SixDRepNet Pose Extraction + Body Age Harmony
         // =========================================================================
         if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
         val tDet0 = System.currentTimeMillis()
@@ -183,19 +189,51 @@ object CleanEraseHeadReplacementEngine {
                 stepIndex = 1,
                 totalSteps = 6,
                 stageTitle = "Stage 1/6: 3D FaceMesh & Pose",
-                detailMessage = "Extracting 3D facial vertices (FaceMesh V2) and body-age harmony plan...",
+                detailMessage = if (activeHeadPoseFile != null) {
+                    "Extracting SixDRepNet 6D head pose + 3D FaceMesh V2 & body-age harmony plan..."
+                } else {
+                    "Extracting 3D facial vertices (FaceMesh V2) and body-age harmony plan..."
+                },
                 progressFraction = 0.14f
             )
         )
 
+        val poseEnrichedSourceFace = if (activeHeadPoseFile != null && !sourceFace.detectorSource.contains("SixDRepNet")) {
+            HeadPoseEstimationEngine.enrichFaceWithPose(
+                ortEnv = ortEnv,
+                headPoseFile = activeHeadPoseFile,
+                bitmap = sourceBitmap,
+                face = sourceFace,
+                preferHardwareAccel = preferHardwareAccel,
+                isCancelled = isCancelled
+            ).first
+        } else {
+            sourceFace
+        }
+        val poseEnrichedTargetFaces = targetFacesToReplace.map { tgtFace ->
+            if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
+            if (activeHeadPoseFile != null && !tgtFace.detectorSource.contains("SixDRepNet")) {
+                HeadPoseEstimationEngine.enrichFaceWithPose(
+                    ortEnv = ortEnv,
+                    headPoseFile = activeHeadPoseFile,
+                    bitmap = targetBitmap,
+                    face = tgtFace,
+                    preferHardwareAccel = preferHardwareAccel,
+                    isCancelled = isCancelled
+                ).first
+            } else {
+                tgtFace
+            }
+        }
+
         val srcMesh3D = FaceMesh3DEngine.extractFaceMesh3D(
             ortEnv = ortEnv,
             bitmap = sourceBitmap,
-            face = sourceFace,
+            face = poseEnrichedSourceFace,
             faceMeshFile = if (faceMeshFile.exists()) faceMeshFile else null,
             preferHardwareAccel = preferHardwareAccel
         )
-        val tgtMeshes3D = targetFacesToReplace.map { tgtFace ->
+        val tgtMeshes3D = poseEnrichedTargetFaces.map { tgtFace ->
             if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
             FaceMesh3DEngine.extractFaceMesh3D(
                 ortEnv = ortEnv,
@@ -299,7 +337,7 @@ object CleanEraseHeadReplacementEngine {
         val placedHeadsTargetMask = if (targetFacesToReplace.size > 1) FloatArray(targetW * targetH) else null
 
         try {
-            targetFacesToReplace.forEachIndexed { idx, targetFace ->
+            poseEnrichedTargetFaces.forEachIndexed { idx, targetFace ->
                 if (isCancelled()) throw java.util.concurrent.CancellationException("Head replacement cancelled by user.")
                 val tgtMesh = tgtMeshes3D[idx]
                 val tgtYawRatio = (tgtMesh.headPose.yawDeg / 55f).coerceIn(-1f, 1f)
