@@ -274,6 +274,7 @@ object OnnxProtobufInspector {
 
     private const val MODELS_ROOT_DIR = "models"
     private const val EMAP_CACHE_FILE = "inswapper_emap_v2_512x512.bin"
+    private const val EMAP_META_FILE = "inswapper_emap_v2_512x512.meta"
     private const val EMAP_FLOATS = 512 * 512
     private const val EMAP_BYTES = EMAP_FLOATS * 4
 
@@ -1493,6 +1494,7 @@ object OnnxProtobufInspector {
                     }
                 }
                 File(root, EMAP_CACHE_FILE).delete()
+                File(root, EMAP_META_FILE).delete()
             }
 
             if (destFile.exists()) destFile.delete()
@@ -1613,10 +1615,13 @@ object OnnxProtobufInspector {
         }
 
         val cacheFile = File(getModelsRootDir(context), EMAP_CACHE_FILE)
+        val metaFile = File(getModelsRootDir(context), EMAP_META_FILE)
+        val expectedSig = "${file.name}_${file.length()}_${file.lastModified()}"
         val hasEmap = slot == ModelSlot.SWAPPER &&
             !file.name.lowercase().contains("hyperswap") &&
             cacheFile.exists() &&
-            cacheFile.length() == EMAP_BYTES.toLong()
+            cacheFile.length() == EMAP_BYTES.toLong() &&
+            (!metaFile.exists() || runCatching { metaFile.readText() }.getOrNull() == expectedSig)
 
         return OnnxModelInspection(
             slot = slot,
@@ -1716,8 +1721,15 @@ object OnnxProtobufInspector {
             // HyperSwap 1a/1b/1c 256 models consume the L2-normalized 512-D ArcFace vector directly
             return null
         }
-        val cacheFile = File(getModelsRootDir(context), EMAP_CACHE_FILE)
-        if (cacheFile.exists() && cacheFile.length() == EMAP_BYTES.toLong()) {
+        val modelsRoot = getModelsRootDir(context)
+        val cacheFile = File(modelsRoot, EMAP_CACHE_FILE)
+        val metaFile = File(modelsRoot, EMAP_META_FILE)
+        val expectedSig = "${inswapperFile.name}_${inswapperFile.length()}_${inswapperFile.lastModified()}"
+        if (cacheFile.exists() &&
+            cacheFile.length() == EMAP_BYTES.toLong() &&
+            metaFile.exists() &&
+            runCatching { metaFile.readText() }.getOrNull() == expectedSig
+        ) {
             return runCatching {
                 val bytes = cacheFile.readBytes()
                 val floats = FloatArray(EMAP_FLOATS)
@@ -1735,6 +1747,12 @@ object OnnxProtobufInspector {
                 val outBytes = ByteBuffer.allocate(EMAP_BYTES).order(ByteOrder.LITTLE_ENDIAN)
                 outBytes.asFloatBuffer().put(extracted)
                 FileOutputStream(cacheFile).use { it.write(outBytes.array()) }
+                metaFile.writeText(expectedSig)
+            }
+        } else {
+            runCatching {
+                cacheFile.delete()
+                metaFile.delete()
             }
         }
         return extracted

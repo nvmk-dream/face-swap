@@ -105,7 +105,7 @@ data class FaceSwapUiState(
     val currentTab: AppTab = AppTab.STUDIO,
     val studioSubPage: StudioSubPage = StudioSubPage.FRONT_HOME,
     val studioMode: StudioMode = StudioMode.FACE_SWAP,
-    val swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+    val swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
     val pendingStrategyPopupOption: FaceSwapStrategyOption? = null,
     val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
     val qualityLevel: ProcessingQualityLevel = ProcessingQualityLevel.BALANCED,

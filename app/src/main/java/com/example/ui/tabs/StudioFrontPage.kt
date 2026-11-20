@@ -2108,7 +2108,7 @@ internal fun FaceSwapStrategySelectorCard(
                 val selected = selectedOption == option
                 val tag = when (option) {
                     com.example.onnx.FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY -> "strategy_option_a"
-                    com.example.onnx.FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR -> "strategy_option_b"
+                    com.example.onnx.FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY -> "strategy_option_b"
                     com.example.onnx.FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD -> "strategy_option_bc"
                 }
                 Box(

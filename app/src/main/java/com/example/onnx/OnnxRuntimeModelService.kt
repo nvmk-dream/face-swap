@@ -127,7 +127,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         identityPreservationMode: Boolean = false,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
-        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
         captureDiagnostics: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}

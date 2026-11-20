@@ -36,7 +36,7 @@ class StudioFrontPagePopupRobolectricTest {
         composeTestRule.setContent {
             MyApplicationTheme {
                 var selected by remember {
-                    mutableStateOf(FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR)
+                    mutableStateOf(FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY)
                 }
                 var pending by remember {
                     mutableStateOf<FaceSwapStrategyOption?>(null)
@@ -67,11 +67,21 @@ class StudioFrontPagePopupRobolectricTest {
             }
         }
 
-        val badgeB = "Active: B • ${FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR.badgeSummary}"
+        val badgeB = "Active: B • ${FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY.badgeSummary}"
         val badgeBC = "Active: B+C • ${FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD.badgeSummary}"
 
         composeTestRule.onNodeWithTag("active_strategy_badge").assertExists()
         composeTestRule.onNodeWithText(badgeB).assertExists()
+
+        // Tap Option B -> verifies exact clean 5-step Tamil description -> OK
+        composeTestRule.onNodeWithTag("strategy_option_b").performClick()
+        composeTestRule.onNodeWithText(FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY.tamilPopupTitle)
+            .assertIsDisplayed()
+        composeTestRule.onNodeWithText(
+            "5-pt Align → ArcFace → Swapper → Target Lighting Color Match → Tight-Feathered Blend (+ Controlled Enhancer) என்ற சுத்தமான முறையைப் பயன்படுத்துகிறது.",
+            substring = true
+        ).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("strategy_popup_ok").performClick()
 
         // Tap Option A -> Tamil popup opens with OK & Cancel
         composeTestRule.onNodeWithTag("strategy_option_a").performClick()

@@ -110,81 +110,83 @@ class SwapStrategyOptionsRobolectricTest {
     }
 
     @Test
-    fun `option B computes source contour ratios and applies edge-safe warp on 512 crop`() {
-        val geom512 = FaceBlender.computeWarpedGeometry(
-            forwardMatrix128 = null,
-            targetLandmarks5 = null,
-            scale = 4.0f
+    fun `canonicalize5Landmarks fixes inverted ML Kit eye and mouth landmark ordering`() {
+        val inverted = listOf(
+            PointF(165f, 110f), // subject LEFT_EYE -> viewer right (inverted!)
+            PointF(95f, 110f),  // subject RIGHT_EYE -> viewer left (inverted!)
+            PointF(130f, 150f), // nose tip
+            PointF(158f, 185f), // subject MOUTH_LEFT -> viewer right (inverted!)
+            PointF(102f, 185f)  // subject MOUTH_RIGHT -> viewer left (inverted!)
         )
-        val total = 512 * 512
-        val srcPx512 = IntArray(total) { Color.rgb(30, 40, 60) }
-        val tgtPx512 = IntArray(total) { Color.rgb(30, 40, 60) }
+        val canon = com.example.onnx.ScrfdFaceDetector.canonicalize5Landmarks(inverted)
+        assertEquals(95f, canon[0].x, 0.01f)
+        assertEquals(165f, canon[1].x, 0.01f)
+        assertEquals(130f, canon[2].x, 0.01f)
+        assertEquals(102f, canon[3].x, 0.01f)
+        assertEquals(158f, canon[4].x, 0.01f)
 
-        val cx = 256f
-        val cy = 264f
-        for (y in 0 until 512) {
-            for (x in 0 until 512) {
-                val dx = x - cx
-                val dy = y - cy
-                // Wider and longer source oval vs narrower/shorter target oval
-                if ((dx / 155f) * (dx / 155f) + (dy / 195f) * (dy / 195f) <= 1f) {
-                    srcPx512[y * 512 + x] = Color.rgb(225, 180, 150)
-                }
-                if ((dx / 118f) * (dx / 118f) + (dy / 155f) * (dy / 155f) <= 1f) {
-                    tgtPx512[y * 512 + x] = Color.rgb(220, 175, 145)
-                }
-            }
-        }
-
-        val ratios = FaceBlender.computeSourceToTargetShapeRatios512(
-            srcPx512 = srcPx512,
-            tgtPx512 = tgtPx512,
-            geom512 = geom512
+        // Tilted head (+22 deg roll) with valid viewer ordering must remain unchanged
+        val validTilted = listOf(
+            PointF(100f, 100f),
+            PointF(164f, 126f),
+            PointF(118f, 152f),
+            PointF(94f, 180f),
+            PointF(146f, 200f)
         )
-        assertTrue("Expected wider source cheek ratio > 1.04, got ${ratios.cheekWidthScale}", ratios.cheekWidthScale > 1.04f)
-        assertTrue("Expected wider source jaw ratio > 1.03, got ${ratios.jawWidthScale}", ratios.jawWidthScale > 1.03f)
-        assertTrue("Expected longer source chin ratio > 1.03, got ${ratios.chinLengthScale}", ratios.chinLengthScale > 1.03f)
+        val kept = com.example.onnx.ScrfdFaceDetector.canonicalize5Landmarks(validTilted)
+        assertEquals(validTilted[0].x, kept[0].x, 0.01f)
+        assertEquals(validTilted[1].x, kept[1].x, 0.01f)
+        assertEquals(validTilted[3].x, kept[3].x, 0.01f)
+        assertEquals(validTilted[4].x, kept[4].x, 0.01f)
+    }
 
-        // Build a 512x512 crop with green frame border and inner skin square
-        val cropPx = IntArray(total)
-        for (y in 0 until 512) {
-            for (x in 0 until 512) {
-                cropPx[y * 512 + x] = when {
-                    x < 8 || x >= 504 || y < 8 || y >= 504 -> Color.rgb(10, 200, 30)
-                    abs(x - 256) <= 120 && abs(y - 256) <= 120 -> Color.rgb(210, 160 - (abs(x - 256) / 2), 140)
-                    else -> Color.rgb(40, 40, 60)
-                }
-            }
-        }
-        val centerBefore = cropPx[256 * 512 + 256]
-        val cornerBefore = cropPx[4 * 512 + 4]
-        FaceBlender.applySourceShapeContourWarp512(
-            px512 = cropPx,
-            geom512 = geom512,
-            ratios = ratios
+    @Test
+    fun `resolveSwapperSourceVector forces raw ArcFace embedding for HyperSwap 256`() {
+        val rawVec = FloatArray(512) { 1.0f }
+        val emapProjVec = FloatArray(512) { 9.0f }
+        val fakeCrop = Bitmap.createBitmap(112, 112, Bitmap.Config.ARGB_8888)
+        val embResult = com.example.onnx.SourceEmbeddingResult(
+            latentSourceVector512 = emapProjVec,
+            rawNormedEmbedding512 = rawVec,
+            aligned112Crop = fakeCrop,
+            usedArcFaceModel = true,
+            usedEmbeddedEmap = true,
+            providerSummary = "w600k_r50.onnx"
         )
-        // Outer border (hair/background ring) must remain untouched
-        assertEquals(cornerBefore, cropPx[4 * 512 + 4])
-        assertEquals(Color.rgb(10, 200, 30), cropPx[507 * 512 + 507])
-        // Center nose bridge (256, 256) remains anchored
-        assertEquals(centerBefore, cropPx[256 * 512 + 256])
+        val fakeModel = java.io.File(context.cacheDir, "swapper_renamed.onnx")
+
+        val hyperVec = InSwapperEngine.resolveSwapperSourceVector(
+            context = context,
+            activeSwapFile = fakeModel,
+            isHyperSwap256 = true,
+            sourceEmbedding = embResult
+        )
+        assertEquals(1.0f, hyperVec[0], 0.001f)
+
+        val inswapperVec = InSwapperEngine.resolveSwapperSourceVector(
+            context = context,
+            activeSwapFile = fakeModel,
+            isHyperSwap256 = false,
+            sourceEmbedding = embResult
+        )
+        assertEquals(9.0f, inswapperVec[0], 0.001f)
     }
 
     @Test
     fun `viewModel popup confirmation updates swapStrategyOption and cancel leaves it unchanged`() {
         val vm = FaceSwapViewModel(context.applicationContext as Application)
         assertEquals(StudioMode.FACE_SWAP, vm.uiState.value.studioMode)
-        assertEquals(FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR, vm.uiState.value.swapStrategyOption)
+        assertEquals(FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY, vm.uiState.value.swapStrategyOption)
         assertNull(vm.uiState.value.pendingStrategyPopupOption)
 
         // Tap A -> opens Tamil popup -> Cancel keeps B active
         vm.requestSwapStrategySelection(FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY)
         assertEquals(FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY, vm.uiState.value.pendingStrategyPopupOption)
-        assertEquals(FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR, vm.uiState.value.swapStrategyOption)
+        assertEquals(FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY, vm.uiState.value.swapStrategyOption)
 
         vm.dismissSwapStrategyPopup()
         assertNull(vm.uiState.value.pendingStrategyPopupOption)
-        assertEquals(FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR, vm.uiState.value.swapStrategyOption)
+        assertEquals(FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY, vm.uiState.value.swapStrategyOption)
 
         // Tap B+C -> OK updates active option to B+C
         vm.requestSwapStrategySelection(FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD)
@@ -197,7 +199,7 @@ class SwapStrategyOptionsRobolectricTest {
     }
 
     @Test
-    fun `executeFaceSwap supports Option A and B and fullHead supports B+C`() {
+    fun `executeFaceSwap supports Option A and Clean B and fullHead supports B+C`() {
         val (srcBmp, srcFace) = makePortrait(faceRadiusX = 96f, faceRadiusY = 116f, skinColor = Color.rgb(235, 190, 165))
         val (tgtBmp, tgtFace) = makePortrait(faceRadiusX = 80f, faceRadiusY = 98f, skinColor = Color.rgb(205, 160, 138))
 
@@ -228,10 +230,14 @@ class SwapStrategyOptionsRobolectricTest {
             enableColorTransfer = true,
             enableProvenanceWatermark = false,
             allowTwoModelFallbackForTesting = true,
-            swapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+            swapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
             onProgress = {}
         )
         assertTrue("Expected [Opt B] in summary: ${resB.pipelineSummary}", resB.pipelineSummary.contains("[Opt B]"))
+        assertTrue(
+            "Expected clean pipeline in summary: ${resB.pipelineSummary}",
+            resB.pipelineSummary.contains("Target Lighting Color Match")
+        )
         assertEquals(tgtBmp.width, resB.outputBitmap.width)
 
         val resBC = GhostHeadReplacementEngine.executeFullHeadReplacement(

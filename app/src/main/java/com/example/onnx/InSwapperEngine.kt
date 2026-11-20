@@ -184,7 +184,7 @@ object InSwapperEngine {
         captureDiagnostics: Boolean = false,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
-        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
         precomputedTargetDepthMap: DepthMapResult? = null,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit
@@ -258,12 +258,15 @@ object InSwapperEngine {
         if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
         val embMs = (System.currentTimeMillis() - tEmbStart).coerceAtLeast(1L)
 
-        // Stage 3a: Age Harmony Plan (Run MiVOLO v2 before loading heavy Swapper / GFPGAN sessions)
+        // Stage 3a: Age Harmony Plan (Skip automatic body-age mutation in Clean Option B unless user sets manual age slider)
         val ageConfig = AgeHarmonyEngine.AgeHarmonyConfig(
-            autoBodyAgeMatch = autoBodyAgeMatch,
+            autoBodyAgeMatch = autoBodyAgeMatch && swapStrategyOption != FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
             manualAgingFactor = faceAgingFactor
         )
-        val targetAgePlans = if (!identityPreservationMode && (autoBodyAgeMatch || abs(faceAgingFactor) >= 0.05f)) {
+        val shouldComputeAgePlan = !identityPreservationMode &&
+            (abs(faceAgingFactor) >= 0.05f ||
+                (autoBodyAgeMatch && swapStrategyOption != FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY))
+        val targetAgePlans = if (shouldComputeAgePlan) {
             targetFacesToReplace.map { tgtFace ->
                 if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
                 runCatching {
@@ -384,24 +387,14 @@ object InSwapperEngine {
             } else null
             activeSwapGraphSpec = graphSpec
 
-            // HyperSwap 1b 256 takes the L2-normalized 512-D ArcFace identity vector (or emap-projected if embedded)
-            // InSwapper 128 takes the emap-projected 512-D latentSourceVector512
-            val sourceVector = if (isHyperSwap256 && !sourceEmbedding.usedEmbeddedEmap) {
-                sourceEmbedding.rawNormedEmbedding512
-            } else if (!isHyperSwap256 && !sourceEmbedding.usedEmbeddedEmap) {
-                val recoveredEmap = OnnxProtobufInspector.loadOrExtractInswapperEmap(
-                    context = context,
-                    inswapperFile = activeSwapFile,
-                    bypassHyperSwapNameSkip = true
-                )
-                if (recoveredEmap != null) {
-                    ArcFaceRecognizer.projectWithEmap(sourceEmbedding.rawNormedEmbedding512, recoveredEmap)
-                } else {
-                    sourceEmbedding.latentSourceVector512
-                }
-            } else {
-                sourceEmbedding.latentSourceVector512
-            }
+            // HyperSwap 1a/1b/1c 256 models ALWAYS consume the L2-normalized 512-D ArcFace vector directly.
+            // InSwapper 128 consumes the 512x512 emap-projected latentSourceVector512.
+            val sourceVector = resolveSwapperSourceVector(
+                context = context,
+                activeSwapFile = activeSwapFile,
+                isHyperSwap256 = isHyperSwap256,
+                sourceEmbedding = sourceEmbedding
+            )
             val sourceTensor = if (swapSession != null && ortEnv != null) {
                 val sourceFloatBuffer = FloatBuffer.wrap(sourceVector)
                 val sourceShape = longArrayOf(1L, 512L)
@@ -688,7 +681,13 @@ object InSwapperEngine {
         } else {
             "SYNTHETIC"
         }
-        val gfpTag = if (usedNeuralGfpgan) {
+        val gfpTag = if (swapStrategyOption == FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY) {
+            if (usedNeuralGfpgan) {
+                " -> Target Lighting Color Match -> Tight-Feathered Blend (+ Controlled Enhancer)"
+            } else {
+                " -> Target Lighting Color Match -> Tight-Feathered Blend"
+            }
+        } else if (usedNeuralGfpgan) {
             " -> GFPGAN 512x512 HD Restore + Upper-Lip Guard"
         } else {
             " -> 512x512 Bicubic HD + Upper-Lip Guard"
@@ -1189,19 +1188,22 @@ object InSwapperEngine {
         )
         var bestSpec = primarySpec
 
-        // Self-healing fallback check: if HyperSwap primary spec causes out-of-gamut neon-red / collapsed-black
-        // corruption, inverted luminance correlation, or near-identity passthrough, verify alternative specs.
+        // Self-healing fallback check: if output has out-of-gamut neon-red / collapsed-black
+        // corruption, inverted luminance correlation, near-identity passthrough, or contrast/range collapse,
+        // verify alternative normalization/channel specs before caching.
         val hasCorruption = bestStats.neonRedFraction > 0.015f ||
             bestStats.collapsedBlackFraction > 0.02f ||
             bestStats.nanFraction > 0.005f ||
             bestStats.lumaCorrelation < 0.10f
+        val hasRangeCollapse = (bestStats.maxVal - bestStats.minVal) < 0.40f ||
+            bestStats.gtOneFraction > 0.25f
         val isNearIdentityPassthrough = shouldRetryNearIdentityPassthrough(
             isHyperSwapModel = isHyperSwapModel,
             hasCorruption = hasCorruption,
             lumaCorrelation = bestStats.lumaCorrelation,
             centerFaceDiff = bestStats.centerFaceDiff
         )
-        if (isHyperSwapModel && (hasCorruption || isNearIdentityPassthrough)) {
+        if (hasCorruption || (isHyperSwapModel && (isNearIdentityPassthrough || hasRangeCollapse))) {
             val candidates = listOf(
                 SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.SIGNED_MINUS1_TO_1),
                 SwapTensorSpec(SwapChannelOrder.RGB, SwapInputRange.UNSIGNED_0_TO_1),
@@ -1221,12 +1223,15 @@ object InSwapperEngine {
                     outputRangeHint = outputRangeHint,
                     sourceTensor = sourceTensor
                 )
-                if (hasCorruption) {
-                    if (candStats.artifactScore < bestStats.artifactScore) {
+                if (hasCorruption || hasRangeCollapse) {
+                    val candRange = candStats.maxVal - candStats.minVal
+                    val bestRange = bestStats.maxVal - bestStats.minVal
+                    val candBetterRange = !hasCorruption && hasRangeCollapse && candStats.artifactScore <= 0.05f && candRange > bestRange + 0.25f
+                    if (candStats.artifactScore < bestStats.artifactScore || candBetterRange) {
                         bestPixels = candPixels
                         bestStats = candStats
                         bestSpec = candSpec
-                        if (bestStats.artifactScore < 0.02f) break
+                        if (bestStats.artifactScore < 0.02f && (bestStats.maxVal - bestStats.minVal) >= 0.45f) break
                     }
                 } else {
                     val candClean = candStats.neonRedFraction <= 0.01f &&
@@ -1243,7 +1248,7 @@ object InSwapperEngine {
                 }
             }
             verifiedSwapSpecCache[modelCacheKey] = bestSpec
-        } else if (isHyperSwapModel) {
+        } else {
             verifiedSwapSpecCache[modelCacheKey] = bestSpec
         }
 
@@ -1270,5 +1275,29 @@ object InSwapperEngine {
             !hasCorruption &&
             lumaCorrelation > 0.965f &&
             centerFaceDiff < PASSTHROUGH_CENTER_DIFF_THRESHOLD
+    }
+
+    internal fun resolveSwapperSourceVector(
+        context: Context,
+        activeSwapFile: File,
+        isHyperSwap256: Boolean,
+        sourceEmbedding: SourceEmbeddingResult
+    ): FloatArray {
+        return if (isHyperSwap256) {
+            sourceEmbedding.rawNormedEmbedding512
+        } else if (!sourceEmbedding.usedEmbeddedEmap) {
+            val recoveredEmap = OnnxProtobufInspector.loadOrExtractInswapperEmap(
+                context = context,
+                inswapperFile = activeSwapFile,
+                bypassHyperSwapNameSkip = true
+            )
+            if (recoveredEmap != null) {
+                ArcFaceRecognizer.projectWithEmap(sourceEmbedding.rawNormedEmbedding512, recoveredEmap)
+            } else {
+                sourceEmbedding.latentSourceVector512
+            }
+        } else {
+            sourceEmbedding.latentSourceVector512
+        }
     }
 }
