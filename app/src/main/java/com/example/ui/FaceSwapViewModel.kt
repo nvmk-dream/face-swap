@@ -254,7 +254,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     )
     val uiState: StateFlow<FaceSwapUiState> = _uiState.asStateFlow()
 
-    private val swapCancellationRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile
+    private var activeSwapCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeSwapJob: kotlinx.coroutines.Job? = null
     @Volatile
     private var activeInpaintCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1228,21 +1229,47 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun cancelActiveSwap() {
         val state = _uiState.value
-        if (!state.isSwapping) return
-        swapCancellationRequested.set(true)
-        _uiState.update {
-            it.copy(statusBannerMessage = "Cancelling after current ONNX step...")
+        val job = activeSwapJob
+        if (!state.isSwapping && job?.isActive != true) return
+        activeSwapCancelToken.set(true)
+        job?.cancel(java.util.concurrent.CancellationException("Processing cancelled by user."))
+        SdInpaintOnnxEngine.clearSessionCache()
+        OnnxProtobufInspector.clearCachedSessions()
+        val appCtx = getApplication<Application>()
+        val cancelMsg = "Processing cancelled."
+        BackgroundProcessingCoordinator.updateSwap {
+            it.copy(
+                isRunning = false,
+                stageTitle = null,
+                detailMessage = null,
+                errorMessage = null,
+                statusMessage = cancelMsg
+            )
         }
-        ProcessingForegroundService.startOrUpdate(
-            context = getApplication(),
-            title = "${state.studioMode.title} Cancelling",
-            detail = "Stopping safely after active ONNX step...",
-            progressPercent = ((state.swapProgress?.progressFraction ?: 0.5f) * 100f).toInt().coerceIn(5, 99)
+        _uiState.update {
+            it.copy(
+                isSwapping = false,
+                swapProgress = null,
+                errorBannerMessage = null,
+                statusBannerMessage = cancelMsg
+            )
+        }
+        ProcessingForegroundService.finishAndNotify(
+            context = appCtx,
+            showCompletionNotification = false,
+            completedTitle = "${state.studioMode.title} Cancelled",
+            completedBody = cancelMsg
         )
     }
 
     fun runActiveModePipeline() {
+        val prevJob = activeSwapJob
         val state = _uiState.value
+        if (state.isSwapping && prevJob?.isActive == true) return
+        if (state.isSwapping && prevJob?.isActive != true) {
+            BackgroundProcessingCoordinator.updateSwap { it.copy(isRunning = false, stageTitle = null, detailMessage = null) }
+            _uiState.update { it.copy(isSwapping = false, swapProgress = null) }
+        }
         val srcBitmap = state.sourceBitmap
         val tgtBitmap = state.targetBitmap
 
@@ -1290,7 +1317,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             )
         }
 
-        if (state.isSwapping) return
         val appCtx = getApplication<Application>()
 
         // Phase 0: Mandatory neural model file verification before swap execution
@@ -1319,35 +1345,45 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
+        val jobCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
+        activeSwapCancelToken = jobCancelToken
+        val previousJobToDrain = prevJob?.takeIf { !it.isCompleted }
+
         ProcessingForegroundService.startOrUpdate(
             context = appCtx,
             title = "${state.studioMode.title} Running",
             detail = "Preparing offline ONNX Runtime...",
             progressPercent = 5
         )
-        swapCancellationRequested.set(false)
         BackgroundProcessingCoordinator.updateSwap {
             it.copy(isRunning = true, stageTitle = "Stage 1: Detection", detailMessage = "Preparing ONNX...", errorMessage = null, statusMessage = null)
         }
-        activeSwapJob = BackgroundProcessingCoordinator.scope.launch {
-            _uiState.update {
-                it.copy(
-                    isSwapping = true,
-                    errorBannerMessage = null,
-                    statusBannerMessage = null,
-                    showOriginalInComparison = false,
-                    swapProgress = SwapStageProgress(
-                        stepIndex = 1,
-                        totalSteps = if (state.studioMode == StudioMode.HEAD_REPLACEMENT || (state.studioMode == StudioMode.FACE_SWAP && state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD)) 6 else 5,
-                        stageTitle = "Stage 1: Detection",
-                        detailMessage = "Preparing in-memory ONNX Runtime sessions...",
-                        progressFraction = 0.05f
-                    )
+        _uiState.update {
+            it.copy(
+                isSwapping = true,
+                errorBannerMessage = null,
+                statusBannerMessage = null,
+                showOriginalInComparison = false,
+                swapProgress = SwapStageProgress(
+                    stepIndex = 1,
+                    totalSteps = if (state.studioMode == StudioMode.HEAD_REPLACEMENT || (state.studioMode == StudioMode.FACE_SWAP && state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD)) 6 else 5,
+                    stageTitle = "Stage 1: Detection",
+                    detailMessage = "Preparing in-memory ONNX Runtime sessions...",
+                    progressFraction = 0.05f
                 )
-            }
-
+            )
+        }
+        val launchedJob = BackgroundProcessingCoordinator.scope.launch(
+            start = kotlinx.coroutines.CoroutineStart.LAZY
+        ) {
             try {
                 val execResult = withContext(Dispatchers.Default) {
+                    if (previousJobToDrain != null) {
+                        previousJobToDrain.join()
+                    }
+                    if (jobCancelToken.get()) {
+                        throw java.util.concurrent.CancellationException("Processing cancelled by user.")
+                    }
                     SdInpaintOnnxEngine.clearSessionCache()
                     when (state.studioMode) {
                         StudioMode.FACE_SWAP -> if (state.swapStrategyOption == FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD) {
@@ -1372,8 +1408,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                 autoBodyAgeMatch = state.autoBodyAgeMatch,
                                 faceAgingFactor = state.faceAgingFactor,
                                 headPipelineMode = state.headPipelineMode,
-                                isCancelled = { swapCancellationRequested.get() },
+                                isCancelled = { jobCancelToken.get() },
                                 onProgress = { progress ->
+                                    if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@replaceFullHead
                                     _uiState.update { s -> s.copy(swapProgress = progress) }
                                     ProcessingForegroundService.startOrUpdate(
                                         context = appCtx,
@@ -1406,7 +1443,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                 autoBodyAgeMatch = state.autoBodyAgeMatch,
                                 faceAgingFactor = state.faceAgingFactor,
                                 swapStrategyOption = state.swapStrategyOption,
+                                isCancelled = { jobCancelToken.get() },
                                 onProgress = { progress ->
+                                    if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
                                     _uiState.update { s -> s.copy(swapProgress = progress) }
                                     ProcessingForegroundService.startOrUpdate(
                                         context = appCtx,
@@ -1439,7 +1478,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             identityPreservationMode = true,
                             autoBodyAgeMatch = false,
                             faceAgingFactor = 0.0f,
+                            isCancelled = { jobCancelToken.get() },
                             onProgress = { progress ->
+                                if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(
                                     context = appCtx,
@@ -1471,8 +1512,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             autoBodyAgeMatch = state.autoBodyAgeMatch,
                             faceAgingFactor = state.faceAgingFactor,
                             headPipelineMode = state.headPipelineMode,
-                            isCancelled = { swapCancellationRequested.get() },
+                            isCancelled = { jobCancelToken.get() },
                             onProgress = { progress ->
+                                if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@replaceFullHead
                                 _uiState.update { s -> s.copy(swapProgress = progress) }
                                 ProcessingForegroundService.startOrUpdate(
                                     context = appCtx,
@@ -1483,6 +1525,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             }
                         )
                     }
+                }
+                if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) {
+                    throw java.util.concurrent.CancellationException("Processing cancelled by user.")
                 }
 
                 val historyImgPath = withContext(Dispatchers.IO) {
@@ -1508,6 +1553,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         resultImagePath = historyImgPath
                     )
                 )
+                if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) {
+                    throw java.util.concurrent.CancellationException("Processing cancelled by user.")
+                }
 
                 val isSynthetic = execResult.engineUsed != "NEURAL" ||
                     execResult.pipelineSummary.contains("engineUsed=SYNTHETIC")
@@ -1520,6 +1568,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 BackgroundProcessingCoordinator.updateSwap {
                     it.copy(
                         isRunning = false,
+                        stageTitle = null,
+                        detailMessage = null,
                         result = execResult,
                         auditLogId = logId,
                         statusMessage = if (treatSyntheticAsError) null else doneMsg,
@@ -1543,78 +1593,93 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     completedTitle = "${state.studioMode.title} Ready",
                     completedBody = doneMsg
                 )
-            } catch (_: java.util.concurrent.CancellationException) {
-                SdInpaintOnnxEngine.clearSessionCache()
-                modelService.releaseAllSessions()
-                System.gc()
-                BackgroundProcessingCoordinator.updateSwap {
-                    it.copy(
-                        isRunning = false,
-                        errorMessage = null,
-                        statusMessage = "Processing cancelled."
-                    )
-                }
-                _uiState.update {
-                    it.copy(
-                        isSwapping = false,
-                        swapProgress = null,
-                        memoryServiceState = modelService.getMemoryState(),
-                        statusBannerMessage = "Processing cancelled.",
-                        errorBannerMessage = null
-                    )
-                }
-                ProcessingForegroundService.finishAndNotify(
-                    context = appCtx,
-                    showCompletionNotification = false,
-                    completedTitle = "${state.studioMode.title} Cancelled",
-                    completedBody = "Processing cancelled."
-                )
-            } catch (oom: OutOfMemoryError) {
-                modelService.releaseAllSessions()
-                System.gc()
-                val errMsg = "Insufficient RAM detected. Switched automatically to FAST / Low-Memory Tiled Mode — please tap Process again."
-                BackgroundProcessingCoordinator.updateSwap {
-                    it.copy(isRunning = false, errorMessage = errMsg)
-                }
-                _uiState.update {
-                    it.copy(
-                        isSwapping = false,
-                        swapProgress = null,
-                        lowMemoryMode = true,
-                        qualityLevel = ProcessingQualityLevel.FAST,
-                        headPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
-                        memoryServiceState = modelService.getMemoryState(),
-                        errorBannerMessage = errMsg
-                    )
-                }
-                ProcessingForegroundService.finishAndNotify(
-                    context = appCtx,
-                    showCompletionNotification = true,
-                    completedTitle = "${state.studioMode.title} Paused (Low RAM)",
-                    completedBody = errMsg
-                )
             } catch (t: Throwable) {
-                val errMsg = t.message ?: "Processing failure: ${t.javaClass.simpleName}"
-                BackgroundProcessingCoordinator.updateSwap {
-                    it.copy(isRunning = false, errorMessage = errMsg)
+                val cancelled = t is java.util.concurrent.CancellationException || jobCancelToken.get()
+                if (cancelled) {
+                    SdInpaintOnnxEngine.clearSessionCache()
+                    modelService.releaseAllSessions()
+                    System.gc()
                 }
-                _uiState.update {
-                    it.copy(
-                        isSwapping = false,
-                        swapProgress = null,
-                        errorBannerMessage = errMsg
+                if (activeSwapCancelToken !== jobCancelToken) {
+                    return@launch
+                }
+                if (cancelled) {
+                    val cancelMsg = "Processing cancelled."
+                    BackgroundProcessingCoordinator.updateSwap {
+                        it.copy(
+                            isRunning = false,
+                            stageTitle = null,
+                            detailMessage = null,
+                            errorMessage = null,
+                            statusMessage = cancelMsg
+                        )
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isSwapping = false,
+                            swapProgress = null,
+                            memoryServiceState = modelService.getMemoryState(),
+                            statusBannerMessage = cancelMsg,
+                            errorBannerMessage = null
+                        )
+                    }
+                    ProcessingForegroundService.finishAndNotify(
+                        context = appCtx,
+                        showCompletionNotification = false,
+                        completedTitle = "${state.studioMode.title} Cancelled",
+                        completedBody = cancelMsg
+                    )
+                } else if (t is OutOfMemoryError) {
+                    modelService.releaseAllSessions()
+                    System.gc()
+                    val errMsg = "Insufficient RAM detected. Switched automatically to FAST / Low-Memory Tiled Mode — please tap Process again."
+                    BackgroundProcessingCoordinator.updateSwap {
+                        it.copy(isRunning = false, stageTitle = null, detailMessage = null, errorMessage = errMsg)
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isSwapping = false,
+                            swapProgress = null,
+                            lowMemoryMode = true,
+                            qualityLevel = ProcessingQualityLevel.FAST,
+                            headPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+                            memoryServiceState = modelService.getMemoryState(),
+                            errorBannerMessage = errMsg
+                        )
+                    }
+                    ProcessingForegroundService.finishAndNotify(
+                        context = appCtx,
+                        showCompletionNotification = true,
+                        completedTitle = "${state.studioMode.title} Paused (Low RAM)",
+                        completedBody = errMsg
+                    )
+                } else {
+                    val errMsg = t.message ?: "Processing failure: ${t.javaClass.simpleName}"
+                    BackgroundProcessingCoordinator.updateSwap {
+                        it.copy(isRunning = false, stageTitle = null, detailMessage = null, errorMessage = errMsg)
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isSwapping = false,
+                            swapProgress = null,
+                            errorBannerMessage = errMsg
+                        )
+                    }
+                    ProcessingForegroundService.finishAndNotify(
+                        context = appCtx,
+                        showCompletionNotification = true,
+                        completedTitle = "${state.studioMode.title} Failed",
+                        completedBody = errMsg
                     )
                 }
-                ProcessingForegroundService.finishAndNotify(
-                    context = appCtx,
-                    showCompletionNotification = true,
-                    completedTitle = "${state.studioMode.title} Failed",
-                    completedBody = errMsg
-                )
             } finally {
-                activeSwapJob = null
+                if (activeSwapCancelToken === jobCancelToken) {
+                    activeSwapJob = null
+                }
             }
         }
+        activeSwapJob = launchedJob
+        launchedJob.start()
     }
 
     fun runVisualValidationSuite() {

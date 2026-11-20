@@ -587,5 +587,233 @@ class HeadErase3DPipelineTest {
             Color.blue(erasedHairPx) > 150
         )
     }
+
+    @Test
+    fun `CleanEraseHeadReplacementEngine stops immediately between Stage 3 and Stage 4 on cancel`() {
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(20, 25, 35),
+            skinColor = Color.rgb(225, 180, 150),
+            hairColor = Color.rgb(30, 20, 20)
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(220, 235, 250),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(45, 30, 20)
+        )
+
+        val cancelFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+        val observedStages = mutableListOf<Int>()
+        var cancelled = false
+        try {
+            CleanEraseHeadReplacementEngine.execute(
+                context = context,
+                ortEnv = null,
+                sourceBitmap = srcBmp,
+                sourceFace = srcFace,
+                targetBitmap = tgtBmp,
+                targetFacesToReplace = listOf(tgtFace),
+                pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+                enableColorTransfer = true,
+                enableProvenanceWatermark = false,
+                allowTwoModelFallbackForTesting = true,
+                lowMemoryMode = true,
+                isCancelled = { cancelFlag.get() },
+                onProgress = { progress ->
+                    observedStages.add(progress.stepIndex)
+                    if (progress.stepIndex == 3) {
+                        cancelFlag.set(true)
+                    }
+                }
+            )
+            fail("Expected CancellationException right after Stage 3 when cancelled during Stage 3")
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
+        assertTrue("Expected Stage 3 to start before cancellation, stages=$observedStages", observedStages.contains(3))
+        assertFalse("Stage 4 must NOT run after Stage 3 cancellation, stages=$observedStages", observedStages.any { it >= 4 })
+    }
+
+    @Test
+    fun `CleanEraseHeadReplacementEngine multi-face close proximity preserves Face 1 new hair when replacing Face 2`() {
+        val w = 384
+        val h = 256
+        val bgColor = Color.rgb(215, 230, 245)
+        val skinColor = Color.rgb(212, 168, 140)
+        val targetRedHair = Color.rgb(215, 30, 30)
+        val sourceBlackHair = Color.rgb(24, 22, 20)
+
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(25, 30, 40),
+            skinColor = Color.rgb(228, 185, 155),
+            hairColor = sourceBlackHair,
+            hairRadiusScale = 1.05f
+        )
+
+        val tgtBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h) { bgColor }
+        val eyeDist = 34f
+        val cy = 128f
+        val centers = listOf(132f, 252f)
+        fun paintHead(cx: Float) {
+            val hairRx = eyeDist * 1.65f
+            val hairRy = eyeDist * 1.75f
+            val faceRx = eyeDist * 1.05f
+            val faceRy = eyeDist * 1.22f
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val lx = x - cx
+                    val ly = y - cy
+                    val hnx = lx / hairRx
+                    val hny = (ly + hairRy * 0.30f) / hairRy
+                    if (hnx * hnx + hny * hny <= 1f) {
+                        px[y * w + x] = targetRedHair
+                    }
+                    if (kotlin.math.abs(lx) <= eyeDist * 0.55f && ly in (eyeDist * 0.85f)..(eyeDist * 1.85f)) {
+                        px[y * w + x] = skinColor
+                    }
+                    val fnx = lx / faceRx
+                    val fny = (ly - eyeDist * 0.12f) / faceRy
+                    if (fnx * fnx + fny * fny <= 1f) {
+                        px[y * w + x] = skinColor
+                    }
+                }
+            }
+        }
+        centers.forEach(::paintHead)
+        tgtBmp.setPixels(px, 0, w, 0, 0, w, h)
+
+        val targetFaces = centers.mapIndexed { idx, cx ->
+            DetectedFace(
+                index = idx,
+                boundingBox = RectF(cx - eyeDist * 1.2f, cy - eyeDist * 1.2f, cx + eyeDist * 1.2f, cy + eyeDist * 1.4f),
+                score = 0.99f,
+                landmarks5 = listOf(
+                    PointF(cx - eyeDist * 0.5f, cy),
+                    PointF(cx + eyeDist * 0.5f, cy),
+                    PointF(cx, cy + eyeDist * 0.55f),
+                    PointF(cx - eyeDist * 0.42f, cy + eyeDist * 1.05f),
+                    PointF(cx + eyeDist * 0.42f, cy + eyeDist * 1.05f)
+                ),
+                detectorSource = "MultiFaceTest"
+            )
+        }
+
+        val result = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = targetFaces,
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+
+        assertEquals(2, result.swappedFacesCount)
+        assertEquals(bgColor, result.outputBitmap.getPixel(4, 4))
+        // Face 1 inner right hair near Face 2 must retain dark Source hair (not erased by Face 2 or reverted to red)
+        val face1RightHairCore = result.outputBitmap.getPixel(154, 78)
+        assertTrue(
+            "Expected Face 1 interior right hair near Face 2 to retain dark Source hair, got RGB=(${Color.red(face1RightHairCore)},${Color.green(face1RightHairCore)},${Color.blue(face1RightHairCore)})",
+            Color.red(face1RightHairCore) < 95 && Color.blue(face1RightHairCore) < 95
+        )
+        val face1RightHairEdge = result.outputBitmap.getPixel(166, 78)
+        assertTrue(
+            "Expected Face 1 outer right hair edge near Face 2 not to revert to red or over-erased sky bg, got RGB=(${Color.red(face1RightHairEdge)},${Color.green(face1RightHairEdge)},${Color.blue(face1RightHairEdge)})",
+            Color.red(face1RightHairEdge) < 130 && Color.blue(face1RightHairEdge) < 140 && kotlin.math.abs(Color.red(face1RightHairEdge) - Color.blue(face1RightHairEdge)) < 35
+        )
+        // Face 2 crown (x = 252, y = 72) must also be replaced with dark source hair (not original bright red)
+        val face2Crown = result.outputBitmap.getPixel(252, 72)
+        assertTrue(
+            "Expected Face 2 crown replaced with dark source hair rather than red target hair, got RGB=(${Color.red(face2Crown)},${Color.green(face2Crown)},${Color.blue(face2Crown)})",
+            Color.red(face2Crown) < 110 && Color.blue(face2Crown) < 110
+        )
+    }
+
+    @Test
+    fun `CleanEraseHeadReplacementEngine protects rolled gt 25 deg collar and erases wide hat under fallback`() {
+        val (srcBmp, srcFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(20, 25, 35),
+            skinColor = Color.rgb(225, 180, 150),
+            hairColor = Color.rgb(30, 20, 20),
+            hairRadiusScale = 0.85f
+        )
+        val (tgtBmp, rawTgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(220, 235, 250),
+            skinColor = Color.rgb(210, 165, 140),
+            hairColor = Color.rgb(40, 25, 20),
+            rollDegrees = 32f
+        )
+        // Paint bright red wide hat brim across upper forehead/crown
+        for (y in 42..66) {
+            for (x in 54..202) {
+                tgtBmp.setPixel(x, y, Color.rgb(220, 30, 30))
+            }
+        }
+        // Paint emerald collar across lower shoulder/neck band
+        for (y in 204..228) {
+            for (x in 72..184) {
+                tgtBmp.setPixel(x, y, Color.rgb(20, 165, 65))
+            }
+        }
+        // Simulate mild profile yaw compression alongside 32 deg roll
+        val rolledProfileFace = rawTgtFace.copy(
+            landmarks5 = rawTgtFace.landmarks5.mapIndexed { idx, pt ->
+                when (idx) {
+                    0 -> PointF(pt.x + 5f, pt.y)
+                    1 -> PointF(pt.x - 5f, pt.y)
+                    else -> pt
+                }
+            }
+        )
+
+        val result = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(rolledProfileFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+
+        // Emerald collar band stays protected even under roll > 25 deg
+        val collarLeft = result.outputBitmap.getPixel(95, 214)
+        val collarRight = result.outputBitmap.getPixel(162, 214)
+        assertTrue(
+            "Expected left rolled collar preserved, got RGB=(${Color.red(collarLeft)},${Color.green(collarLeft)},${Color.blue(collarLeft)})",
+            Color.green(collarLeft) > Color.red(collarLeft) + 40
+        )
+        assertTrue(
+            "Expected right rolled collar preserved, got RGB=(${Color.red(collarRight)},${Color.green(collarRight)},${Color.blue(collarRight)})",
+            Color.green(collarRight) > Color.red(collarRight) + 40
+        )
+        // Wide red hat brim corner (x = 76, y = 52) above narrower source hair should be erased toward sky blue
+        val erasedHatBrim = result.outputBitmap.getPixel(76, 52)
+        assertTrue(
+            "Expected wide red hat brim erased toward sky background, got RGB=(${Color.red(erasedHatBrim)},${Color.green(erasedHatBrim)},${Color.blue(erasedHatBrim)})",
+            Color.blue(erasedHatBrim) > 150
+        )
+    }
 }
 

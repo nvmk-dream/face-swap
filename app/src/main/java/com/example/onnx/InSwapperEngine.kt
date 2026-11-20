@@ -186,8 +186,10 @@ object InSwapperEngine {
         faceAgingFactor: Float = 0.0f,
         swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
         precomputedTargetDepthMap: DepthMapResult? = null,
+        isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
         val tStart = System.currentTimeMillis()
         var totalModelLoadingMs = modelLoadingMs
         val recFile = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.RECOGNIZER)
@@ -253,6 +255,7 @@ object InSwapperEngine {
             allowTwoModelFallbackForTesting = allowTwoModelFallbackForTesting || !recFile.exists(),
             preloadedArcFaceSession = preloadedArcFaceSession
         )
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
         val embMs = (System.currentTimeMillis() - tEmbStart).coerceAtLeast(1L)
 
         // Stage 3a: Age Harmony Plan (Run MiVOLO v2 before loading heavy Swapper / GFPGAN sessions)
@@ -262,6 +265,7 @@ object InSwapperEngine {
         )
         val targetAgePlans = if (!identityPreservationMode && (autoBodyAgeMatch || abs(faceAgingFactor) >= 0.05f)) {
             targetFacesToReplace.map { tgtFace ->
+                if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
                 runCatching {
                     AgeHarmonyEngine.resolveAgePlan(
                         context = context,
@@ -280,6 +284,7 @@ object InSwapperEngine {
         }
         val firstAgeHarmonySummary = targetAgePlans.firstOrNull()?.summaryLabel
 
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
         // Optional Stage 3b: Compute 3D Depth Map once for Occlusion Guard & True Depth DSLR Bokeh
         val targetDepthMap = precomputedTargetDepthMap ?: if ((enableOcclusionProtection || portraitBlurStrength > 0.03f) &&
             DepthEstimationEngine.hasInstalledDepthModel(context)
@@ -293,15 +298,24 @@ object InSwapperEngine {
                     progressFraction = 0.44f
                 )
             )
-            runCatching {
+            val depthAttempt = runCatching {
                 DepthEstimationEngine.estimateDepth(
                     context = context,
                     ortEnv = ortEnv,
                     sourceBitmap = targetBitmap,
-                    preferHardwareAccel = preferHardwareAccel
+                    preferHardwareAccel = preferHardwareAccel,
+                    isCancelled = isCancelled
                 )
-            }.getOrNull()
+            }
+            val err = depthAttempt.exceptionOrNull()
+            if (err is java.util.concurrent.CancellationException || isCancelled()) {
+                throw (err as? java.util.concurrent.CancellationException
+                    ?: java.util.concurrent.CancellationException("Face swap cancelled by user."))
+            }
+            depthAttempt.getOrNull()
         } else null
+
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
 
         // Stage 4: Run Face Swap ONNX model (supports both 256x256 HyperSwap 1a/1b/1c and 128x128 inswapper_128)
         val targetW = targetBitmap.width
@@ -398,6 +412,7 @@ object InSwapperEngine {
 
             try {
                 targetFacesToReplace.forEachIndexed { idx, targetFace ->
+                    if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
                     val stepFrac = 0.55f + (0.30f * (idx.toFloat() / targetFacesToReplace.size.coerceAtLeast(1)))
                     onProgress(
                         SwapStageProgress(
@@ -470,6 +485,11 @@ object InSwapperEngine {
                         synthesized
                     }
                     totalSwapMs += (System.currentTimeMillis() - tFaceSwap0).coerceAtLeast(1L)
+                    if (isCancelled()) {
+                        rawSwappedCrop.recycle()
+                        alignedTarget256.recycle()
+                        throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
+                    }
 
                     val tBlend0 = System.currentTimeMillis()
                     onProgress(

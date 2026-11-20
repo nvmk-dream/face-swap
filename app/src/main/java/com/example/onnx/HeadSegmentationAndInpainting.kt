@@ -158,8 +158,10 @@ object HeadSegmentationAndInpainting {
         segModelFile: File?,
         mattingModelFile: File?,
         preferHardwareAccel: Boolean = false,
-        preloadedSegformerSession: OrtSession? = null
+        preloadedSegformerSession: OrtSession? = null,
+        isCancelled: () -> Boolean = { false }
     ): HeadSegmentationMasks {
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Head segmentation cancelled by user.")
         var masks: HeadSegmentationMasks? = null
 
         if (ortEnv != null && preloadedSegformerSession != null) {
@@ -172,8 +174,10 @@ object HeadSegmentationAndInpainting {
             }.getOrNull()
         }
 
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Head segmentation cancelled by user.")
         val baseMasks = masks ?: computeChromaticGeodesicHeadMatte(alignedHeadCrop)
 
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Head segmentation cancelled by user.")
         if (ortEnv != null && mattingModelFile != null && mattingModelFile.exists() && mattingModelFile.length() > 1024L) {
             val refinedMasks = runCatching {
                 val refined = runModnetOnnx(
@@ -190,6 +194,7 @@ object HeadSegmentationAndInpainting {
                     segmentationSourceLabel = "${baseMasks.segmentationSourceLabel} + modnet.onnx"
                 )
             }.getOrNull()
+            if (isCancelled()) throw java.util.concurrent.CancellationException("Head segmentation cancelled by user.")
             if (refinedMasks != null) return refinedMasks
         }
 
@@ -426,7 +431,7 @@ object HeadSegmentationAndInpainting {
         val bgSamplesB = mutableListOf<Float>()
         val step = (size / 16).coerceAtLeast(2)
 
-        for (y in 2 until (size * 0.45f).toInt() step step) {
+        for (y in 2 until (size * 0.10f).toInt().coerceAtLeast(8) step step) {
             for (x in listOf(3, 8, size - 9, size - 4)) {
                 val c = pixels[y * size + x]
                 bgSamplesR.add(((c ushr 16) and 0xFF).toFloat())
@@ -770,8 +775,10 @@ object HeadSegmentationAndInpainting {
         lamaFile: File,
         cropBitmap: Bitmap,
         gapMask: FloatArray,
-        preferHardwareAccel: Boolean
+        preferHardwareAccel: Boolean,
+        isCancelled: () -> Boolean = { false }
     ): Bitmap {
+        if (isCancelled()) throw java.util.concurrent.CancellationException("LaMa erase cancelled by user.")
         val origSize = cropBitmap.width
         val modelSize = 512
         val scaled = if (origSize == modelSize) {
@@ -805,12 +812,14 @@ object HeadSegmentationAndInpainting {
         imgBuf.rewind()
         maskBuf.rewind()
 
+        if (isCancelled()) throw java.util.concurrent.CancellationException("LaMa erase cancelled by user.")
         val (lamaSession, _) = OnnxProtobufInspector.createSessionWithFallback(
             ortEnv = ortEnv,
             modelFile = lamaFile,
             preferHardwareAcceleration = preferHardwareAccel
         )
         lamaSession.use { session ->
+                if (isCancelled()) throw java.util.concurrent.CancellationException("LaMa erase cancelled by user.")
                 val names = session.inputNames.toList()
                 val imgName = names.firstOrNull { it.contains("image", ignoreCase = true) } ?: names[0]
                 val maskName = names.firstOrNull { it.contains("mask", ignoreCase = true) }
@@ -819,6 +828,7 @@ object HeadSegmentationAndInpainting {
                 OnnxTensor.createTensor(ortEnv, imgBuf, longArrayOf(1L, 3L, 512L, 512L)).use { imgT ->
                     OnnxTensor.createTensor(ortEnv, maskBuf, longArrayOf(1L, 1L, 512L, 512L)).use { maskT ->
                         session.run(mapOf(imgName to imgT, maskName to maskT)).use { res ->
+                            if (isCancelled()) throw java.util.concurrent.CancellationException("LaMa erase cancelled by user.")
                             val outT = res[0] as OnnxTensor
                             val outFloats = FloatArray(3 * hw)
                             outT.floatBuffer.get(outFloats)

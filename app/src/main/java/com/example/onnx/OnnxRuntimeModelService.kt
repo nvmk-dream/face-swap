@@ -128,6 +128,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         faceAgingFactor: Float = 0.0f,
         swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
         captureDiagnostics: Boolean = false,
+        isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
 
@@ -510,8 +511,10 @@ class OnnxRuntimeModelService(
         faceAgingFactor: Float,
         swapStrategyOption: FaceSwapStrategyOption,
         captureDiagnostics: Boolean,
+        isCancelled: () -> Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
+        if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
         val tModelLoad0 = System.currentTimeMillis()
         val emap = getOrLoadInswapperEmap()
         val modelLoadingMs = (System.currentTimeMillis() - tModelLoad0).coerceAtLeast(0L)
@@ -547,6 +550,7 @@ class OnnxRuntimeModelService(
             preloadedEmap512x512 = emap,
             modelLoadingMs = modelLoadingMs,
             captureDiagnostics = captureDiagnostics,
+            isCancelled = isCancelled,
             onProgress = onProgress
         )
     }
