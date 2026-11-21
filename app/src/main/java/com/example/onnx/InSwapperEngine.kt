@@ -1263,7 +1263,7 @@ object InSwapperEngine {
         return swappedBitmap to diagSummary
     }
 
-    internal const val PASSTHROUGH_CENTER_DIFF_THRESHOLD = 7.5f
+    internal const val PASSTHROUGH_CENTER_DIFF_THRESHOLD = 20.0f
 
     internal fun shouldRetryNearIdentityPassthrough(
         isHyperSwapModel: Boolean,
@@ -1273,7 +1273,7 @@ object InSwapperEngine {
     ): Boolean {
         return isHyperSwapModel &&
             !hasCorruption &&
-            lumaCorrelation > 0.965f &&
+            lumaCorrelation > 0.955f &&
             centerFaceDiff < PASSTHROUGH_CENTER_DIFF_THRESHOLD
     }
 

@@ -2501,35 +2501,36 @@ object FaceBlender {
         val centerY = (eyeMidY * 0.32f + geom512.nose.y * 0.30f + mouthMidY * 0.38f)
 
         val baseRadiusX = if (isCleanOptionB) {
-            (geom512.eyeDist * 1.08f).coerceIn(136f, 178f)
+            (geom512.eyeDist * 1.16f).coerceIn(144f, 186f)
         } else {
             (geom512.eyeDist * 1.14f).coerceIn(142f, 186f)
         }
         val pose3D = geom512.reconstructed3D.headPose
-        val leftYawContract = ((1.0f - 0.22f * max(0f, geom512.yawRatio)) * (0.35f + 0.65f * pose3D.leftSideVisibility))
-            .coerceIn(0.74f, 1.0f)
-        val rightYawContract = ((1.0f - 0.22f * max(0f, -geom512.yawRatio)) * (0.35f + 0.65f * pose3D.rightSideVisibility))
-            .coerceIn(0.74f, 1.0f)
+        val yawFloor = if (isCleanOptionB) 0.84f else 0.74f
+        val leftYawContract = ((1.0f - 0.18f * max(0f, geom512.yawRatio)) * (0.45f + 0.55f * pose3D.leftSideVisibility))
+            .coerceIn(yawFloor, 1.0f)
+        val rightYawContract = ((1.0f - 0.18f * max(0f, -geom512.yawRatio)) * (0.45f + 0.55f * pose3D.rightSideVisibility))
+            .coerceIn(yawFloor, 1.0f)
         val radiusXLeft = baseRadiusX * leftYawContract
         val radiusXRight = baseRadiusX * rightYawContract
 
         val chin106 = geom512.landmarks106.getOrNull(16)
         val chinDist = if (chin106 != null) {
-            hypot((chin106.x - centerX).toDouble(), (chin106.y - centerY).toDouble()).toFloat() * 0.98f
+            hypot((chin106.x - centerX).toDouble(), (chin106.y - centerY).toDouble()).toFloat() * 1.02f
         } else {
-            geom512.eyeDist * 1.12f
+            geom512.eyeDist * 1.16f
         }
         val radiusYTop = if (isCleanOptionB) {
-            (geom512.eyeDist * 1.00f).coerceIn(130f, 156f)
+            (geom512.eyeDist * 1.02f).coerceIn(132f, 158f)
         } else {
             (geom512.eyeDist * 1.04f).coerceIn(136f, 162f)
         }
         val radiusYBottom = if (isCleanOptionB) {
-            (chinDist * 0.96f).coerceIn(144f, 174f)
+            (chinDist * 1.02f).coerceIn(150f, 184f)
         } else {
             chinDist.coerceIn(150f, 182f)
         }
-        val innerCoreRatio = if (isCleanOptionB) 0.72f else 0.76f
+        val innerCoreRatio = if (isCleanOptionB) 0.76f else 0.76f
         val borderMargin = 24
 
         val noseCoreRx = geom512.eyeDist * 0.42f
@@ -2636,7 +2637,7 @@ object FaceBlender {
                     }
                     // Lower chin / jawline double-seam guard strictly BELOW the lower lip (localY > 0.72f * radiusYBottom):
                     // if Source jaw extends below Target's chin contour into neck shadow, taper alpha smoothly
-                    val chinStartRatio = if (isNeuralSwap) 0.82f else 0.72f
+                    val chinStartRatio = if (isCleanOptionB) 0.90f else if (isNeuralSwap) 0.82f else 0.72f
                     val lumThresh = if (isNeuralSwap) 22f else 16f
                     if (localY > chinStartRatio * radiusYBottom && abs(sLum - tLum) > lumThresh) {
                         val jawMismatch = ((abs(sLum - tLum) - lumThresh) / 38f).coerceIn(0f, 1f)
