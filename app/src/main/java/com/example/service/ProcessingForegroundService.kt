@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.annotation.SuppressLint
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -166,6 +167,7 @@ class ProcessingForegroundService : Service() {
         @Volatile
         private var pendingStopRequested = false
 
+        @SuppressLint("MissingPermission")
         fun startOrUpdate(
             context: Context,
             title: String,
@@ -209,6 +211,7 @@ class ProcessingForegroundService : Service() {
             }
         }
 
+        @SuppressLint("MissingPermission")
         fun finishAndNotify(
             context: Context,
             showCompletionNotification: Boolean,
