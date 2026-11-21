@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
@@ -186,12 +185,6 @@ fun ModelsInspectorTab(
                             isLoaded = memoryServiceState.faceMeshLoaded,
                             note = memoryServiceState.loadedSessions[ModelSlot.FACE_MESH_3D]?.statusNote
                         )
-                        MemorySlotRow(
-                            label = "9. 6DRepNet360_Slim.onnx / SixDRepNet.onnx (6D Head Pose)",
-                            tamilPurpose = ModelSlot.HEAD_POSE.tamilTitle + " — " + ModelSlot.HEAD_POSE.tamilRoleSummary,
-                            isLoaded = memoryServiceState.headPoseLoaded,
-                            note = memoryServiceState.loadedSessions[ModelSlot.HEAD_POSE]?.statusNote
-                        )
                     }
 
                     Row(
@@ -342,7 +335,6 @@ fun ModelsInspectorTab(
                                 "├── age_estimation/ (mivolo_v2_age.onnx — MiVOLO v2 Face+Body Age)\n" +
                                 "├── re_aging/       (face_reaging.onnx — FRAN U-Net / CV Fallback)\n" +
                                 "├── face_mesh/      (facemesh-v2-v1.onnx — 468-Pt 3D Mesh / PnP-106)\n" +
-                                "├── head_pose/      (6DRepNet360_Slim.onnx / SixDRepNet.onnx — 6D Pitch/Yaw/Roll)\n" +
                                 "└── enhancement/    (gfpgan_1.4.onnx / gfpgan-v1.4-w16-v1.onnx)",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface
@@ -351,110 +343,7 @@ fun ModelsInspectorTab(
                 }
             }
 
-            // 2. Quick Direct Upload Card for 6DRepNet360_Slim.onnx / SixDRepNet.onnx
-            val headPoseInspection = inspections.firstOrNull { it.slot == ModelSlot.HEAD_POSE }
-            val isHeadPoseInstalled = headPoseInspection?.isValidOnnx == true
-            val isHeadPoseRamReady = memoryServiceState.headPoseLoaded
-            val headPoseAccent = if (isHeadPoseInstalled) NeonEmerald else ElectricCyan
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("models_sixdrepnet_slim_card"),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.2.dp, headPoseAccent.copy(alpha = 0.6f)),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isHeadPoseInstalled) Icons.Default.CheckCircle else Icons.Default.Radar,
-                                contentDescription = "6DRepNet360_Slim Head Pose ONNX",
-                                tint = headPoseAccent,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Text(
-                                text = "6D Head Pose (6DRepNet360_Slim.onnx / SixDRepNet.onnx)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = headPoseAccent
-                            )
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = headPoseAccent.copy(alpha = 0.16f)
-                        ) {
-                            Text(
-                                text = when {
-                                    isHeadPoseRamReady -> "RAM Ready ✓"
-                                    isHeadPoseInstalled -> "Installed ✓"
-                                    else -> "Optional"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = headPoseAccent,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                    Text(
-                        text = if (isHeadPoseInstalled) {
-                            headPoseInspection?.verificationNote
-                                ?: "Installed in models/head_pose/ — Extreme profile (±85°) Pitch/Yaw/Roll active."
-                        } else {
-                            "6DRepNet360_Slim.onnx (அல்லது SixDRepNet.onnx) upload செய்தால் பக்கவாட்டு முகம் (±85°), தொப்பி, கண்ணாடி மற்றும் சாய்ந்த தலையின் 3D கோணங்கள் துல்லியமாக கணிக்கப்படும்."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Button(
-                            onClick = { onImportModelForSlot(ModelSlot.HEAD_POSE) },
-                            enabled = !isInspecting,
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 48.dp)
-                                .testTag("models_import_sixdrepnet_slim_button"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(
-                                text = if (isHeadPoseInstalled) {
-                                    "Replace 6DRepNet360_Slim.onnx"
-                                } else {
-                                    "Upload 6DRepNet360_Slim.onnx"
-                                },
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = onImportAllFromFolder,
-                            enabled = !isInspecting,
-                            modifier = Modifier
-                                .heightIn(min = 48.dp)
-                                .testTag("models_import_sixdrepnet_folder_button"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Auto-Folder")
-                        }
-                    }
-                }
-            }
-
-            // 3. SD 1.5 Inpaint Packs & CLIP Tokenizer Card (Direct Upload Option)
+            // 2. SD 1.5 Inpaint Packs & CLIP Tokenizer Card (Direct Upload Option)
             SdInpaintAndTokenizerCard(
                 sdPackDetails = sdPackDetails,
                 clipTokenizerStatus = clipTokenizerStatus,

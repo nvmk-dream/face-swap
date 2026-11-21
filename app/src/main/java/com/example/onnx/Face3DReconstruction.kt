@@ -93,8 +93,7 @@ object Face3DReconstruction {
         landmarks5: List<PointF>,
         hintPitch: Float = 0f,
         hintYaw: Float = 0f,
-        hintRoll: Float = 0f,
-        neuralPoseWeight: Float? = null
+        hintRoll: Float = 0f
     ): HeadPose3D {
         if (landmarks5.size < 5) {
             return HeadPose3D(
@@ -161,18 +160,10 @@ object Face3DReconstruction {
         val canonicalVertRatio = 0.545f
         val pnpPitchDeg = ((canonicalVertRatio - verticalRatio) * 115.0f).coerceIn(-45f, 45f)
 
-        // 4. Fuse with ML Kit / SixDRepNet neural Euler angles when available
-        val yawPitchW = neuralPoseWeight?.coerceIn(0f, 1f) ?: 0.55f
-        val rollW = neuralPoseWeight?.let { (it * 0.80f).coerceIn(0f, 0.90f) } ?: 0.50f
-        val hasNeuralPose = neuralPoseWeight != null || abs(hintYaw) > 0.5f
-        val hasNeuralPitch = neuralPoseWeight != null || abs(hintPitch) > 0.5f
-        val hasNeuralRoll = neuralPoseWeight != null || abs(hintRoll) > 0.5f
-        val finalYaw = (if (hasNeuralPose) (yawPitchW * hintYaw + (1f - yawPitchW) * pnpYawDeg) else pnpYawDeg)
-            .coerceIn(-85f, 85f)
-        val finalPitch = (if (hasNeuralPitch) (yawPitchW * hintPitch + (1f - yawPitchW) * pnpPitchDeg) else pnpPitchDeg)
-            .coerceIn(-75f, 75f)
-        val finalRoll = (if (hasNeuralRoll) (rollW * hintRoll + (1f - rollW) * pnpRollDeg) else pnpRollDeg)
-            .coerceIn(-180f, 180f)
+        // 4. Fuse with ML Kit / hardware Euler angles when available
+        val finalYaw = if (abs(hintYaw) > 0.5f) (0.55f * hintYaw + 0.45f * pnpYawDeg) else pnpYawDeg
+        val finalPitch = if (abs(hintPitch) > 0.5f) (0.55f * hintPitch + 0.45f * pnpPitchDeg) else pnpPitchDeg
+        val finalRoll = if (abs(hintRoll) > 0.5f) (0.50f * hintRoll + 0.50f * pnpRollDeg) else pnpRollDeg
 
         val rot3x3 = buildRotationMatrix3x3(finalPitch, finalYaw, finalRoll)
 
@@ -219,10 +210,9 @@ object Face3DReconstruction {
         eulerY: Float = 0f,
         eulerZ: Float = 0f,
         existingContourPoints: List<PointF> = emptyList(),
-        bitmap: Bitmap? = null,
-        neuralPoseWeight: Float? = null
+        bitmap: Bitmap? = null
     ): ReconstructedFace3D {
-        val headPose = estimate3DHeadPose(landmarks5, eulerX, eulerY, eulerZ, neuralPoseWeight = neuralPoseWeight)
+        val headPose = estimate3DHeadPose(landmarks5, eulerX, eulerY, eulerZ)
         if (landmarks5.size < 5) {
             val fallbackPts = List(LANDMARK_COUNT_106) { PointF(128f, 128f) }
             val fallbackVerts = List(LANDMARK_COUNT_106) { idx -> Vertex3D(idx, 128f, 128f, 0f) }

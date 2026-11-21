@@ -156,15 +156,13 @@ object FaceMesh3DEngine {
             if (onnxRes != null) return onnxRes
         }
 
-        val hasSixD = face.detectorSource.contains("SixDRepNet")
         val recon = Face3DReconstruction.reconstruct3DFaceAnd106Landmarks(
             landmarks5 = face.landmarks5,
             eulerX = face.eulerX,
             eulerY = face.eulerY,
             eulerZ = face.eulerZ,
             existingContourPoints = face.faceContourPoints,
-            bitmap = bitmap,
-            neuralPoseWeight = if (hasSixD) 0.85f else null
+            bitmap = bitmap
         )
         val pts = recon.landmarks106
         val zArr = FloatArray(recon.vertices3D.size) { i -> recon.vertices3D[i].z }
@@ -175,7 +173,7 @@ object FaceMesh3DEngine {
             headPose = recon.headPose,
             controlPoints31 = ctrl,
             usedFaceMeshOnnx = false,
-            sourceLabel = if (hasSixD) "SixDRepNet.onnx + 3D-PnP-106" else "3D-PnP-106 Fallback"
+            sourceLabel = "3D-PnP-106 Fallback"
         )
     }
 
@@ -336,7 +334,6 @@ object FaceMesh3DEngine {
         }
 
         // Fuse 3D Z-depth yaw & pitch cues from FaceMesh V2 with 5-point PnP solver
-        val hasSixD = face.detectorSource.contains("SixDRepNet")
         val nose = pts[MP_NOSE_TIP]
         val lMouth = pts[MP_LEFT_MOUTH]
         val rMouth = pts[MP_RIGHT_MOUTH]
@@ -344,8 +341,7 @@ object FaceMesh3DEngine {
             landmarks5 = listOf(lEye, rEye, nose, lMouth, rMouth),
             hintPitch = face.eulerX,
             hintYaw = face.eulerY,
-            hintRoll = face.eulerZ,
-            neuralPoseWeight = if (hasSixD) 0.85f else null
+            hintRoll = face.eulerZ
         )
 
         val zLeftCheek = zArr[MP_LEFT_CHEEK]
@@ -355,14 +351,12 @@ object FaceMesh3DEngine {
         val zChin = zArr[MP_CHIN]
         val zPitchSignal = ((zChin - zForehead) / meshEyeDist.coerceAtLeast(8f) * 38f).coerceIn(-35f, 35f)
 
-        val baseW = if (hasSixD) 0.82f else 0.65f
-        val fusedYaw = (baseW * basePose.yawDeg + (1f - baseW) * zYawSignal).coerceIn(-85f, 85f)
-        val fusedPitch = (baseW * basePose.pitchDeg + (1f - baseW) * zPitchSignal).coerceIn(-75f, 75f)
-        val srcTag = if (hasSixD) "SixDRepNet.onnx + facemesh-v2-v1.onnx" else "facemesh-v2-v1.onnx (468-Pt 3D)"
+        val fusedYaw = (0.65f * basePose.yawDeg + 0.35f * zYawSignal).coerceIn(-62f, 62f)
+        val fusedPitch = (0.65f * basePose.pitchDeg + 0.35f * zPitchSignal).coerceIn(-45f, 45f)
         val fusedPose = basePose.copy(
             yawDeg = fusedYaw,
             pitchDeg = fusedPitch,
-            poseSummaryLabel = "${if (hasSixD) "6DRepNet+Mesh" else "3D-FaceMesh"} (${"%.0f".format(fusedYaw)}°Y, ${"%.0f".format(fusedPitch)}°P, ${"%.0f".format(basePose.rollDeg)}°R)"
+            poseSummaryLabel = "3D-FaceMesh (${"%.0f".format(fusedYaw)}°Y, ${"%.0f".format(fusedPitch)}°P, ${"%.0f".format(basePose.rollDeg)}°R)"
         )
 
         val ctrl = buildControlPointsFrom468(pts, fusedPose)
@@ -372,7 +366,7 @@ object FaceMesh3DEngine {
             headPose = fusedPose,
             controlPoints31 = ctrl,
             usedFaceMeshOnnx = true,
-            sourceLabel = srcTag
+            sourceLabel = "facemesh-v2-v1.onnx (468-Pt 3D)"
         )
     }
 

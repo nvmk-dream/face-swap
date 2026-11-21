@@ -42,7 +42,6 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
@@ -58,8 +57,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
@@ -151,7 +148,6 @@ fun InpaintPage(
     onNegativePromptChanged: (String) -> Unit = {},
     onResetNegativePrompt: () -> Unit = {},
     onFastModeChanged: (Boolean) -> Unit,
-    onTurboModeChanged: (Boolean) -> Unit = {},
     onStrengthChanged: (Float) -> Unit = {},
     onCfgScaleChanged: (Float) -> Unit = {},
     onDepthGuardChanged: (Boolean) -> Unit = {},
@@ -176,7 +172,6 @@ fun InpaintPage(
     var showOriginalCompare by remember { mutableStateOf(false) }
     var showPositivePromptScreen by remember { mutableStateOf(false) }
     var showNegativePromptScreen by remember { mutableStateOf(false) }
-    var showTuningGuideDialog by remember { mutableStateOf(false) }
 
     val frostedCardBg = Color(0xD9FFFFFF)
     val frostedBorderColor = Color(0x99FFFFFF)
@@ -666,17 +661,46 @@ fun InpaintPage(
             }
 
             // Diffusion Tuning Card (Strength 1..10 & CFG 1..15) directly above Prompt
-            InpaintDiffusionTuningCard(
-                inpaintStrength = uiState.inpaintStrength,
-                inpaintCfgScale = uiState.inpaintCfgScale,
-                onStrengthChanged = onStrengthChanged,
-                onCfgScaleChanged = onCfgScaleChanged,
-                onOpenGuidePopup = { showTuningGuideDialog = true },
-                frostedCardBg = frostedCardBg,
-                frostedBorderColor = frostedBorderColor,
-                darkSlate = darkSlate,
-                mutedSlate = mutedSlate
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(frostedCardBg)
+                    .border(1.2.dp, frostedBorderColor, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .testTag("inpaint_tuning_card"),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val strengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
+                CleanTuningSliderRow(
+                    label = "Strength",
+                    value = strengthDisplay,
+                    valueRange = 1.0f..10.0f,
+                    steps = 17,
+                    onValueChange = { sliderVal ->
+                        val snapped = (sliderVal * 2f).roundToInt() / 2f
+                        onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
+                    },
+                    onResetDefault = { onStrengthChanged(0.70f) },
+                    sliderTag = "inpaint_strength_slider",
+                    valueTag = "inpaint_strength_value",
+                    labelColor = darkSlate
+                )
+                CleanTuningSliderRow(
+                    label = "CFG",
+                    value = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f),
+                    valueRange = 1.0f..15.0f,
+                    steps = 27,
+                    onValueChange = { sliderVal ->
+                        val snapped = (sliderVal * 2f).roundToInt() / 2f
+                        onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
+                    },
+                    onResetDefault = { onCfgScaleChanged(7.0f) },
+                    sliderTag = "inpaint_cfg_slider",
+                    valueTag = "inpaint_cfg_value",
+                    labelColor = darkSlate
+                )
+            }
 
             // Prompt Header Row: "Prompt" left | "Fast Mode" + Switch right
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -696,24 +720,6 @@ fun InpaintPage(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FilterChip(
-                            selected = uiState.inpaintTurboMode,
-                            onClick = { onTurboModeChanged(!uiState.inpaintTurboMode) },
-                            label = {
-                                Text(
-                                    text = if (uiState.inpaintTurboMode) "⚡ Turbo ON" else "⚡ Turbo",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Color(0xFFD97706),
-                                selectedLabelColor = Color.White,
-                                containerColor = Color(0xFFF1F5F9),
-                                labelColor = darkSlate
-                            ),
-                            modifier = Modifier.testTag("inpaint_turbo_mode_chip")
-                        )
                         Text(
                             text = "Fast Mode",
                             color = darkSlate,
@@ -1267,22 +1273,6 @@ fun InpaintPage(
                 }
                 showNegativePromptScreen = false
             }
-        )
-    }
-
-    if (showTuningGuideDialog) {
-        val currentStrengthDisplay = (uiState.inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
-        val currentCfg = uiState.inpaintCfgScale.coerceIn(1.0f, 15.0f)
-        InpaintTuningGuideDialog(
-            currentStrengthDisplay = currentStrengthDisplay,
-            currentCfg = currentCfg,
-            isTurboMode = uiState.inpaintTurboMode,
-            onApplyPreset = { strengthDisplayVal, cfgVal ->
-                onStrengthChanged((strengthDisplayVal / 10f).coerceIn(0.10f, 1.00f))
-                onCfgScaleChanged(cfgVal.coerceIn(1.0f, 15.0f))
-                showTuningGuideDialog = false
-            },
-            onDismiss = { showTuningGuideDialog = false }
         )
     }
 }
@@ -1870,438 +1860,6 @@ private fun CleanTuningSliderRow(
                 .clickable(onClick = onResetDefault)
                 .testTag(valueTag)
         )
-    }
-}
-
-private data class InpaintTuningPreset(
-    val title: String,
-    val subtitleTamil: String,
-    val strengthDisplay: Float,
-    val cfgScale: Float,
-    val tag: String
-)
-
-private val INPAINT_TUNING_PRESETS = listOf(
-    InpaintTuningPreset(
-        title = "Subtle / Natural (5.0 / 6.0)",
-        subtitleTamil = "சிறிய மாற்றம் & இயல்பான blend — Original texture அதிகம் பாதுகாக்கப்படும்.",
-        strengthDisplay = 5.0f,
-        cfgScale = 6.0f,
-        tag = "preset_subtle"
-    ),
-    InpaintTuningPreset(
-        title = "Balanced Default (7.0 / 7.0)",
-        subtitleTamil = "சிறந்த சமநிலை — Dress/Object edit தெளிவாகவும் natural-ஆகவும் வரும்.",
-        strengthDisplay = 7.0f,
-        cfgScale = 7.0f,
-        tag = "preset_balanced"
-    ),
-    InpaintTuningPreset(
-        title = "Strong Change (9.0 / 9.5)",
-        subtitleTamil = "முழுமையான புதிய ஆடை/பொருள் — Strict prompt follow & high detail.",
-        strengthDisplay = 9.0f,
-        cfgScale = 9.5f,
-        tag = "preset_strong"
-    ),
-    InpaintTuningPreset(
-        title = "⚡ Turbo / LCM Fast (7.5 / 2.0)",
-        subtitleTamil = "Turbo (4-step LCM) mode-க்கு மட்டும்: குறைந்த CFG-ல் வேகமான தெளிவான output.",
-        strengthDisplay = 7.5f,
-        cfgScale = 2.0f,
-        tag = "preset_turbo"
-    )
-)
-
-@Composable
-internal fun InpaintDiffusionTuningCard(
-    inpaintStrength: Float,
-    inpaintCfgScale: Float,
-    onStrengthChanged: (Float) -> Unit,
-    onCfgScaleChanged: (Float) -> Unit,
-    onOpenGuidePopup: () -> Unit,
-    frostedCardBg: Color = Color(0xD9FFFFFF),
-    frostedBorderColor: Color = Color(0x99FFFFFF),
-    darkSlate: Color = Color(0xFF0F172A),
-    mutedSlate: Color = Color(0xFF475569)
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(frostedCardBg)
-            .border(1.2.dp, frostedBorderColor, RoundedCornerShape(16.dp))
-            .padding(horizontal = 14.dp, vertical = 8.dp)
-            .testTag("inpaint_tuning_card"),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column {
-                Text(
-                    text = "Diffusion Tuning",
-                    color = darkSlate,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.5.sp
-                )
-                Text(
-                    text = "Tap value to reset default • User manual control",
-                    color = mutedSlate,
-                    fontSize = 10.5.sp
-                )
-            }
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = Color(0xFFE0F2FE),
-                border = BorderStroke(1.dp, Color(0xFF38BDF8)),
-                modifier = Modifier
-                    .heightIn(min = 36.dp)
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onOpenGuidePopup)
-                    .testTag("inpaint_tuning_guide_button")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lightbulb,
-                        contentDescription = "Strength and CFG Guide Presets",
-                        tint = Color(0xFF0284C7),
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = "Guide / Presets",
-                        color = Color(0xFF0369A1),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.5.sp
-                    )
-                }
-            }
-        }
-        val strengthDisplay = (inpaintStrength * 10f).coerceIn(1.0f, 10.0f)
-        CleanTuningSliderRow(
-            label = "Strength",
-            value = strengthDisplay,
-            valueRange = 1.0f..10.0f,
-            steps = 17,
-            onValueChange = { sliderVal ->
-                val snapped = (sliderVal * 2f).roundToInt() / 2f
-                onStrengthChanged((snapped / 10f).coerceIn(0.10f, 1.00f))
-            },
-            onResetDefault = { onStrengthChanged(0.70f) },
-            sliderTag = "inpaint_strength_slider",
-            valueTag = "inpaint_strength_value",
-            labelColor = darkSlate
-        )
-        CleanTuningSliderRow(
-            label = "CFG",
-            value = inpaintCfgScale.coerceIn(1.0f, 15.0f),
-            valueRange = 1.0f..15.0f,
-            steps = 27,
-            onValueChange = { sliderVal ->
-                val snapped = (sliderVal * 2f).roundToInt() / 2f
-                onCfgScaleChanged(snapped.coerceIn(1.0f, 15.0f))
-            },
-            onResetDefault = { onCfgScaleChanged(7.0f) },
-            sliderTag = "inpaint_cfg_slider",
-            valueTag = "inpaint_cfg_value",
-            labelColor = darkSlate
-        )
-    }
-}
-
-@Composable
-internal fun InpaintTuningGuideDialog(
-    currentStrengthDisplay: Float,
-    currentCfg: Float,
-    isTurboMode: Boolean,
-    onApplyPreset: (strengthDisplay: Float, cfgScale: Float) -> Unit,
-    onDismiss: () -> Unit
-) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 20.dp)
-                .widthIn(max = 560.dp)
-                .heightIn(max = 680.dp)
-                .testTag("inpaint_tuning_guide_dialog"),
-            shape = RoundedCornerShape(22.dp),
-            color = Color(0xFFF8FAFC),
-            border = BorderStroke(1.4.dp, Color(0xFF38BDF8))
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lightbulb,
-                            contentDescription = "Guide and Presets",
-                            tint = Color(0xFF0284C7),
-                            modifier = Modifier.size(22.dp)
-                        )
-                        Column {
-                            Text(
-                                text = "Strength & CFG Guide • Presets",
-                                color = Color(0xFF0F172A),
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 16.sp
-                            )
-                            Text(
-                                text = "தமிழ் + English வழிகாட்டி & 1-Tap Presets",
-                                color = Color(0xFF0369A1),
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 11.5.sp
-                            )
-                        }
-                    }
-                    Surface(
-                        shape = CircleShape,
-                        color = Color(0xFFE2E8F0),
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .clickable(onClick = onDismiss)
-                            .testTag("inpaint_tuning_guide_close_icon")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Close Guide",
-                                tint = Color(0xFF0F172A),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Current Live Values Banner
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFFE0F2FE))
-                        .border(1.dp, Color(0xFF7DD3FC), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Active: Strength ${String.format(Locale.US, "%.1f", currentStrengthDisplay)}  |  CFG ${String.format(Locale.US, "%.1f", currentCfg)}",
-                        color = Color(0xFF0C4A6E),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.5.sp
-                    )
-                    if (isTurboMode) {
-                        Text(
-                            text = "⚡ Turbo ON",
-                            color = Color(0xFFB45309),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.5.sp
-                        )
-                    }
-                }
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // Highlight Box: Strength 7.0 & CFG 7.0 + 5.0 to 10.0 Output Behavior
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFFECFDF5))
-                            .border(1.2.dp, Color(0xFF34D399), RoundedCornerShape(14.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "⭐ Strength 7.0 & CFG 7.0 (மற்றும் 5.0 → 10.0) வைத்தால் Output எப்படி மாறும்?",
-                            color = Color(0xFF065F46),
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 13.sp
-                        )
-                        Text(
-                            text = "• Strength 7.0 + CFG 7.0 (Sweet Spot / Default): Masked இடத்தில் 70% புதிதாக உருவாகி 30% original shape/lighting பாதுகாக்கப்படும். Prompt தெளிவாகப் பின்பற்றப்பட்டும், தோல்/ஆடை இயல்புத்தன்மை கெடாமலும் மிகச் சிறந்த balanced output கிடைக்கும்.",
-                            color = Color(0xFF064E3B),
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
-                        )
-                        Text(
-                            text = "• Strength 5.0 → 10.0 மாற்றம்: 5.0-ல் பழைய படம் 50% தக்கவைக்கப்பட்டு மென்மையான retouch வரும்; 7.0-ல் natural edit; 8.5–10.0-ல் masked பகுதி 85%–100% முழுமையாகப் புதிதாக மாறும் (10.0-ல் maximum change, ஆனால் ஓரங்களில் சிறிய seam வரலாம்).",
-                            color = Color(0xFF064E3B),
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
-                        )
-                        Text(
-                            text = "• CFG 5.0 → 10.0 மாற்றம்: 5.0–6.0-ல் colors மிகவும் soft & natural-ஆக இருக்கும்; 7.0-ல் crisp balance; 8.5–9.5-ல் prompt details கூர்மையாகத் தெரியும்; 10.0+ வைத்தால் contrast அதிகரித்து colors oversaturated/harsh ஆகலாம்.",
-                            color = Color(0xFF064E3B),
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
-                        )
-                    }
-
-                    // Strength 5.0..10.0 Breakdown Card
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color.White)
-                            .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(14.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = "1. Strength (Denoise Power: 1.0 – 10.0)",
-                            color = Color(0xFF0F172A),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
-                        )
-                        Text(
-                            text = "Masked பகுதியில் பழைய image-ஐ எவ்வளவு percent மாற்றி புதிதாக வரைய வேண்டும் என்பது:",
-                            color = Color(0xFF475569),
-                            fontSize = 11.5.sp
-                        )
-                        Text(
-                            text = "• 5.0 (50%): Original texture & lighting 50% காக்கப்படும் — Light touch-up, color/fabric tweak-க்கு சிறந்தது.\n" +
-                                "• 6.0–7.0 (60–70% • Default 7.0): Natural blend + தெளிவான புதிய detail; உடல்/பின்னணி structure சிதையாது.\n" +
-                                "• 8.0–9.0 (80–90%): Dress style அல்லது பொருளை முழுமையாக மாற்ற உதவும்.\n" +
-                                "• 10.0 (100%): Original pixels முற்றிலும் அழிக்கப்பட்டு 100% புதிய AI generation உருவாகும்.",
-                            color = Color(0xFF1E293B),
-                            fontSize = 11.8.sp,
-                            lineHeight = 17.sp
-                        )
-                    }
-
-                    // CFG 5.0..10.0 Breakdown Card
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color.White)
-                            .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(14.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = "2. CFG Scale (Prompt Strictness: 1.0 – 15.0)",
-                            color = Color(0xFF0F172A),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
-                        )
-                        Text(
-                            text = "நீங்கள் எழுதிய Positive/Negative Prompt-ஐ AI எவ்வளவு கண்டிப்பாகப் பின்பற்ற வேண்டும்:",
-                            color = Color(0xFF475569),
-                            fontSize = 11.5.sp
-                        )
-                        Text(
-                            text = "• 1.5–3.0: ⚡ Turbo / LCM 4-step mode-க்கு மட்டும் (Normal SD 1.5-ல் soft/faded வரும்).\n" +
-                                "• 5.0–6.0: மென்மையான prompt follow — Natural skin tone & smooth edges.\n" +
-                                "• 7.0 (Default): Standard Photorealistic Balance — Prompt + Realism இரண்டும் சமமாக இருக்கும்.\n" +
-                                "• 8.0–9.5: Prompt வார்த்தைகளைக் கூர்மையாகப் பின்பற்றும், texture/contrast அதிகமாகும்.\n" +
-                                "• 10.0–15.0: Very strict — Color burn, heavy contrast அல்லது artificial look வர வாய்ப்புண்டு.",
-                            color = Color(0xFF1E293B),
-                            fontSize = 11.8.sp,
-                            lineHeight = 17.sp
-                        )
-                    }
-
-                    // 1-Tap Quick Presets
-                    Text(
-                        text = "⚡ 1-Tap Presets (தட்டினால் Sliders auto-set ஆகும்; பிறகும் manual-ஆக மாற்றலாம்)",
-                        color = Color(0xFF0F172A),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.5.sp
-                    )
-                    INPAINT_TUNING_PRESETS.forEach { preset ->
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color.White,
-                            border = BorderStroke(1.2.dp, Color(0xFF38BDF8)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { onApplyPreset(preset.strengthDisplay, preset.cfgScale) }
-                                .testTag("inpaint_${preset.tag}_btn")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = preset.title,
-                                        color = Color(0xFF0369A1),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp
-                                    )
-                                    Text(
-                                        text = preset.subtitleTamil,
-                                        color = Color(0xFF475569),
-                                        fontSize = 11.5.sp,
-                                        lineHeight = 15.sp
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Apply",
-                                    color = Color(0xFF0284C7),
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .testTag("inpaint_tuning_guide_keep_manual_btn"),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF0F172A),
-                        contentColor = Color.White
-                    )
-                ) {
-                    Text(
-                        text = "Close (Manual Control தொடரவும்)",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                }
-            }
-        }
     }
 }
 
