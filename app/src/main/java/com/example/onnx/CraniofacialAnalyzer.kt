@@ -48,7 +48,11 @@ data class OptionDCraniofacialFitRatios(
     val sourceForeheadRatio: Float = 0.82f,
     val sourceJawToTargetJawScale: Float = 1.0f,
     val sourceChinToTargetChinScale: Float = 1.0f,
-    val klArcNeckBlendStrength: Float = 0.28f
+    val klArcNeckBlendStrength: Float = 0.28f,
+    val upperJawMaxillaScale: Float = 1.0f,    // Region D: Upper jaw / maxilla width ratio
+    val jawBoneBigonialScale: Float = 1.0f,    // Region B: Bigonial jaw bone width ratio
+    val lowerJawBodyScale: Float = 1.0f,       // Region C: Lower jaw mandibular body width ratio
+    val mandibularLengthScale: Float = 1.0f    // Region A: Ear -> Gonion -> Chin length ratio
 )
 
 data class CraniofacialPairReport(
@@ -61,7 +65,8 @@ data class CraniofacialPairReport(
     val poseDeltaSummary: String,
     val reactionSyncSummary: String,
     val diagnosticWarnings: List<String>,
-    val optionDFitRatios: OptionDCraniofacialFitRatios
+    val optionDFitRatios: OptionDCraniofacialFitRatios,
+    val mandibularSummary: String = "D UpperJaw ×1.00 • B JawBone ×1.00 • C LowerJaw ×1.00 • A Mandible ×1.00"
 )
 
 object CraniofacialAnalyzer {
@@ -71,6 +76,7 @@ object CraniofacialAnalyzer {
         val lm5 = face.landmarks5
         val pts106 = recon.landmarks106
         val verts3D = recon.vertices3D
+        val contour = face.faceContourPoints
 
         val lEye = lm5.getOrNull(0) ?: PointF(92f, 102f)
         val rEye = lm5.getOrNull(1) ?: PointF(162f, 102f)
@@ -86,10 +92,42 @@ object CraniofacialAnalyzer {
         val mouthMidX = (lMouth.x + rMouth.x) * 0.5f
         val mouthMidY = (lMouth.y + rMouth.y) * 0.5f
 
+        val isSyntheticFullImageBox = bitmap != null &&
+            face.boundingBox.left <= 2f &&
+            face.boundingBox.top <= 2f &&
+            face.boundingBox.width() >= bitmap.width * 0.90f &&
+            face.boundingBox.height() >= bitmap.height * 0.90f
+
         fun dist2D(i: Int, j: Int, fallback: Float): Float {
             val a = pts106.getOrNull(i) ?: return fallback
             val b = pts106.getOrNull(j) ?: return fallback
             return hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()).toFloat().coerceAtLeast(8f)
+        }
+
+        fun distContourFrac(fracFromTop: Float, fallback: Float): Float {
+            if (contour.size < 24) return fallback
+            // ML Kit / face contour typically runs clockwise or symmetric along the perimeter;
+            // measure widest horizontal chord near target vertical slice [0.0..1.0].
+            var minY = Float.MAX_VALUE
+            var maxY = -Float.MAX_VALUE
+            for (pt in contour) {
+                if (pt.y < minY) minY = pt.y
+                if (pt.y > maxY) maxY = pt.y
+            }
+            val height = (maxY - minY).coerceAtLeast(interpupillaryO)
+            val targetY = minY + height * fracFromTop.coerceIn(0.05f, 0.95f)
+            val tol = height * 0.12f
+            var minX = Float.MAX_VALUE
+            var maxX = -Float.MAX_VALUE
+            var hits = 0
+            for (pt in contour) {
+                if (abs(pt.y - targetY) <= tol) {
+                    if (pt.x < minX) minX = pt.x
+                    if (pt.x > maxX) maxX = pt.x
+                    hits++
+                }
+            }
+            return if (hits >= 2 && maxX > minX + 8f) (maxX - minX) else fallback
         }
 
         fun dist3D(i: Int, j: Int, fallback: Float): Float {
@@ -101,24 +139,37 @@ object CraniofacialAnalyzer {
             return kotlin.math.sqrt(dx * dx + dy * dy + dz * dz).toFloat().coerceAtLeast(8f)
         }
 
-        // Bizygomatic width (1-2 / B): upper cheek contour landmarks [2]..[30], modulated by bounding box if non-trivial
+        // Bizygomatic width (1-2 / B): combine upper cheek landmarks [2]..[30], real oval contour, and non-synthetic box
         val landmarkCheekW = dist2D(2, 30, interpupillaryO * 2.04f)
-        val boxCheekW = face.boundingBox.width().takeIf { it > interpupillaryO * 1.4f } ?: landmarkCheekW
-        val bizygomaticB = (landmarkCheekW * 0.68f + boxCheekW * 0.32f).coerceIn(interpupillaryO * 1.55f, interpupillaryO * 2.85f)
+        val contourCheekW = distContourFrac(0.52f, landmarkCheekW)
+        val rawBoxCheekW = if (!isSyntheticFullImageBox &&
+            face.boundingBox.width() in (interpupillaryO * 1.45f)..(interpupillaryO * 3.10f)
+        ) {
+            face.boundingBox.width()
+        } else {
+            contourCheekW
+        }
+        val bizygomaticB = (landmarkCheekW * 0.38f + contourCheekW * 0.38f + rawBoxCheekW * 0.24f)
+            .coerceIn(interpupillaryO * 1.55f, interpupillaryO * 2.95f)
 
-        // Square Jaw width (6-7 / C): bigonial landmarks [7]..[25] scaled to realistic anatomical ~0.70 envelope
-        val rawGonialSpan = dist2D(7, 25, bizygomaticB * 0.72f)
-        val bigonialJawC = (rawGonialSpan * 0.88f).coerceIn(bizygomaticB * 0.54f, bizygomaticB * 0.92f)
-        val squareJawRatio = (bigonialJawC / bizygomaticB).coerceIn(0.54f, 0.92f)
+        // Square Jaw / Jaw Bone width (6-7 / B): bigonial landmarks [7]..[25] blended with contour lower-mid chord
+        val landmarkGonialSpan = dist2D(7, 25, bizygomaticB * 0.72f)
+        val contourGonialSpan = distContourFrac(0.73f, landmarkGonialSpan)
+        val bigonialJawC = ((landmarkGonialSpan * 0.42f + contourGonialSpan * 0.58f) * 0.90f)
+            .coerceIn(bizygomaticB * 0.52f, bizygomaticB * 0.95f)
+        val squareJawRatio = (bigonialJawC / bizygomaticB).coerceIn(0.52f, 0.95f)
 
-        // Lower Chin width (Diagram 1 0.40): landmarks [12]..[20] near menton curve
-        val lowerChinSpan = dist2D(12, 20, bizygomaticB * 0.41f)
-        val lowerJawRatio = (lowerChinSpan / bizygomaticB).coerceIn(0.28f, 0.62f)
+        // Lower Jaw / Chin width (Diagram 1 0.40 & Diagram 3 C): landmarks [12]..[20] blended with lower contour
+        val landmarkChinSpan = dist2D(12, 20, bizygomaticB * 0.41f)
+        val contourChinSpan = distContourFrac(0.87f, landmarkChinSpan)
+        val lowerChinSpan = (landmarkChinSpan * 0.40f + contourChinSpan * 0.60f)
+        val lowerJawRatio = (lowerChinSpan / bizygomaticB).coerceIn(0.28f, 0.68f)
 
         // Forehead width (Diagram 3 8-9): temple boundary [0]..[32] slightly narrower than cheekbones
-        val foreheadPx = (dist2D(0, 32, bizygomaticB * 0.86f) * 0.85f)
-            .coerceIn(bizygomaticB * 0.66f, bizygomaticB * 0.96f)
-        val foreheadWidthRatio = (foreheadPx / bizygomaticB).coerceIn(0.66f, 0.96f)
+        val contourForeheadW = distContourFrac(0.24f, bizygomaticB * 0.84f)
+        val foreheadPx = (dist2D(0, 32, bizygomaticB * 0.86f) * 0.45f + contourForeheadW * 0.55f)
+            .coerceIn(bizygomaticB * 0.64f, bizygomaticB * 0.98f)
+        val foreheadWidthRatio = (foreheadPx / bizygomaticB).coerceIn(0.64f, 0.98f)
 
         // Vertical thirds (Diagram 1: Top 1 : Mid 1 : Bottom 0.8~1) & Diagram 2 D, E
         val browMidY = (
@@ -132,7 +183,10 @@ object CraniofacialAnalyzer {
         val lowerThirdPx = hypot((chinTipPt.x - subnasalePt.x).toDouble(), (chinTipPt.y - subnasalePt.y).toDouble())
             .toFloat()
             .coerceAtLeast(interpupillaryO * 0.42f)
-        val upperThirdPx = if (face.boundingBox.height() > (midThirdPx + lowerThirdPx) * 1.15f) {
+        val upperThirdPx = if (!isSyntheticFullImageBox &&
+            face.boundingBox.height() > (midThirdPx + lowerThirdPx) * 1.15f &&
+            face.boundingBox.height() < interpupillaryO * 4.5f
+        ) {
             (face.boundingBox.height() - midThirdPx - lowerThirdPx).coerceIn(midThirdPx * 0.72f, midThirdPx * 1.32f)
         } else {
             midThirdPx
@@ -160,7 +214,6 @@ object CraniofacialAnalyzer {
         val chinMouthPx = hypot((chinTipPt.x - mouthMidX).toDouble(), (chinTipPt.y - mouthMidY).toDouble()).toFloat()
         val chinToMouthRatio = (chinMouthPx / faceLengthD).coerceIn(0.10f, 0.34f)
 
-        // Touch bitmap bounds safely only as optional sanity clamp
         val _hasBitmap = bitmap != null && !bitmap.isRecycled
 
         return CraniofacialProfile(
@@ -186,6 +239,156 @@ object CraniofacialAnalyzer {
             rollDeg = recon.headPose.rollDeg,
             mouthOpenRatio = recon.mouthOpenRatio,
             smileCurvatureCoeff = recon.smileCurvatureCoeff
+        )
+    }
+
+    /**
+     * Measures real pixel-level mandibular contours across aligned 512×512 Source & Target crops
+     * for all 4 jaw/mandible parameters requested:
+     *  - D: Upper jaw / maxilla width (`nose.y + eyeDist * 0.16`)
+     *  - B: Bigonial jaw bone width (`mouthMidY + eyeDist * 0.04`)
+     *  - C: Lower jaw mandibular body width (`mouthMidY + eyeDist * 0.28`)
+     *  - A: Mandibular length (`Ear/Gonion -> Menton chin depth` + vertical chin drop)
+     */
+    fun computeMandibularFitRatios512(
+        srcPx512: IntArray,
+        tgtPx512: IntArray,
+        geom512: FaceBlender.WarpedFaceGeometry,
+        baseRatios: OptionDCraniofacialFitRatios
+    ): OptionDCraniofacialFitRatios {
+        val size = 512
+        if (srcPx512.size < size * size || tgtPx512.size < size * size) return baseRatios
+
+        val eyeMidX = (geom512.leftEye.x + geom512.rightEye.x) * 0.5f
+        val mouthMidX = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
+        val mouthMidY = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
+        val centerX = (eyeMidX * 0.38f + geom512.nose.x * 0.32f + mouthMidX * 0.30f)
+        val eyeDist = geom512.eyeDist.coerceIn(72f, 240f)
+        val cx = centerX.toInt().coerceIn(28, size - 29)
+
+        data class SkinRef(val r: Float, val g: Float, val b: Float, val lum: Float)
+
+        fun sampleInnerCheekRef(px: IntArray): SkinRef {
+            val rx1 = (cx - (eyeDist * 0.36f).toInt()).coerceIn(16, size - 17)
+            val rx2 = (cx + (eyeDist * 0.36f).toInt()).coerceIn(16, size - 17)
+            val ry = geom512.nose.y.toInt().coerceIn(16, size - 17)
+            val c1 = px[ry * size + rx1]
+            val c2 = px[ry * size + rx2]
+            val r = (((c1 ushr 16) and 0xFF) + ((c2 ushr 16) and 0xFF)) * 0.5f
+            val g = (((c1 ushr 8) and 0xFF) + ((c2 ushr 8) and 0xFF)) * 0.5f
+            val b = ((c1 and 0xFF) + (c2 and 0xFF)) * 0.5f
+            val lum = 0.299f * r + 0.587f * g + 0.114f * b
+            return SkinRef(r, g, b, lum)
+        }
+
+        fun scanHorizontalSpan(px: IntArray, rowY: Int, minOffsetRatio: Float, maxOffsetRatio: Float): Float {
+            val ref = sampleInnerCheekRef(px)
+            if (ref.lum < 22f) return eyeDist * (minOffsetRatio + 0.35f)
+            val y = rowY.coerceIn(16, size - 17)
+            val minOff = (eyeDist * minOffsetRatio).toInt().coerceAtLeast(16)
+            val maxOff = (eyeDist * maxOffsetRatio).toInt().coerceAtLeast(minOff + 8)
+
+            fun scanDir(step: Int): Int {
+                var lastSkin = minOff
+                var missRun = 0
+                var d = minOff
+                while (d <= maxOff) {
+                    val xx = cx + step * d
+                    if (xx < 8 || xx >= size - 8) break
+                    val pc = px[y * size + xx]
+                    val r = ((pc ushr 16) and 0xFF).toFloat()
+                    val g = ((pc ushr 8) and 0xFF).toFloat()
+                    val b = (pc and 0xFF).toFloat()
+                    val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                    val diff = abs(r - ref.r) + abs(g - ref.g) + abs(b - ref.b)
+                    val isDarkHairOrBg = lum < 64f && ref.lum > 84f
+                    val isDeepJawCrease = lum < ref.lum * 0.58f && diff > 52f
+                    val isSkinLike = !isDarkHairOrBg && !isDeepJawCrease && diff < 126f && r >= b - 10f
+                    if (isSkinLike) {
+                        lastSkin = d
+                        missRun = 0
+                    } else {
+                        missRun++
+                        if (missRun >= 4) break
+                    }
+                    d++
+                }
+                return lastSkin
+            }
+            return (scanDir(-1) + scanDir(1)).toFloat()
+        }
+
+        val chinStartY = (mouthMidY + eyeDist * 0.14f).toInt().coerceIn(24, size - 48)
+        fun estimateChinDrop(px: IntArray): Float {
+            val ref = sampleInnerCheekRef(px)
+            if (ref.lum < 22f) return eyeDist * 0.52f
+            val xOffsets = intArrayOf(-((eyeDist * 0.10f).toInt()), 0, (eyeDist * 0.10f).toInt())
+            var accDepth = 0f
+            for (xo in xOffsets) {
+                val sampleX = (cx + xo).coerceIn(16, size - 17)
+                var depth = (eyeDist * 0.28f).toInt()
+                var missRun = 0
+                val maxDown = (eyeDist * 0.96f).toInt()
+                for (dy in depth..maxDown) {
+                    val yy = chinStartY + dy
+                    if (yy >= size - 10) break
+                    val pc = px[yy * size + sampleX]
+                    val r = ((pc ushr 16) and 0xFF).toFloat()
+                    val g = ((pc ushr 8) and 0xFF).toFloat()
+                    val b = (pc and 0xFF).toFloat()
+                    val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                    val diff = abs(r - ref.r) + abs(g - ref.g) + abs(b - ref.b)
+                    val isNeckShadowOrEdge = lum < ref.lum * 0.65f || diff > 118f
+                    if (!isNeckShadowOrEdge) {
+                        depth = dy
+                        missRun = 0
+                    } else {
+                        missRun++
+                        if (missRun >= 5) break
+                    }
+                }
+                accDepth += depth.toFloat()
+            }
+            return (accDepth / xOffsets.size.toFloat()).coerceAtLeast(eyeDist * 0.26f)
+        }
+
+        // Exact anatomical rows in 512x512 aligned crop for Diagram 3 (D, B, C, A)
+        val rowUpperJawD = (geom512.nose.y + eyeDist * 0.16f).toInt()
+        val rowJawBoneB = (mouthMidY + eyeDist * 0.04f).toInt()
+        val rowLowerJawC = (mouthMidY + eyeDist * 0.28f).toInt()
+
+        val srcSpanD = scanHorizontalSpan(srcPx512, rowUpperJawD, 0.52f, 1.46f)
+        val tgtSpanD = scanHorizontalSpan(tgtPx512, rowUpperJawD, 0.52f, 1.46f).coerceAtLeast(16f)
+
+        val srcSpanB = scanHorizontalSpan(srcPx512, rowJawBoneB, 0.44f, 1.42f)
+        val tgtSpanB = scanHorizontalSpan(tgtPx512, rowJawBoneB, 0.44f, 1.42f).coerceAtLeast(16f)
+
+        val srcSpanC = scanHorizontalSpan(srcPx512, rowLowerJawC, 0.30f, 1.32f)
+        val tgtSpanC = scanHorizontalSpan(tgtPx512, rowLowerJawC, 0.30f, 1.32f).coerceAtLeast(16f)
+
+        val srcChinA = estimateChinDrop(srcPx512)
+        val tgtChinA = estimateChinDrop(tgtPx512).coerceAtLeast(16f)
+
+        val srcDiagA = hypot((srcSpanB * 0.5f).toDouble(), srcChinA.toDouble()).toFloat()
+        val tgtDiagA = hypot((tgtSpanB * 0.5f).toDouble(), tgtChinA.toDouble()).toFloat().coerceAtLeast(16f)
+
+        val pixelScaleD = (srcSpanD / tgtSpanD).coerceIn(0.80f, 1.28f)
+        val pixelScaleB = (srcSpanB / tgtSpanB).coerceIn(0.78f, 1.32f)
+        val pixelScaleC = (srcSpanC / tgtSpanC).coerceIn(0.76f, 1.34f)
+        val pixelScaleA = ((srcChinA / tgtChinA) * 0.62f + (srcDiagA / tgtDiagA) * 0.38f).coerceIn(0.84f, 1.26f)
+
+        val finalD = (pixelScaleD * 0.76f + baseRatios.upperJawMaxillaScale * 0.24f).coerceIn(0.80f, 1.28f)
+        val finalB = (pixelScaleB * 0.76f + baseRatios.sourceJawToTargetJawScale * 0.24f).coerceIn(0.78f, 1.32f)
+        val finalC = (pixelScaleC * 0.76f + baseRatios.lowerJawBodyScale * 0.24f).coerceIn(0.76f, 1.34f)
+        val finalA = (pixelScaleA * 0.74f + baseRatios.sourceChinToTargetChinScale * 0.26f).coerceIn(0.84f, 1.26f)
+
+        return baseRatios.copy(
+            sourceJawToTargetJawScale = (finalB * 0.58f + finalC * 0.42f).coerceIn(0.78f, 1.32f),
+            sourceChinToTargetChinScale = finalA,
+            upperJawMaxillaScale = finalD,
+            jawBoneBigonialScale = finalB,
+            lowerJawBodyScale = finalC,
+            mandibularLengthScale = finalA
         )
     }
 
@@ -225,14 +428,18 @@ object CraniofacialAnalyzer {
             warnings += "மேல்/கீழ் கோணம் (Pitch Δ ${pitchDiff.roundToInt()}°) வேறுபாடு — நாடி (Chin) உயரத்தை மென்மையாகச் சரிசெய்கிறது."
         }
         if (jawDeltaPct > 10f) {
-            warnings += "தாடை அகல வேறுபாடு (${"%.0f".format(jawDeltaPct)}%) — Option D Source வடிவத்தை வைத்து K/L கீழ் ஓரம் மட்டும் கழுத்துடன் இணைக்கும்."
+            warnings += "தாடை அகல வேறுபாடு (${"%.0f".format(jawDeltaPct)}%) — Option D Source (D/B/C/A) வடிவத்தை வைத்து K/L கீழ் ஓரம் மட்டும் கழுத்துடன் இணைக்கும்."
         }
         if (klArcDelta > 0.16f) {
             warnings += "காது-நாடி வளைவு (K/L Arc Δ ${(klArcDelta * 100).roundToInt()}%) — கழுத்துப் பொருத்தத்திற்கு soft transition பயன்படுத்தப்படுகிறது."
         }
 
-        val srcToTgtJawScale = (src.squareJawRatio / tgt.squareJawRatio.coerceAtLeast(0.4f)).coerceIn(0.82f, 1.22f)
-        val srcToTgtChinScale = (src.lowerThirdRatio / tgt.lowerThirdRatio.coerceAtLeast(0.4f)).coerceIn(0.84f, 1.18f)
+        val baseUpperJawD = (src.bizygomaticWidthB / src.interpupillaryDistO) /
+            (tgt.bizygomaticWidthB / tgt.interpupillaryDistO).coerceAtLeast(0.5f)
+        val srcToTgtJawScale = (src.squareJawRatio / tgt.squareJawRatio.coerceAtLeast(0.4f)).coerceIn(0.80f, 1.26f)
+        val srcToTgtLowerJawC = (src.lowerJawRatio / tgt.lowerJawRatio.coerceAtLeast(0.25f)).coerceIn(0.78f, 1.28f)
+        val srcToTgtChinScale = (src.lowerThirdRatio / tgt.lowerThirdRatio.coerceAtLeast(0.4f)).coerceIn(0.84f, 1.22f)
+        val clampedD = baseUpperJawD.coerceIn(0.82f, 1.24f)
         val klNeckBlend = (0.24f + klArcDelta * 1.15f).coerceIn(0.24f, 0.58f)
 
         val optionDRatios = OptionDCraniofacialFitRatios(
@@ -242,7 +449,11 @@ object CraniofacialAnalyzer {
             sourceForeheadRatio = src.foreheadWidthRatio,
             sourceJawToTargetJawScale = srcToTgtJawScale,
             sourceChinToTargetChinScale = srcToTgtChinScale,
-            klArcNeckBlendStrength = klNeckBlend
+            klArcNeckBlendStrength = klNeckBlend,
+            upperJawMaxillaScale = clampedD,
+            jawBoneBigonialScale = srcToTgtJawScale,
+            lowerJawBodyScale = srcToTgtLowerJawC,
+            mandibularLengthScale = srcToTgtChinScale
         )
 
         val jawSummary = "Source 1 : ${"%.2f".format(src.squareJawRatio)} : ${"%.2f".format(src.lowerJawRatio)} " +
@@ -254,6 +465,8 @@ object CraniofacialAnalyzer {
         val poseSummary = "Yaw Δ ${"%.0f".format(yawDiff)}° • Pitch Δ ${"%.0f".format(pitchDiff)}° • Roll Δ ${"%.0f".format(rollDiff)}°"
         val reactionSummary = "Target Reaction Sync • Mouth Open ${"%.2f".format(tgt.mouthOpenRatio)} • " +
             "Smile ${"%.2f".format(tgt.smileCurvatureCoeff)}"
+        val mandibularSummary = "D UpperJaw ×${"%.2f".format(clampedD)} • B JawBone ×${"%.2f".format(srcToTgtJawScale)} • " +
+            "C LowerJaw ×${"%.2f".format(srcToTgtLowerJawC)} • A Mandible ×${"%.2f".format(srcToTgtChinScale)}"
 
         return CraniofacialPairReport(
             sourceProfile = src,
@@ -265,7 +478,8 @@ object CraniofacialAnalyzer {
             poseDeltaSummary = poseSummary,
             reactionSyncSummary = reactionSummary,
             diagnosticWarnings = warnings,
-            optionDFitRatios = optionDRatios
+            optionDFitRatios = optionDRatios,
+            mandibularSummary = mandibularSummary
         )
     }
 }

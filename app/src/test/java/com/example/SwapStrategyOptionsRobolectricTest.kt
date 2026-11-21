@@ -313,4 +313,76 @@ class SwapStrategyOptionsRobolectricTest {
         assertEquals(SkinToneSourceMode.TARGET_SCENE, vm.uiState.value.skinToneMode)
         assertEquals(FaceReactionSourceMode.TARGET_REACTION, vm.uiState.value.faceReactionMode)
     }
+
+    @Test
+    fun `option D measures D B C A mandibular ratios and expands wider source jaw outward without shrinking chin`() {
+        val geom512 = FaceBlender.computeWarpedGeometry(
+            forwardMatrix128 = null,
+            targetLandmarks5 = null,
+            scale = 4.0f
+        )
+        val total = 512 * 512
+        val srcPx512 = IntArray(total) { Color.rgb(25, 25, 35) }
+        val tgtPx512 = IntArray(total) { Color.rgb(25, 25, 35) }
+
+        val eyeMidX = (geom512.leftEye.x + geom512.rightEye.x) * 0.5f
+        val eyeMidY = (geom512.leftEye.y + geom512.rightEye.y) * 0.5f
+        val mouthMidX = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
+        val mouthMidY = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
+        val cx = (eyeMidX * 0.38f + geom512.nose.x * 0.32f + mouthMidX * 0.30f)
+        val cy = (eyeMidY * 0.32f + geom512.nose.y * 0.30f + mouthMidY * 0.38f)
+
+        // Source = wide U-shaped jaw (full D/B/C/A); Target = narrow V-shaped chin
+        for (y in 0 until 512) {
+            for (x in 0 until 512) {
+                val dx = abs(x - cx)
+                val dy = y - cy
+                // Target narrow V taper below center
+                val tgtHalfW = if (dy < 0f) 130f else (130f * (1f - (dy / 225f).coerceIn(0f, 0.72f))).coerceAtLeast(36f)
+                if (dy in -145f..155f && dx <= tgtHalfW) {
+                    tgtPx512[y * 512 + x] = Color.rgb(218, 174, 146)
+                }
+                // Source wide rounded U-jaw (wider at UpperJaw D, JawBone B, LowerJaw C, longer Mandible A)
+                val srcHalfW = if (dy < 0f) 156f else (156f * (1f - 0.34f * (dy / 210f).coerceIn(0f, 1f))).coerceAtLeast(88f)
+                if (dy in -155f..190f && dx <= srcHalfW) {
+                    srcPx512[y * 512 + x] = Color.rgb(228, 184, 156)
+                }
+            }
+        }
+
+        val (srcBmp, srcFace) = makePortrait(faceRadiusX = 110f, faceRadiusY = 132f)
+        val (tgtBmp, tgtFace) = makePortrait(faceRadiusX = 82f, faceRadiusY = 102f)
+        val baseReport = CraniofacialAnalyzer.analyzePair(srcFace, srcBmp, tgtFace, tgtBmp)
+        assertTrue(baseReport.mandibularSummary.contains("D UpperJaw"))
+        assertTrue(baseReport.mandibularSummary.contains("C LowerJaw"))
+
+        val ratios = CraniofacialAnalyzer.computeMandibularFitRatios512(
+            srcPx512 = srcPx512,
+            tgtPx512 = tgtPx512,
+            geom512 = geom512,
+            baseRatios = baseReport.optionDFitRatios
+        )
+        assertTrue("Expected D UpperJaw > 1.05, got ${ratios.upperJawMaxillaScale}", ratios.upperJawMaxillaScale > 1.05f)
+        assertTrue("Expected B JawBone > 1.08, got ${ratios.jawBoneBigonialScale}", ratios.jawBoneBigonialScale > 1.08f)
+        assertTrue("Expected C LowerJaw > 1.08, got ${ratios.lowerJawBodyScale}", ratios.lowerJawBodyScale > 1.08f)
+        assertTrue("Expected A Mandible > 1.04, got ${ratios.mandibularLengthScale}", ratios.mandibularLengthScale > 1.04f)
+
+        // Verify applyOptionDCraniofacialShapeWarp512 pushes jaw skin outward onto narrow perimeter at Row B (Jaw Bone) and Row C (Lower Jaw)
+        val warpPx = tgtPx512.copyOf()
+        val cornerBefore = warpPx[4 * 512 + 4]
+        val lowerJawY = (mouthMidY + geom512.eyeDist * 0.28f).toInt().coerceIn(32, 480)
+        // Target narrow V-jaw half-width at lowerJawY is ~63px -> test at cx + 76px (13px outside target contour)
+        val testX = (cx + 76f).toInt().coerceIn(32, 480)
+        val beforeOuterR = (warpPx[lowerJawY * 512 + testX] ushr 16) and 0xFF
+        assertEquals(25, beforeOuterR)
+
+        FaceBlender.applyOptionDCraniofacialShapeWarp512(
+            px512 = warpPx,
+            geom512 = geom512,
+            fitRatios = ratios
+        )
+        val afterOuterR = (warpPx[lowerJawY * 512 + testX] ushr 16) and 0xFF
+        assertTrue("Expected Option D warp to expand lower jaw C outward (red > 150), got $afterOuterR", afterOuterR > 150)
+        assertEquals(cornerBefore, warpPx[4 * 512 + 4])
+    }
 }

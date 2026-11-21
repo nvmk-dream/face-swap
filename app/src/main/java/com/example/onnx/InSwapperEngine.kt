@@ -552,7 +552,9 @@ object InSwapperEngine {
                         },
                         ageMatchPlan = targetAgePlans.getOrNull(idx),
                         faceReagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null,
-                        swapStrategyOption = swapStrategyOption
+                        swapStrategyOption = swapStrategyOption,
+                        sourceDetectedFace = sourceFace,
+                        targetDetectedFace = targetFace
                     )
 
                     rawSwappedCrop.recycle()

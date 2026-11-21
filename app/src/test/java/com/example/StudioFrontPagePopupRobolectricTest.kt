@@ -160,6 +160,7 @@ class StudioFrontPagePopupRobolectricTest {
         }
         composeTestRule.onNodeWithTag("craniofacial_analysis_card").assertExists()
         composeTestRule.onNodeWithText("76% Match").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("craniofacial_mandibular_summary").assertExists()
         composeTestRule.onNodeWithTag("craniofacial_warning_box").assertExists()
     }
 }

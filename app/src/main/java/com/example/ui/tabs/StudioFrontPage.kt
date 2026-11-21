@@ -2256,6 +2256,13 @@ internal fun CraniofacialAnalysisDiagnosticCard(
                     color = Color(0xFF475569),
                     fontSize = 9.5.sp
                 )
+                Text(
+                    text = report.mandibularSummary,
+                    color = Color(0xFF0F766E),
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 9.5.sp,
+                    modifier = Modifier.testTag("craniofacial_mandibular_summary")
+                )
                 if (selectedStrategy == com.example.onnx.FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
                     Text(
                         text = "Option D Active: A (Source Face + Target Reaction + Target Skin) + B (Target Neck/Body)",
