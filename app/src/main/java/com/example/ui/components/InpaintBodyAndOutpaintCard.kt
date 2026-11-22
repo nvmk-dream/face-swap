@@ -56,6 +56,7 @@ fun InpaintFolderAutoPickButton(
     onAutoPickFolder: () -> Unit,
     hasRealVisFp16Installed: Boolean = false,
     onUploadRealVisFp16Folder: (() -> Unit)? = null,
+    onClearRealVisFp16Pack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(14.dp)
@@ -109,7 +110,7 @@ fun InpaintFolderAutoPickButton(
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         Text(
-                            text = if (isBusy) "Scanning & Auto-Uploading Models..." else "Folder Auto-Pick (.onnx & SD 1.5 Pack)",
+                            text = if (isBusy) "Scanning & Auto-Uploading Models..." else "Folder Auto-Pick (.onnx & SD Packs)",
                             color = Color(0xFF0F172A),
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 13.sp,
@@ -118,7 +119,7 @@ fun InpaintFolderAutoPickButton(
                         )
                         Text(
                             text = if (installedPacksCount > 0) {
-                                "$installedPacksCount SD pack ready • Tap to add or switch folder"
+                                "$installedPacksCount SD pack ready • Folder select செய்தால் auto detect ஆகும்"
                             } else {
                                 "Folder select செய்தால் போதும் — ONNX + Tokenizer auto upload ஆகும்"
                             },
@@ -163,14 +164,14 @@ fun InpaintFolderAutoPickButton(
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                         .testTag("inpaint_upload_realvis_fp16_btn"),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Column(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(1.dp)
                     ) {
                         Text(
-                            text = "Realistic_Vision_V5.1 (FP16) — தனி Slot",
+                            text = "Inpaint Slot: Realistic_Vision_V5.1 (FP16)",
                             color = Color(0xFF0F172A),
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
@@ -179,9 +180,9 @@ fun InpaintFolderAutoPickButton(
                         )
                         Text(
                             text = if (hasRealVisFp16Installed) {
-                                "✓ Installed separately from SD 1.5 (FP16) • Tap to Replace"
+                                "✓ Inpaint Ready (SD 1.5 FP16 உடன் கலக்காது) • Tap to Replace"
                             } else {
-                                "SD 1.5 (FP16) உடன் சேராமல் தனி folder-ஆக upload செய்ய தட்டவும்"
+                                "Inpaint-க்கு மட்டும் Realistic_Vision_V5.1 (FP16) folder upload செய்க"
                             },
                             color = if (hasRealVisFp16Installed) Color(0xFF047857) else Color(0xFF4338CA),
                             fontWeight = FontWeight.Medium,
@@ -190,7 +191,29 @@ fun InpaintFolderAutoPickButton(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
+                    if (hasRealVisFp16Installed && onClearRealVisFp16Pack != null) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color(0x1AEF4444),
+                            border = BorderStroke(1.dp, Color(0x66DC2626)),
+                            modifier = Modifier
+                                .heightIn(min = 32.dp)
+                                .clickable(enabled = !isBusy, onClick = onClearRealVisFp16Pack)
+                                .testTag("inpaint_clear_realvis_fp16_btn")
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "Clear",
+                                    color = Color(0xFFDC2626),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
                     Surface(
                         shape = RoundedCornerShape(50),
                         color = if (hasRealVisFp16Installed) Color(0xFF059669) else Color(0xFF4F46E5)

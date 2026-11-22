@@ -548,20 +548,29 @@ object SdInpaintPackManager {
     }
 
     /**
-     * Resolves an installed SD 1.5 pack optimized for mobile Stage 5 Head/Neck Seam Bridge:
-     * prioritizes smaller/faster `REALVIS_INT8` first, then `REALVIS_FP16`, `SD15_FP16`, `CUSTOM_SD`, and finally `SD15_FP32`.
+     * Resolves an installed SD 1.5 pack optimized for mobile Face Swap / Stage 5 Head/Neck Seam Bridge:
+     * prioritizes `REALVIS_INT8` (1) -> `SD15_FP16` (2, dedicated Face Swap Seam slot) ->
+     * `REALVIS_FP16` (3, Inpaint fallback) -> `CUSTOM_SD` (4) -> `SD15_FP32` (5).
      */
     fun resolvePackForSeamBridge(context: Context): InstalledSdInpaintPack? {
         val installed = discoverInstalledPacks(context)
         if (installed.isEmpty()) return null
         val seamPriority = mapOf(
             SdInpaintPackType.REALVIS_INT8 to 1,
-            SdInpaintPackType.REALVIS_FP16 to 2,
-            SdInpaintPackType.SD15_FP16 to 3,
+            SdInpaintPackType.SD15_FP16 to 2,
+            SdInpaintPackType.REALVIS_FP16 to 3,
             SdInpaintPackType.CUSTOM_SD to 4,
             SdInpaintPackType.SD15_FP32 to 5
         )
         return installed.minByOrNull { seamPriority[it.packType] ?: 99 }
+    }
+
+    fun deleteInstalledPack(context: Context, packType: SdInpaintPackType): Boolean {
+        val packDir = File(getSdInpaintRootDir(context), packType.id)
+        if (!packDir.exists()) return false
+        SdInpaintOnnxEngine.clearSessionCache()
+        OnnxProtobufInspector.clearCachedSessions()
+        return runCatching { packDir.deleteRecursively() }.getOrDefault(false)
     }
 
     /**

@@ -166,4 +166,18 @@ class ExampleUnitTest {
             com.example.onnx.SdInpaintPackManager.classifyPackType("sd15-inpainting-onnx-fp32")
         )
     }
+
+    @Test
+    fun dedicatedSdSlots_haveDistinctDirectoriesAndOptions() {
+        assertEquals("realvis51_fp16", com.example.onnx.SdInpaintPackType.REALVIS_FP16.id)
+        assertEquals("sd15_fp16", com.example.onnx.SdInpaintPackType.SD15_FP16.id)
+        assertTrue(
+            com.example.onnx.SdInpaintPackType.REALVIS_FP16.id !=
+                com.example.onnx.SdInpaintPackType.SD15_FP16.id
+        )
+        assertTrue(
+            com.example.onnx.InpaintModelOption.REALVIS_FP16 !=
+                com.example.onnx.InpaintModelOption.SD15_FP16
+        )
+    }
 }

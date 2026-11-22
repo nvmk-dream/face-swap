@@ -918,11 +918,22 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun importRealisticVisionFp16FromFolder(treeUri: Uri) {
+        importSpecificSdInpaintPackFromFolder(treeUri, SdInpaintPackType.REALVIS_FP16)
+    }
+
+    fun importSd15Fp16FromFolder(treeUri: Uri) {
+        importSpecificSdInpaintPackFromFolder(treeUri, SdInpaintPackType.SD15_FP16)
+    }
+
+    private fun importSpecificSdInpaintPackFromFolder(
+        treeUri: Uri,
+        targetPackType: SdInpaintPackType
+    ) {
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isInspectingModels = true,
-                    statusBannerMessage = "Scanning & uploading Realistic Vision V5.1 (FP16) folder...",
+                    statusBannerMessage = "Scanning & uploading ${targetPackType.displayLabel} folder...",
                     errorBannerMessage = null
                 )
             }
@@ -934,7 +945,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     SdInpaintPackManager.importSdInpaintPacksFromTreeUri(
                         context = ctx,
                         treeUri = treeUri,
-                        targetPackTypeOverride = SdInpaintPackType.REALVIS_FP16,
+                        targetPackTypeOverride = targetPackType,
                         onProgress = { msg ->
                             _uiState.update { s -> s.copy(statusBannerMessage = msg) }
                         }
@@ -950,12 +961,15 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             val sdPackTypes = packDetails.map { it.packType }
             val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
-            val succeeded = SdInpaintPackType.REALVIS_FP16 in importedTypes ||
-                SdInpaintPackType.REALVIS_FP16 in sdPackTypes
-            val nextOption = if (succeeded) {
-                InpaintModelOption.REALVIS_FP16
-            } else {
-                _uiState.value.inpaintModelOption
+            val succeeded = targetPackType in importedTypes || targetPackType in sdPackTypes
+            val currentOption = _uiState.value.inpaintModelOption
+            val nextOption = when {
+                !succeeded -> currentOption
+                targetPackType == SdInpaintPackType.REALVIS_FP16 -> InpaintModelOption.REALVIS_FP16
+                targetPackType == SdInpaintPackType.SD15_FP16 &&
+                    SdInpaintPackType.REALVIS_FP16 !in sdPackTypes &&
+                    currentOption == InpaintModelOption.AUTO -> InpaintModelOption.SD15_FP16
+                else -> currentOption
             }
             val nextLabel = SdInpaintPackManager.formatDropdownLabel(
                 ctx,
@@ -964,6 +978,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             )
             if (succeeded) {
                 OnnxProtobufInspector.saveLinkedModelsFolderUri(ctx, treeUri)
+            }
+            val roleLabel = if (targetPackType == SdInpaintPackType.SD15_FP16) {
+                "Face Swap / Seam Bridge"
+            } else {
+                "Inpaint"
             }
             _uiState.update {
                 it.copy(
@@ -976,15 +995,62 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     isInspectingModels = false,
                     statusBannerMessage = if (succeeded) {
                         val tokNote = if (tokStatus.isReady) "Tokenizer Ready ✓" else "Tokenizer Missing"
-                        "✓ Realistic Vision V5.1 (FP16) தனி slot-இல் upload ஆகிவிட்டது ($tokNote)."
+                        "✓ ${targetPackType.displayLabel} ($roleLabel) தனி slot-இல் upload ஆகிவிட்டது ($tokNote)."
                     } else {
                         null
                     },
                     errorBannerMessage = if (!succeeded) {
-                        "தேர்வு செய்த folder-இல் unet, text_encoder, vae_encoder, vae_decoder ONNX கோப்புகள் கிடைக்கவில்லை. Realistic_Vision_V5.1-inpainting-onnx-fp16 folder-ஐ தேர்வு செய்யவும்."
+                        "தேர்வு செய்த folder-இல் unet, text_encoder, vae_encoder, vae_decoder ONNX கோப்புகள் கிடைக்கவில்லை."
                     } else {
                         null
                     }
+                )
+            }
+        }
+    }
+
+    fun deleteSdInpaintPack(packType: SdInpaintPackType) {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val removed = withContext(Dispatchers.IO) {
+                SdInpaintPackManager.deleteInstalledPack(ctx, packType)
+            }
+            val (packDetails, tokStatus, lamaFile) = withContext(Dispatchers.IO) {
+                Triple(
+                    SdInpaintPackManager.discoverInstalledPacks(ctx),
+                    SdInpaintPackManager.inspectClipTokenizerStatus(ctx),
+                    OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+                )
+            }
+            val sdPackTypes = packDetails.map { it.packType }
+            val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
+            val currentOption = _uiState.value.inpaintModelOption
+            val optionStillAvailable = when (currentOption) {
+                InpaintModelOption.REALVIS_FP16 -> SdInpaintPackType.REALVIS_FP16 in sdPackTypes
+                InpaintModelOption.SD15_FP16 -> SdInpaintPackType.SD15_FP16 in sdPackTypes
+                InpaintModelOption.REALVIS_INT8 -> SdInpaintPackType.REALVIS_INT8 in sdPackTypes
+                InpaintModelOption.SD15_FP32 -> SdInpaintPackType.SD15_FP32 in sdPackTypes
+                else -> true
+            }
+            val nextOption = if (optionStillAvailable) {
+                currentOption
+            } else {
+                SdInpaintPackManager.determineDefaultModelOption(ctx, if (hasLama) lamaFile else null)
+            }
+            val nextLabel = SdInpaintPackManager.formatDropdownLabel(
+                ctx,
+                nextOption,
+                if (hasLama) lamaFile else null
+            )
+            _uiState.update {
+                it.copy(
+                    installedSdInpaintPacks = sdPackTypes,
+                    installedSdPackDetails = packDetails,
+                    clipTokenizerStatus = tokStatus,
+                    isLamaInpaintReady = hasLama,
+                    inpaintModelOption = nextOption,
+                    inpaintModelLabel = nextLabel,
+                    statusBannerMessage = if (removed) "${packType.displayLabel} removed from local storage." else null
                 )
             }
         }
@@ -2723,6 +2789,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
         if ((state.inpaintModelOption == InpaintModelOption.SD15_FP32 ||
                 state.inpaintModelOption == InpaintModelOption.REALVIS_INT8 ||
+                state.inpaintModelOption == InpaintModelOption.REALVIS_FP16 ||
                 state.inpaintModelOption == InpaintModelOption.SD15_FP16) &&
             primaryPackPre == null
         ) {

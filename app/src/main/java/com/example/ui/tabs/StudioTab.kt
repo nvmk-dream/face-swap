@@ -76,6 +76,7 @@ import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.ModelSlot
 import com.example.onnx.OutpaintExtendPreset
+import com.example.onnx.SdInpaintPackType
 import com.example.onnx.SkinToneSourceMode
 import com.example.ui.FaceSwapUiState
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -154,6 +155,8 @@ fun StudioTab(
     onPickInpaintSourceFromFolder: () -> Unit = {},
     onSelectInpaintModelOption: (InpaintModelOption) -> Unit = {},
     onUploadRealVisFp16Folder: () -> Unit = {},
+    onUploadSd15Fp16Folder: () -> Unit = {},
+    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onInpaintMaskUpdated: (android.graphics.Bitmap?) -> Unit = {},
@@ -220,6 +223,8 @@ fun StudioTab(
             onRequestSwapStrategySelection = onRequestSwapStrategySelection,
             onConfirmSwapStrategySelection = onConfirmSwapStrategySelection,
             onDismissSwapStrategyPopup = onDismissSwapStrategyPopup,
+            onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
+            onDeleteSdInpaintPack = onDeleteSdInpaintPack,
             onOpenInpaintPage = {
                 onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
             },
@@ -240,6 +245,8 @@ fun StudioTab(
             onSelectModelOption = onSelectInpaintModelOption,
             onImportModelFolder = onImportAllFromFolder,
             onUploadRealVisFp16Folder = onUploadRealVisFp16Folder,
+            onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
+            onDeleteSdInpaintPack = onDeleteSdInpaintPack,
             onUploadClipTokenizer = onUploadClipTokenizer,
             onUploadSingleTokenizerFile = onUploadSingleTokenizerFile,
             onMaskUpdated = onInpaintMaskUpdated,

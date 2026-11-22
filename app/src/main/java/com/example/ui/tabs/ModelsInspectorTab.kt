@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
@@ -57,6 +58,7 @@ import com.example.ui.theme.CoralError
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.NeonEmerald
 import com.example.onnx.OnnxMemoryServiceState
+import com.example.onnx.SdInpaintPackType
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.RoyalViolet
 
@@ -74,6 +76,8 @@ fun ModelsInspectorTab(
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onUploadRealVisFp16Folder: () -> Unit = {},
+    onUploadSd15Fp16Folder: () -> Unit = {},
+    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onPreloadMemoryModels: () -> Unit = {},
     onReleaseMemoryModels: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -463,6 +467,8 @@ fun ModelsInspectorTab(
                 onUploadClipTokenizer = onUploadClipTokenizer,
                 onUploadSingleTokenizerFile = onUploadSingleTokenizerFile,
                 onUploadRealVisFp16Folder = onUploadRealVisFp16Folder,
+                onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
+                onDeleteSdInpaintPack = onDeleteSdInpaintPack,
                 onImportSdFolder = onImportAllFromFolder
             )
 
@@ -842,10 +848,13 @@ internal fun SdInpaintAndTokenizerCard(
     onUploadClipTokenizer: () -> Unit,
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onUploadRealVisFp16Folder: () -> Unit = {},
+    onUploadSd15Fp16Folder: () -> Unit = {},
+    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onImportSdFolder: () -> Unit
 ) {
     val isTokenizerReady = clipTokenizerStatus.isReady
-    val hasRealVisFp16 = sdPackDetails.any { it.packType == com.example.onnx.SdInpaintPackType.REALVIS_FP16 }
+    val realVisFp16Pack = sdPackDetails.firstOrNull { it.packType == SdInpaintPackType.REALVIS_FP16 }
+    val sd15Fp16Pack = sdPackDetails.firstOrNull { it.packType == SdInpaintPackType.SD15_FP16 }
     val cardBorder = if (isTokenizerReady) Color(0xFF10B981) else Color(0xFFF59E0B)
     Card(
         modifier = Modifier
@@ -1008,36 +1017,31 @@ internal fun SdInpaintAndTokenizerCard(
                 }
             }
 
-            OutlinedButton(
-                onClick = onUploadRealVisFp16Folder,
-                enabled = !isBusy,
-                border = BorderStroke(
-                    1.2.dp,
-                    if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5)
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .testTag("models_upload_realvis_fp16_button"),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Folder,
-                    contentDescription = "Upload Realistic Vision V5.1 (FP16) Folder",
-                    tint = if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5),
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (hasRealVisFp16) {
-                        "✓ Realistic Vision V5.1 (FP16) Ready • Replace Folder"
-                    } else {
-                        "Upload Realistic_Vision_V5.1 (FP16) Folder"
-                    },
-                    color = if (hasRealVisFp16) Color(0xFF065F46) else Color(0xFF3730A3),
-                    fontWeight = FontWeight.Bold
-                )
-            }
+            // Card 1: Inpaint Dedicated Slot — Realistic_Vision_V5.1 (FP16)
+            DedicatedSdModelSlotCard(
+                title = "Card 1 • Inpaint Slot: Realistic_Vision_V5.1 (FP16)",
+                roleDescription = "Inpaint Page (Saree / Curvy / Outpaint / Prompt Edit)-க்கு மட்டுமே பயன்படும் தனி slot.",
+                installedPack = realVisFp16Pack,
+                accentColor = Color(0xFF4F46E5),
+                isBusy = isBusy,
+                uploadButtonTag = "models_upload_realvis_fp16_button",
+                clearButtonTag = "models_clear_realvis_fp16_button",
+                onUploadClick = onUploadRealVisFp16Folder,
+                onClearClick = { onDeleteSdInpaintPack(SdInpaintPackType.REALVIS_FP16) }
+            )
+
+            // Card 2: Face Swap / Head Seam Bridge Dedicated Slot — SD 1.5 Inpaint (FP16)
+            DedicatedSdModelSlotCard(
+                title = "Card 2 • Face Swap Seam: SD 1.5 Inpaint (FP16)",
+                roleDescription = "Face Swap Option B+C & Head Replacement Stage 5 Seam Bridge-க்கு பயன்படும் தனி slot.",
+                installedPack = sd15Fp16Pack,
+                accentColor = Color(0xFF0284C7),
+                isBusy = isBusy,
+                uploadButtonTag = "models_upload_sd15_fp16_button",
+                clearButtonTag = "models_clear_sd15_fp16_button",
+                onUploadClick = onUploadSd15Fp16Folder,
+                onClearClick = { onDeleteSdInpaintPack(SdInpaintPackType.SD15_FP16) }
+            )
 
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1063,6 +1067,138 @@ internal fun SdInpaintAndTokenizerCard(
                     modifier = Modifier.heightIn(min = 40.dp)
                 ) {
                     Text(if (clipTokenizerStatus.hasTokenizerJson) "✓ Replace tokenizer.json" else "+ Pick tokenizer.json", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DedicatedSdModelSlotCard(
+    title: String,
+    roleDescription: String,
+    installedPack: InstalledSdInpaintPack?,
+    accentColor: Color,
+    isBusy: Boolean,
+    uploadButtonTag: String,
+    clearButtonTag: String,
+    onUploadClick: () -> Unit,
+    onClearClick: () -> Unit
+) {
+    val isReady = installedPack != null
+    val sizeLabel = installedPack?.let {
+        val gb = it.totalSizeBytes / (1024.0 * 1024.0 * 1024.0)
+        if (gb >= 0.8) "%.2f GB".format(gb)
+        else "%.0f MB".format(it.totalSizeBytes / (1024.0 * 1024.0))
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = if (isReady) Color(0xFFF0FDF4) else Color(0xFFF8FAFC),
+        border = BorderStroke(
+            1.2.dp,
+            if (isReady) Color(0xFF10B981) else accentColor.copy(alpha = 0.5f)
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isReady) Icons.Default.CheckCircle else Icons.Default.Folder,
+                        contentDescription = title,
+                        tint = if (isReady) Color(0xFF059669) else accentColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF0F172A)
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (isReady) Color(0xFFDCFCE7) else Color(0xFFE0E7FF)
+                ) {
+                    Text(
+                        text = if (isReady) "Ready ✓ ($sizeLabel)" else "Missing",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isReady) Color(0xFF065F46) else Color(0xFF3730A3),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = roleDescription,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF334155)
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onUploadClick,
+                    enabled = !isBusy,
+                    border = BorderStroke(1.2.dp, if (isReady) Color(0xFF059669) else accentColor),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag(uploadButtonTag),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = "Upload $title",
+                        tint = if (isReady) Color(0xFF059669) else accentColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (isReady) "Replace Folder" else "Upload Folder",
+                        color = if (isReady) Color(0xFF065F46) else accentColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (isReady) {
+                    OutlinedButton(
+                        onClick = onClearClick,
+                        enabled = !isBusy,
+                        border = BorderStroke(1.dp, Color(0xFFDC2626)),
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag(clearButtonTag),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Clear $title",
+                            tint = Color(0xFFDC2626),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Clear",
+                            color = Color(0xFFDC2626),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
@@ -1104,4 +1240,3 @@ private fun TokenizerFileBadge(
         )
     }
 }
-

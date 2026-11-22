@@ -148,6 +148,8 @@ fun InpaintPage(
     onSelectModelOption: (InpaintModelOption) -> Unit,
     onImportModelFolder: () -> Unit,
     onUploadRealVisFp16Folder: () -> Unit = {},
+    onUploadSd15Fp16Folder: () -> Unit = {},
+    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onMaskUpdated: (Bitmap?) -> Unit,
@@ -494,9 +496,9 @@ fun InpaintPage(
                                 text = {
                                     Text(
                                         text = if (hasRealVisFp16) {
-                                            "Realistic Vision V5.1 (FP16) ✓ (Replace)"
+                                            "RealVis V5.1 (FP16) [Inpaint] ✓ Replace"
                                         } else {
-                                            "Upload Realistic Vision V5.1 (FP16)"
+                                            "Upload RealVis V5.1 (FP16) [Inpaint]"
                                         },
                                         fontWeight = FontWeight.Bold,
                                         color = if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5),
@@ -506,6 +508,32 @@ fun InpaintPage(
                                 onClick = {
                                     showModelDropdown = false
                                     onUploadRealVisFp16Folder()
+                                }
+                            )
+                            DropdownMenuItem(
+                                modifier = Modifier.testTag("inpaint_dropdown_upload_sd15_fp16"),
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.UploadFile,
+                                        contentDescription = "Upload SD 1.5 Inpaint FP16 Folder",
+                                        tint = Color(0xFF0369A1)
+                                    )
+                                },
+                                text = {
+                                    Text(
+                                        text = if (hasFp16) {
+                                            "SD 1.5 Inpaint (FP16) [FaceSwap] ✓ Replace"
+                                        } else {
+                                            "Upload SD 1.5 (FP16) [FaceSwap Seam]"
+                                        },
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (hasFp16) Color(0xFF059669) else Color(0xFF0369A1),
+                                        fontSize = 13.sp
+                                    )
+                                },
+                                onClick = {
+                                    showModelDropdown = false
+                                    onUploadSd15Fp16Folder()
                                 }
                             )
                             DropdownMenuItem(
@@ -709,7 +737,10 @@ fun InpaintPage(
                 installedPacksCount = uiState.installedSdInpaintPacks.size,
                 onAutoPickFolder = onImportModelFolder,
                 hasRealVisFp16Installed = SdInpaintPackType.REALVIS_FP16 in uiState.installedSdInpaintPacks,
-                onUploadRealVisFp16Folder = onUploadRealVisFp16Folder
+                onUploadRealVisFp16Folder = onUploadRealVisFp16Folder,
+                onClearRealVisFp16Pack = {
+                    onDeleteSdInpaintPack(SdInpaintPackType.REALVIS_FP16)
+                }
             )
 
             val usesSdPack = uiState.installedSdInpaintPacks.isNotEmpty() &&

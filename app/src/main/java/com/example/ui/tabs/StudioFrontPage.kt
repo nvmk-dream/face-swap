@@ -97,6 +97,7 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.onnx.FaceSwapStrategyOption
 import com.example.onnx.HeadReplacementPipelineMode
+import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.StudioMode
 import com.example.ui.theme.ElectricCyan
@@ -217,6 +218,8 @@ fun StudioFrontPage(
     onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
     onConfirmSwapStrategySelection: () -> Unit = {},
     onDismissSwapStrategyPopup: () -> Unit = {},
+    onUploadSd15Fp16Folder: () -> Unit = {},
+    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     onViewStepFullScreen: (Bitmap, String) -> Unit = { bmp, _ -> onViewResultFullScreen(bmp) },
@@ -269,7 +272,9 @@ fun StudioFrontPage(
                 onOcclusionProtectionChanged = onOcclusionProtectionChanged,
                 onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
                 onHeadPipelineModeChanged = onHeadPipelineModeChanged,
-                onRequestSwapStrategySelection = onRequestSwapStrategySelection
+                onRequestSwapStrategySelection = onRequestSwapStrategySelection,
+                onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
+                onDeleteSdInpaintPack = onDeleteSdInpaintPack
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Output 1 & 2 Steps + Download + Save to Gallery + Completed Footer)
@@ -751,7 +756,9 @@ private fun FrontMainWorkspaceCard(
     onOcclusionProtectionChanged: (Boolean) -> Unit = {},
     onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
     onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
-    onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {}
+    onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
+    onUploadSd15Fp16Folder: () -> Unit = {},
+    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -1152,6 +1159,107 @@ private fun FrontMainWorkspaceCard(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.padding(horizontal = 5.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Dedicated Card 2: Face Swap / Head Seam Bridge -> SD 1.5 Inpaint (FP16)
+                        val sd15Fp16Pack = uiState.installedSdPackDetails.firstOrNull {
+                            it.packType == SdInpaintPackType.SD15_FP16
+                        }
+                        val hasSd15Fp16 = sd15Fp16Pack != null
+                        val sd15SizeLabel = sd15Fp16Pack?.let {
+                            val gb = it.totalSizeBytes / (1024.0 * 1024.0 * 1024.0)
+                            if (gb >= 0.8) "%.2f GB".format(gb)
+                            else "%.0f MB".format(it.totalSizeBytes / (1024.0 * 1024.0))
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (hasSd15Fp16) Color(0xCCF0FDF4) else Color(0xCCEEF2FF),
+                            border = BorderStroke(
+                                1.1.dp,
+                                if (hasSd15Fp16) Color(0x8810B981) else Color(0x884F46E5)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("front_upload_sd15_fp16_card")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .clickable(enabled = !uiState.isInspectingModels, onClick = onUploadSd15Fp16Folder)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (hasSd15Fp16) Icons.Default.CheckCircle else Icons.Default.Folder,
+                                    contentDescription = "Face Swap SD 1.5 Inpaint FP16 Pack",
+                                    tint = if (hasSd15Fp16) Color(0xFF059669) else Color(0xFF4F46E5),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(1.dp)
+                                ) {
+                                    Text(
+                                        text = "Face Swap Seam: SD 1.5 Inpaint (FP16)",
+                                        color = Color(0xFF0F172A),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (hasSd15Fp16) {
+                                            "✓ Ready ($sd15SizeLabel) • Head/Seam Bridge (Inpaint உடன் கலக்காது)"
+                                        } else {
+                                            "Option B+C & Head Seam-க்கு SD 1.5 FP16 folder upload செய்யவும்"
+                                        },
+                                        color = if (hasSd15Fp16) Color(0xFF047857) else Color(0xFF4338CA),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (hasSd15Fp16) {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = Color(0x1AEF4444),
+                                        border = BorderStroke(1.dp, Color(0x66DC2626)),
+                                        modifier = Modifier
+                                            .heightIn(min = 32.dp)
+                                            .clickable(enabled = !uiState.isInspectingModels) {
+                                                onDeleteSdInpaintPack(SdInpaintPackType.SD15_FP16)
+                                            }
+                                            .testTag("front_clear_sd15_fp16_btn")
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "Clear",
+                                                color = Color(0xFFDC2626),
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = if (hasSd15Fp16) Color(0xFF059669) else Color(0xFF4F46E5)
+                                ) {
+                                    Text(
+                                        text = if (hasSd15Fp16) "Replace" else "Upload",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.5.sp,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 }
                             }
