@@ -239,22 +239,26 @@ object InteractiveInpaintEngine {
                         onProgress = onProgress
                     )
                 } else {
-                    return SdInpaintOnnxEngine.inpaint(
-                        ortEnv = ortEnv,
-                        pack = primarySdPack,
-                        sourceBitmap = sourceBitmap,
-                        maskBitmap = guardedMaskBitmap,
-                        prompt = prompt,
-                        negativePrompt = negativePrompt,
-                        fastMode = fastMode,
-                        turboMode = turboMode,
-                        preferHardwareAccel = false,
-                        strength = strength,
-                        guidanceScale = guidanceScale,
-                        context = context,
-                        isCancelled = isCancelled,
-                        onProgress = onProgress
-                    )
+                    val sdAttempt = runCatching {
+                        SdInpaintOnnxEngine.inpaint(
+                            ortEnv = ortEnv,
+                            pack = primarySdPack,
+                            sourceBitmap = sourceBitmap,
+                            maskBitmap = guardedMaskBitmap,
+                            prompt = prompt,
+                            negativePrompt = negativePrompt,
+                            fastMode = fastMode,
+                            turboMode = turboMode,
+                            preferHardwareAccel = false,
+                            strength = strength,
+                            guidanceScale = guidanceScale,
+                            context = context,
+                            isCancelled = isCancelled,
+                            onProgress = onProgress
+                        )
+                    }
+                    if (sdAttempt.isSuccess) return sdAttempt.getOrThrow()
+                    onProgress("SD Inpaint pack skipped (${sdAttempt.exceptionOrNull()?.message}); using Mango 4 prompt-guided texture synthesizer...")
                 }
             }
         }
@@ -929,15 +933,22 @@ object InteractiveInpaintEngine {
                         val oR = (orig ushr 16) and 0xFF
                         val oG = (orig ushr 8) and 0xFF
                         val oB = orig and 0xFF
+                        val oLum = 0.299f * oR + 0.587f * oG + 0.114f * oB
 
+                        // Preserve saree folds, shadows, and fabric texture using luminance scaling
+                        val lumFactor = (oLum / 255.0f).coerceIn(0.12f, 0.95f)
                         val nx = (x - minX).toFloat() / boxW
                         val ny = (y - minY).toFloat() / boxH
-                        val noise = (kotlin.math.sin(nx * 24.0) * kotlin.math.cos(ny * 24.0) * 18.0).toInt()
+                        val fabricWeave = (kotlin.math.sin(nx * 56.0) * kotlin.math.cos(ny * 56.0) * 5.0).toInt()
 
-                        val blendFactor = (m * 0.78f).coerceIn(0f, 1f)
-                        val r = (oR * (1f - blendFactor) + (targetR + noise).coerceIn(0, 255) * blendFactor).roundToInt().coerceIn(0, 255)
-                        val g = (oG * (1f - blendFactor) + (targetG + noise).coerceIn(0, 255) * blendFactor).roundToInt().coerceIn(0, 255)
-                        val b = (oB * (1f - blendFactor) + (targetB + noise).coerceIn(0, 255) * blendFactor).roundToInt().coerceIn(0, 255)
+                        val tintedR = (targetR * lumFactor * 1.18f + fabricWeave).toInt().coerceIn(0, 255)
+                        val tintedG = (targetG * lumFactor * 1.18f + fabricWeave).toInt().coerceIn(0, 255)
+                        val tintedB = (targetB * lumFactor * 1.18f + fabricWeave).toInt().coerceIn(0, 255)
+
+                        val blendFactor = (m * 0.88f).coerceIn(0f, 1f)
+                        val r = (oR * (1f - blendFactor) + tintedR * blendFactor).roundToInt().coerceIn(0, 255)
+                        val g = (oG * (1f - blendFactor) + tintedG * blendFactor).roundToInt().coerceIn(0, 255)
+                        val b = (oB * (1f - blendFactor) + tintedB * blendFactor).roundToInt().coerceIn(0, 255)
 
                         outPx[idx] = Color.rgb(r, g, b)
                     }
