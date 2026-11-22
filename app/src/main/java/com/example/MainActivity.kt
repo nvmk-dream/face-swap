@@ -707,6 +707,10 @@ fun FaceSwapStudioApp(
                     onComputeAccessoryLayers = viewModel::computeInpaintAccessoryLayers,
                     onApplyAccessorySelectionAndExpand = viewModel::updateAccessorySelectionAndExpand,
                     onInpaintMaskAndPromptUpdated = viewModel::applyMaskWithOptionalPrompt,
+                    onInpaintCurvyAmountChanged = viewModel::setInpaintCurvyAmount,
+                    onInpaintHipPositionChanged = viewModel::setInpaintHipPositionRatio,
+                    onSelectOutpaintExtendPreset = viewModel::selectOutpaintExtendPreset,
+                    onResetBodyAndOutpaintEdits = viewModel::resetBodyAndOutpaintEdits,
                     onRunInpaint = {
                         if (uiState.inpaintSourceBitmap != null &&
                             uiState.inpaintMaskBitmap != null &&

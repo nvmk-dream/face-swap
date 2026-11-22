@@ -95,10 +95,13 @@ import com.example.R
 import com.example.onnx.AccessoryTarget
 import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.InpaintModelOption
+import com.example.onnx.OutpaintExtendPreset
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.components.DrawMaskEditorDialog
+import com.example.ui.components.InpaintBodyAndOutpaintCard
+import com.example.ui.components.InpaintFolderAutoPickButton
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -160,6 +163,10 @@ fun InpaintPage(
     onComputeAccessoryLayers: () -> Unit = {},
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onMaskAndPromptUpdated: (Bitmap?, String?) -> Unit = { bmp, _ -> onMaskUpdated(bmp) },
+    onCurvyAmountChanged: (Float) -> Unit = {},
+    onHipPositionChanged: (Float) -> Unit = {},
+    onSelectOutpaintPreset: (OutpaintExtendPreset) -> Unit = {},
+    onResetBodyAndOutpaint: () -> Unit = {},
     onCreateInpaint: () -> Unit,
     onCancelInpaint: () -> Unit = {},
     onSaveToFolder: (Bitmap) -> Unit,
@@ -258,17 +265,22 @@ fun InpaintPage(
                     contentAlignment = Alignment.Center
                 ) {
                     if (sourceBmp != null) {
+                        val previewScale = if (uiState.inpaintOutpaintPreset != OutpaintExtendPreset.NONE) {
+                            ContentScale.Fit
+                        } else {
+                            ContentScale.Crop
+                        }
                         Image(
                             bitmap = sourceBmp.asImageBitmap(),
                             contentDescription = "Inpaint Source Image",
-                            contentScale = ContentScale.Crop,
+                            contentScale = previewScale,
                             modifier = Modifier.fillMaxSize()
                         )
                         if (maskBmp != null) {
                             Image(
                                 bitmap = maskBmp.asImageBitmap(),
                                 contentDescription = "Painted Inpaint Mask Overlay",
-                                contentScale = ContentScale.Crop,
+                                contentScale = previewScale,
                                 alpha = 0.55f,
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -447,7 +459,7 @@ fun InpaintPage(
                                 },
                                 text = {
                                     Text(
-                                        text = "Import Model Folder (FP16 / INT8)",
+                                        text = "Folder Auto-Pick (.onnx / SD Pack)",
                                         fontWeight = FontWeight.Bold,
                                         color = Color(0xFF0284C7),
                                         fontSize = 13.sp
@@ -653,6 +665,13 @@ fun InpaintPage(
                 }
             }
 
+            // Prominent 1-Tap Folder Auto-Pick (.onnx & SD 1.5 Pack)
+            InpaintFolderAutoPickButton(
+                isBusy = uiState.isInspectingModels,
+                installedPacksCount = uiState.installedSdInpaintPacks.size,
+                onAutoPickFolder = onImportModelFolder
+            )
+
             val usesSdPack = uiState.installedSdInpaintPacks.isNotEmpty() &&
                 uiState.inpaintModelOption != InpaintModelOption.LAMA_ONNX &&
                 uiState.inpaintModelOption != InpaintModelOption.CV_FALLBACK
@@ -676,6 +695,20 @@ fun InpaintPage(
                 frostedBorderColor = frostedBorderColor,
                 darkSlate = darkSlate,
                 mutedSlate = mutedSlate
+            )
+
+            // 100% Offline Curvy Body Reshape + Half->Full Body Outpaint Card
+            InpaintBodyAndOutpaintCard(
+                hasSourceImage = uiState.inpaintSourceBitmap != null,
+                curvyAmount = uiState.inpaintCurvyAmount,
+                hipPositionRatio = uiState.inpaintHipPositionRatio,
+                outpaintPreset = uiState.inpaintOutpaintPreset,
+                hasSdPackInstalled = uiState.installedSdInpaintPacks.isNotEmpty(),
+                isAdjusting = uiState.isAdjustingBodyShape,
+                onCurvyAmountChanged = onCurvyAmountChanged,
+                onHipPositionChanged = onHipPositionChanged,
+                onSelectOutpaintPreset = onSelectOutpaintPreset,
+                onResetEdits = onResetBodyAndOutpaint
             )
 
             // Prompt Header Row: "Prompt" left | "Fast Mode" + Switch right

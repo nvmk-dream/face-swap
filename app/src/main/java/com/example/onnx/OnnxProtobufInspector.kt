@@ -1008,10 +1008,36 @@ object OnnxProtobufInspector {
         return if (isComplete) baseScore + 1000 else baseScore
     }
 
+    data class FolderAutoImportReport(
+        val importedSlots: List<ModelSlot>,
+        val importedSdPacks: List<SdInpaintPackType>,
+        val skippedAuxiliaryCount: Int = 0
+    )
+
+    private fun findCompanionDataEntry(
+        displayName: String,
+        dataFilesByName: Map<String, Pair<String, Long>>
+    ): Pair<String, Pair<String, Long>>? {
+        val lower = displayName.trim().lowercase()
+        val stem = lower.removeSuffix(".onnx")
+        val candidateNames = listOf(
+            "$lower.data",
+            "${lower}_data",
+            "${stem}.onnx.data",
+            "${stem}.onnx_data",
+            "${stem}.data"
+        )
+        for (name in candidateNames) {
+            val found = dataFilesByName[name]
+            if (found != null) return name to found
+        }
+        return null
+    }
+
     /**
      * Scans a user-selected directory (SAF DocumentTree Uri) for all `.onnx` model files
-     * (and any companion `.onnx.data` external weight files), automatically matching and
-     * importing them in priority order without exhausting RAM or disk space.
+     * (and any companion `.onnx.data` / `.onnx_data` external weight files) plus SD 1.5 Inpaint packs,
+     * automatically matching and importing them in priority order without exhausting RAM or disk space.
      */
     fun importAllModelsFromTreeUri(
         context: Context,
@@ -1019,6 +1045,20 @@ object OnnxProtobufInspector {
         onlyMissing: Boolean = false,
         onProgress: (String) -> Unit = {}
     ): Result<List<ModelSlot>> {
+        return importAllModelsDetailedFromTreeUri(
+            context = context,
+            treeUri = treeUri,
+            onlyMissing = onlyMissing,
+            onProgress = onProgress
+        ).map { it.importedSlots }
+    }
+
+    fun importAllModelsDetailedFromTreeUri(
+        context: Context,
+        treeUri: Uri,
+        onlyMissing: Boolean = false,
+        onProgress: (String) -> Unit = {}
+    ): Result<FolderAutoImportReport> {
         return try {
             // Release any active native ONNX sessions before copying large model files
             clearCachedSessions()
@@ -1031,7 +1071,7 @@ object OnnxProtobufInspector {
             val dataFilesByName = mutableMapOf<String, Pair<String, Long>>() // lowercase name -> (docId, size)
 
             fun scanDocumentDirectory(parentDocId: String, parentPathHint: String, depth: Int) {
-                if (depth > 4) return
+                if (depth > 6) return
                 val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(
                     treeUri,
                     parentDocId
@@ -1063,11 +1103,18 @@ object OnnxProtobufInspector {
                             val docSize = if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else 0L
 
                             if (mimeType == android.provider.DocumentsContract.Document.MIME_TYPE_DIR) {
+                                val dirLower = displayName.trim().lowercase()
+                                if (dirLower == "safety_checker" || dirLower == "feature_extractor") {
+                                    continue
+                                }
                                 val nextHint = if (parentPathHint.isEmpty()) displayName else "$parentPathHint/$displayName"
                                 scanDocumentDirectory(docId, nextHint, depth + 1)
                             } else {
                                 val lowerName = displayName.trim().lowercase()
-                                if (lowerName.endsWith(".onnx.data") || lowerName.endsWith(".data")) {
+                                if (lowerName.endsWith(".onnx.data") ||
+                                    lowerName.endsWith(".data") ||
+                                    lowerName.endsWith(".onnx_data")
+                                ) {
                                     dataFilesByName[lowerName] = docId to docSize
                                 } else {
                                     val matched = matchSlotForFileName(displayName, parentPathHint)
@@ -1093,7 +1140,7 @@ object OnnxProtobufInspector {
                 }
             }
 
-            onProgress("Scanning folder for .onnx models...")
+            onProgress("Scanning folder for .onnx models & SD Inpaint packs...")
             val rootHint = rootDocId.substringAfterLast(':')
             scanDocumentDirectory(rootDocId, rootHint, 0)
 
@@ -1105,8 +1152,7 @@ object OnnxProtobufInspector {
                 val docSize = rawEntry.sizeBytes
                 val pathHint = rawEntry.parentPathHint
                 val matchedSlot = rawEntry.slot
-                val companionLower = "${displayName.trim().lowercase()}.data"
-                val hasCompanion = dataFilesByName.containsKey(companionLower)
+                val hasCompanion = findCompanionDataEntry(displayName, dataFilesByName) != null
                 val priority = when (matchedSlot) {
                     ModelSlot.SWAPPER -> computeSwapCandidatePriority(displayName, docSize, hasCompanion)
                     ModelSlot.SEGMENTATION -> {
@@ -1196,15 +1242,17 @@ object OnnxProtobufInspector {
                 }
 
                 // Fast-path: if destination file already exists with identical size (and companion .data if any), skip re-copying!
-                val companionLower = "${entry.displayName.trim().lowercase()}.data"
-                val companionEntry = dataFilesByName[companionLower]
-                val companionDest = File(subDir, "${entry.displayName.trim()}.data")
+                val companionMatch = findCompanionDataEntry(entry.displayName, dataFilesByName)
+                val companionName = companionMatch?.first
+                val companionEntry = companionMatch?.second
+                val companionDest = companionName?.let { File(subDir, it) }
 
                 val mainAlreadyMatches = entry.sizeBytes > 1024L &&
                     destFile.exists() &&
                     destFile.length() == entry.sizeBytes
                 val companionAlreadyMatches = companionEntry == null ||
-                    (companionDest.exists() && (companionEntry.second <= 0L || companionDest.length() == companionEntry.second))
+                    (companionDest != null && companionDest.exists() &&
+                        (companionEntry.second <= 0L || companionDest.length() == companionEntry.second))
 
                 if (mainAlreadyMatches && companionAlreadyMatches) {
                     importedSlots.add(slot)
@@ -1232,18 +1280,23 @@ object OnnxProtobufInspector {
                     overrideFileName = targetFileName
                 )
                 if (importRes.isSuccess) {
-                    // If this ONNX model has an external weights .onnx.data file in the folder, copy it alongside
-                    if (companionEntry != null) {
-                        onProgress("Importing companion weights: ${entry.displayName}.data...")
+                    // If this ONNX model has an external weights .data / .onnx_data file in the folder, copy it alongside
+                    if (companionEntry != null && companionDest != null && companionName != null) {
+                        onProgress("Importing companion weights: $companionName...")
                         val companionUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(
                             treeUri,
                             companionEntry.first
                         )
                         runCatching {
                             copyUriToFileSafely(context, companionUri, companionDest)
-                            val canonicalCompanion = File(subDir, "$targetFileName.data")
+                            val extSuffix = if (companionName.endsWith(".onnx_data")) ".onnx_data" else ".data"
+                            val canonicalCompanion = File(subDir, "${targetFileName.removeSuffix(".onnx")}$extSuffix")
+                            val altCompanion = File(subDir, "$targetFileName.data")
                             if (canonicalCompanion.absolutePath != companionDest.absolutePath && !canonicalCompanion.exists()) {
                                 copyUriToFileSafely(context, companionUri, canonicalCompanion)
+                            }
+                            if (extSuffix == ".data" && altCompanion.absolutePath != companionDest.absolutePath && !altCompanion.exists()) {
+                                copyUriToFileSafely(context, companionUri, altCompanion)
                             }
                         }
                     }
@@ -1252,6 +1305,7 @@ object OnnxProtobufInspector {
             }
 
             // Also import any auxiliary 3D landmark (1k3d68.onnx, 2d106det.onnx) or occlusion/parsing models
+            var skippedAux = 0
             for ((docId, displayName, docSize) in rawAuxiliaryOnnx) {
                 val lower = displayName.trim().lowercase()
                 val auxSubDirName = if (lower.contains("1k3d68") || lower.contains("2d106det")) {
@@ -1265,13 +1319,14 @@ object OnnxProtobufInspector {
                     continue
                 }
                 if (docSize > 0L && rootDir.usableSpace < docSize + 32L * 1024L * 1024L) {
+                    skippedAux++
                     continue
                 }
                 runCatching {
                     onProgress("Importing 3D/Occlusion model: $displayName...")
                     val docUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                     copyUriToFileSafely(context, docUri, auxDest)
-                }
+                }.onFailure { skippedAux++ }
             }
 
             // Import Stable Diffusion 1.5 Inpainting ONNX folders (Priority 1: FP16, Priority 2: INT8)
@@ -1287,7 +1342,13 @@ object OnnxProtobufInspector {
             if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty() || importedSdPacks.isNotEmpty()) {
                 saveLinkedModelsFolderUri(context, treeUri)
             }
-            Result.success(importedSlots)
+            Result.success(
+                FolderAutoImportReport(
+                    importedSlots = importedSlots,
+                    importedSdPacks = importedSdPacks,
+                    skippedAuxiliaryCount = skippedAux
+                )
+            )
         } catch (oom: OutOfMemoryError) {
             clearCachedSessions()
             System.gc()

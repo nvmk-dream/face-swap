@@ -75,6 +75,7 @@ import com.example.onnx.AccessoryTarget
 import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.ModelSlot
+import com.example.onnx.OutpaintExtendPreset
 import com.example.onnx.SkinToneSourceMode
 import com.example.ui.FaceSwapUiState
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -168,6 +169,10 @@ fun StudioTab(
     onComputeAccessoryLayers: () -> Unit = {},
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onInpaintMaskAndPromptUpdated: (android.graphics.Bitmap?, String?) -> Unit = { bmp, _ -> onInpaintMaskUpdated(bmp) },
+    onInpaintCurvyAmountChanged: (Float) -> Unit = {},
+    onInpaintHipPositionChanged: (Float) -> Unit = {},
+    onSelectOutpaintExtendPreset: (OutpaintExtendPreset) -> Unit = {},
+    onResetBodyAndOutpaintEdits: () -> Unit = {},
     onRunInpaint: () -> Unit = {},
     onCancelInpaint: () -> Unit = {},
     onReuseInpaintResult: () -> Unit = {},
@@ -249,6 +254,10 @@ fun StudioTab(
             onComputeAccessoryLayers = onComputeAccessoryLayers,
             onApplyAccessorySelectionAndExpand = onApplyAccessorySelectionAndExpand,
             onMaskAndPromptUpdated = onInpaintMaskAndPromptUpdated,
+            onCurvyAmountChanged = onInpaintCurvyAmountChanged,
+            onHipPositionChanged = onInpaintHipPositionChanged,
+            onSelectOutpaintPreset = onSelectOutpaintExtendPreset,
+            onResetBodyAndOutpaint = onResetBodyAndOutpaintEdits,
             onCreateInpaint = onRunInpaint,
             onCancelInpaint = onCancelInpaint,
             onSaveToFolder = onSaveBitmapToFolder,

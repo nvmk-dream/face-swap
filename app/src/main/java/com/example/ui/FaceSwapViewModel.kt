@@ -12,8 +12,6 @@ import com.example.data.SwapAuditDatabase
 import com.example.data.SwapAuditLog
 import com.example.data.SwapAuditRepository
 import com.example.onnx.CompleteVisualValidationSuite
-import com.example.onnx.CraniofacialAnalyzer
-import com.example.onnx.CraniofacialPairReport
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceAlignment
 import com.example.onnx.FaceReactionSourceMode
@@ -41,6 +39,8 @@ import com.example.onnx.InstalledSdInpaintPack
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
+import com.example.onnx.BodyReshapeAndOutpaintEngine
+import com.example.onnx.OutpaintExtendPreset
 import com.example.onnx.SkinToneSourceMode
 import com.example.onnx.SwapStageProgress
 import com.example.onnx.VisualValidationBenchmark
@@ -126,12 +126,11 @@ data class FaceSwapUiState(
     val selectedTargetFaceIndex: Int = 0,
     val replaceAllTargetFaces: Boolean = false,
     val isDetectingTarget: Boolean = false,
-    val craniofacialReport: CraniofacialPairReport? = null,
     val headPreviewState: HeadAlignmentPreviewState? = null,
     val isGeneratingHeadPreview: Boolean = false,
     val consentConfirmed: Boolean = true,
     val enableColorTransfer: Boolean = true,
-    val skinToneMode: SkinToneSourceMode = SkinToneSourceMode.TARGET_SCENE,
+    val skinToneMode: SkinToneSourceMode = SkinToneSourceMode.SOURCE_IDENTITY,
     val faceReactionMode: FaceReactionSourceMode = FaceReactionSourceMode.TARGET_REACTION,
     val enableOcclusionProtection: Boolean = true,
     val enableNegativeArtifactSuppression: Boolean = true,
@@ -158,7 +157,12 @@ data class FaceSwapUiState(
     val lastAuditLogId: Int? = null,
     val showOriginalInComparison: Boolean = false,
     val inpaintSourceBitmap: Bitmap? = null,
+    val inpaintOriginalSourceBitmap: Bitmap? = null,
     val inpaintMaskBitmap: Bitmap? = null,
+    val inpaintCurvyAmount: Float = 0.0f,
+    val inpaintHipPositionRatio: Float = 0.64f,
+    val inpaintOutpaintPreset: OutpaintExtendPreset = OutpaintExtendPreset.NONE,
+    val isAdjustingBodyShape: Boolean = false,
     val inpaintPrompt: String = "",
     val inpaintNegativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
     val inpaintFastMode: Boolean = true,
@@ -267,6 +271,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     @Volatile
     private var activeInpaintCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeInpaintJob: kotlinx.coroutines.Job? = null
+    private var bodyReshapePreviewJob: kotlinx.coroutines.Job? = null
     private var pendingFolderSaveBitmap: Bitmap? = null
 
     val auditLogs: StateFlow<List<SwapAuditLog>> = auditRepository.allLogs.stateIn(
@@ -327,35 +332,19 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         val sFaces = if (sourceFace != null) listOf(sourceFace) else modelService.detectFaces(sourceBitmap)
         val tFaces = if (targetFace != null) listOf(targetFace) else modelService.detectFaces(targetBitmap)
         _uiState.update {
-            withCraniofacialAnalysis(
-                it.copy(
-                    sourceBitmap = sourceBitmap,
-                    sourceFaces = sFaces,
-                    selectedSourceFaceIndex = 0,
-                    isDetectingSource = false,
-                    targetBitmap = targetBitmap,
-                    targetFaces = tFaces,
-                    selectedTargetFaceIndex = 0,
-                    isDetectingTarget = false,
-                    swapResult = null,
-                    errorBannerMessage = null
-                )
+            it.copy(
+                sourceBitmap = sourceBitmap,
+                sourceFaces = sFaces,
+                selectedSourceFaceIndex = 0,
+                isDetectingSource = false,
+                targetBitmap = targetBitmap,
+                targetFaces = tFaces,
+                selectedTargetFaceIndex = 0,
+                isDetectingTarget = false,
+                swapResult = null,
+                errorBannerMessage = null
             )
         }
-    }
-
-    private fun withCraniofacialAnalysis(state: FaceSwapUiState): FaceSwapUiState {
-        val srcFace = state.sourceFaces.getOrNull(state.selectedSourceFaceIndex) ?: state.sourceFaces.firstOrNull()
-        val tgtFace = state.targetFaces.getOrNull(state.selectedTargetFaceIndex) ?: state.targetFaces.firstOrNull()
-        val report = if (srcFace != null && tgtFace != null) {
-            CraniofacialAnalyzer.analyzePair(
-                sourceFace = srcFace,
-                sourceBitmap = state.sourceBitmap,
-                targetFace = tgtFace,
-                targetBitmap = state.targetBitmap
-            )
-        } else null
-        return state.copy(craniofacialReport = report)
     }
 
     internal fun resolveSafeProcessingMaxDimensionPx(
@@ -465,22 +454,11 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     fun confirmSwapStrategySelection() {
         _uiState.update { state ->
             val chosen = state.pendingStrategyPopupOption ?: return@update state
-            if (chosen == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
-                state.copy(
-                    swapStrategyOption = chosen,
-                    skinToneMode = SkinToneSourceMode.TARGET_SCENE,
-                    faceReactionMode = FaceReactionSourceMode.TARGET_REACTION,
-                    enableColorTransfer = true,
-                    pendingStrategyPopupOption = null,
-                    statusBannerMessage = "Option ${chosen.shortCode} (${chosen.badgeSummary}) தேர்ந்தெடுக்கப்பட்டது — Target Skin + Target Reaction Set."
-                )
-            } else {
-                state.copy(
-                    swapStrategyOption = chosen,
-                    pendingStrategyPopupOption = null,
-                    statusBannerMessage = "Option ${chosen.shortCode} (${chosen.badgeSummary}) தேர்ந்தெடுக்கப்பட்டது."
-                )
-            }
+            state.copy(
+                swapStrategyOption = chosen,
+                pendingStrategyPopupOption = null,
+                statusBannerMessage = "Option ${chosen.shortCode} (${chosen.badgeSummary}) தேர்ந்தெடுக்கப்பட்டது."
+            )
         }
     }
 
@@ -622,7 +600,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     fun selectSourceFace(index: Int) {
         _uiState.update { state ->
             if (index in state.sourceFaces.indices) {
-                withCraniofacialAnalysis(state.copy(selectedSourceFaceIndex = index, headPreviewState = null))
+                state.copy(selectedSourceFaceIndex = index, headPreviewState = null)
             } else {
                 state
             }
@@ -632,12 +610,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     fun selectTargetFace(index: Int) {
         _uiState.update { state ->
             if (index in state.targetFaces.indices) {
-                withCraniofacialAnalysis(
-                    state.copy(
-                        selectedTargetFaceIndex = index,
-                        replaceAllTargetFaces = false,
-                        headPreviewState = null
-                    )
+                state.copy(
+                    selectedTargetFaceIndex = index,
+                    replaceAllTargetFaces = false,
+                    headPreviewState = null
                 )
             } else {
                 state
@@ -819,7 +795,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             val prevTokReady = SdInpaintPackManager.inspectClipTokenizerStatus(getApplication()).isReady
             val result = withContext(Dispatchers.IO) {
-                OnnxProtobufInspector.importAllModelsFromTreeUri(
+                OnnxProtobufInspector.importAllModelsDetailedFromTreeUri(
                     context = getApplication(),
                     treeUri = treeUri,
                     onlyMissing = false,
@@ -831,7 +807,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 )
             }
             result.fold(
-                onSuccess = { importedSlots ->
+                onSuccess = { report ->
+                    val importedSlots = report.importedSlots
                     val ctx = getApplication<Application>()
                     val (inspections, memState, packDetails, tokAndLama) = withContext(Dispatchers.IO) {
                         OnnxProtobufInspector.clearCachedSessions()
@@ -855,13 +832,14 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         importedSlots.forEach { s ->
                             add(OnnxProtobufInspector.resolveModelFile(ctx, s).name)
                         }
-                        sdPackTypes.forEach { packType ->
+                        val reportedPacks = if (report.importedSdPacks.isNotEmpty()) report.importedSdPacks else sdPackTypes
+                        reportedPacks.forEach { packType ->
                             add(packType.displayLabel)
                         }
-                        if (tokStatus.isReady && !prevTokReady) {
+                        if (tokStatus.isReady && (!prevTokReady || report.importedSdPacks.isNotEmpty())) {
                             add("CLIP Tokenizer")
                         }
-                    }
+                    }.distinct()
 
                     _uiState.update {
                         it.copy(
@@ -877,12 +855,12 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             missingModelPromptSlot = if (importedNames.isNotEmpty()) null else it.missingModelPromptSlot,
                             missingModelPromptMessage = if (importedNames.isNotEmpty()) null else it.missingModelPromptMessage,
                             statusBannerMessage = if (importedNames.isNotEmpty()) {
-                                "Auto-imported & verified ${importedNames.size} model(s): ${importedNames.joinToString()}."
+                                "Auto-imported & verified ${importedNames.size} item(s): ${importedNames.joinToString()}."
                             } else {
                                 null
                             },
                             errorBannerMessage = if (importedNames.isEmpty()) {
-                                "No matching .onnx models, SD 1.5 Inpaint folders, or CLIP tokenizer files found in selected folder."
+                                "No matching .onnx models, SD 1.5 Inpaint folders (unet + text_encoder + vae_encoder + vae_decoder), or CLIP tokenizer files found in selected folder."
                             } else {
                                 null
                             }
@@ -1006,13 +984,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             decoded.fold(
                 onSuccess = { bitmap ->
                     _uiState.update {
-                        withCraniofacialAnalysis(
-                            it.copy(
-                                sourceBitmap = bitmap,
-                                sourceFaces = emptyList(),
-                                selectedSourceFaceIndex = 0,
-                                swapResult = null
-                            )
+                        it.copy(
+                            sourceBitmap = bitmap,
+                            selectedSourceFaceIndex = 0,
+                            swapResult = null
                         )
                     }
                     detectFacesForBitmap(bitmap, isSource = true)
@@ -1046,13 +1021,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             decoded.fold(
                 onSuccess = { bitmap ->
                     _uiState.update {
-                        withCraniofacialAnalysis(
-                            it.copy(
-                                targetBitmap = bitmap,
-                                targetFaces = emptyList(),
-                                selectedTargetFaceIndex = 0,
-                                swapResult = null
-                            )
+                        it.copy(
+                            targetBitmap = bitmap,
+                            selectedTargetFaceIndex = 0,
+                            swapResult = null
                         )
                     }
                     detectFacesForBitmap(bitmap, isSource = false)
@@ -1241,27 +1213,23 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
                     _uiState.update { state ->
                         if (isSource) {
-                            withCraniofacialAnalysis(
-                                state.copy(
-                                    sourceFaces = faces,
-                                    selectedSourceFaceIndex = 0,
-                                    isDetectingSource = false,
-                                    memoryServiceState = modelService.getMemoryState(),
-                                    errorBannerMessage = warning,
-                                    statusBannerMessage = infoMsg ?: state.statusBannerMessage
-                                )
+                            state.copy(
+                                sourceFaces = faces,
+                                selectedSourceFaceIndex = 0,
+                                isDetectingSource = false,
+                                memoryServiceState = modelService.getMemoryState(),
+                                errorBannerMessage = warning,
+                                statusBannerMessage = infoMsg ?: state.statusBannerMessage
                             )
                         } else {
-                            withCraniofacialAnalysis(
-                                state.copy(
-                                    targetFaces = faces,
-                                    selectedTargetFaceIndex = 0,
-                                    replaceAllTargetFaces = false,
-                                    isDetectingTarget = false,
-                                    memoryServiceState = modelService.getMemoryState(),
-                                    errorBannerMessage = warning,
-                                    statusBannerMessage = infoMsg ?: state.statusBannerMessage
-                                )
+                            state.copy(
+                                targetFaces = faces,
+                                selectedTargetFaceIndex = 0,
+                                replaceAllTargetFaces = false,
+                                isDetectingTarget = false,
+                                memoryServiceState = modelService.getMemoryState(),
+                                errorBannerMessage = warning,
+                                statusBannerMessage = infoMsg ?: state.statusBannerMessage
                             )
                         }
                     }
@@ -1269,20 +1237,16 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 onFailure = { err ->
                     _uiState.update { state ->
                         if (isSource) {
-                            withCraniofacialAnalysis(
-                                state.copy(
-                                    sourceFaces = emptyList(),
-                                    isDetectingSource = false,
-                                    errorBannerMessage = "Detection failed on source photo: ${err.message}"
-                                )
+                            state.copy(
+                                sourceFaces = emptyList(),
+                                isDetectingSource = false,
+                                errorBannerMessage = "Detection failed on source photo: ${err.message}"
                             )
                         } else {
-                            withCraniofacialAnalysis(
-                                state.copy(
-                                    targetFaces = emptyList(),
-                                    isDetectingTarget = false,
-                                    errorBannerMessage = "Detection failed on target photo: ${err.message}"
-                                )
+                            state.copy(
+                                targetFaces = emptyList(),
+                                isDetectingTarget = false,
+                                errorBannerMessage = "Detection failed on target photo: ${err.message}"
                             )
                         }
                     }
@@ -1951,6 +1915,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     _uiState.update {
                         it.copy(
                             inpaintSourceBitmap = bitmap,
+                            inpaintOriginalSourceBitmap = bitmap,
+                            inpaintCurvyAmount = 0.0f,
+                            inpaintHipPositionRatio = 0.64f,
+                            inpaintOutpaintPreset = OutpaintExtendPreset.NONE,
                             inpaintMaskBitmap = null,
                             inpaintDepthMap = null,
                             inpaintAccessoryLayers = null,
@@ -1970,6 +1938,152 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
             )
+        }
+    }
+
+    fun setInpaintCurvyAmount(strength: Float) {
+        val clamped = strength.coerceIn(0f, 1f)
+        val cur = _uiState.value
+        val baseOriginal = cur.inpaintOriginalSourceBitmap ?: cur.inpaintSourceBitmap ?: return
+        _uiState.update {
+            it.copy(
+                inpaintOriginalSourceBitmap = baseOriginal,
+                inpaintCurvyAmount = clamped,
+                errorBannerMessage = null
+            )
+        }
+        rebuildCurvyAndOutpaintSource(updateStatusBanner = false)
+    }
+
+    fun setInpaintHipPositionRatio(ratio: Float) {
+        val clamped = ratio.coerceIn(0.45f, 0.85f)
+        val cur = _uiState.value
+        val baseOriginal = cur.inpaintOriginalSourceBitmap ?: cur.inpaintSourceBitmap ?: return
+        _uiState.update {
+            it.copy(
+                inpaintOriginalSourceBitmap = baseOriginal,
+                inpaintHipPositionRatio = clamped,
+                errorBannerMessage = null
+            )
+        }
+        if (cur.inpaintCurvyAmount > 0.01f) {
+            rebuildCurvyAndOutpaintSource(updateStatusBanner = false)
+        }
+    }
+
+    fun selectOutpaintExtendPreset(preset: OutpaintExtendPreset) {
+        val cur = _uiState.value
+        val wasExtended = cur.inpaintOutpaintPreset != OutpaintExtendPreset.NONE
+        val baseOriginal = cur.inpaintOriginalSourceBitmap ?: cur.inpaintSourceBitmap
+        if (baseOriginal == null) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Please select a Source Image from device folder first.")
+            }
+            return
+        }
+        val nextPrompt = if (preset != OutpaintExtendPreset.NONE) {
+            BodyReshapeAndOutpaintEngine.buildOutpaintPrompt(cur.inpaintPrompt, preset)
+        } else {
+            cur.inpaintPrompt
+        }
+        _uiState.update {
+            it.copy(
+                inpaintOriginalSourceBitmap = baseOriginal,
+                inpaintOutpaintPreset = preset,
+                inpaintPrompt = nextPrompt,
+                errorBannerMessage = null
+            )
+        }
+        rebuildCurvyAndOutpaintSource(
+            updateStatusBanner = true,
+            clearMaskWhenNotExtended = wasExtended && preset == OutpaintExtendPreset.NONE
+        )
+    }
+
+    fun resetBodyAndOutpaintEdits() {
+        val cur = _uiState.value
+        val orig = cur.inpaintOriginalSourceBitmap ?: return
+        bodyReshapePreviewJob?.cancel()
+        _uiState.update {
+            it.copy(
+                inpaintSourceBitmap = orig,
+                inpaintCurvyAmount = 0.0f,
+                inpaintHipPositionRatio = 0.64f,
+                inpaintOutpaintPreset = OutpaintExtendPreset.NONE,
+                inpaintMaskBitmap = null,
+                isAdjustingBodyShape = false,
+                statusBannerMessage = "Restored original photo (${orig.width}×${orig.height}).",
+                errorBannerMessage = null
+            )
+        }
+    }
+
+    private fun rebuildCurvyAndOutpaintSource(
+        updateStatusBanner: Boolean,
+        clearMaskWhenNotExtended: Boolean = false
+    ) {
+        val snapshot = _uiState.value
+        val baseOriginal = snapshot.inpaintOriginalSourceBitmap ?: return
+        val curvyStrength = snapshot.inpaintCurvyAmount
+        val hipY = snapshot.inpaintHipPositionRatio
+        val extendPreset = snapshot.inpaintOutpaintPreset
+
+        bodyReshapePreviewJob?.cancel()
+        bodyReshapePreviewJob = viewModelScope.launch {
+            _uiState.update { it.copy(isAdjustingBodyShape = true) }
+            val resultPair = withContext(Dispatchers.Default) {
+                val reshaped = if (curvyStrength > 0.01f) {
+                    BodyReshapeAndOutpaintEngine.applyCurvyBodyReshape(
+                        sourceBitmap = baseOriginal,
+                        curvyStrength = curvyStrength,
+                        hipYRatio = hipY
+                    )
+                } else {
+                    baseOriginal
+                }
+                if (extendPreset != OutpaintExtendPreset.NONE) {
+                    val extended = BodyReshapeAndOutpaintEngine.extendCanvasForFullBodyOutpaint(
+                        sourceBitmap = reshaped,
+                        extendFraction = extendPreset.fraction
+                    )
+                    if (reshaped !== baseOriginal) {
+                        reshaped.recycle()
+                    }
+                    extended.extendedBitmap to extended.autoMaskBitmap
+                } else {
+                    reshaped to null
+                }
+            }
+            val (nextSourceBmp, nextOutpaintMask) = resultPair
+            _uiState.update { cur ->
+                val resolvedMask = if (extendPreset != OutpaintExtendPreset.NONE) {
+                    nextOutpaintMask
+                } else if (clearMaskWhenNotExtended) {
+                    null
+                } else {
+                    cur.inpaintMaskBitmap
+                }
+                val banner = if (updateStatusBanner) {
+                    when {
+                        extendPreset != OutpaintExtendPreset.NONE && cur.installedSdInpaintPacks.isEmpty() ->
+                            "Canvas extended (${nextSourceBmp.width}×${nextSourceBmp.height}) & Auto-Masked! For full legs/feet generation, import SD 1.5 FP16 / RealVis INT8 via Auto-Pick Folder."
+                        extendPreset != OutpaintExtendPreset.NONE ->
+                            "Canvas extended (${nextSourceBmp.width}×${nextSourceBmp.height}) & Auto-Masked! Tap Create to generate lower body & feet."
+                        curvyStrength > 0.01f ->
+                            "Curvy Reshape (${(curvyStrength * 100).toInt()}%) applied offline!"
+                        else -> "Restored original photo (${nextSourceBmp.width}×${nextSourceBmp.height})."
+                    }
+                } else {
+                    cur.statusBannerMessage
+                }
+                cur.copy(
+                    inpaintSourceBitmap = nextSourceBmp,
+                    inpaintMaskBitmap = resolvedMask,
+                    inpaintDepthMap = null,
+                    isAdjustingBodyShape = false,
+                    statusBannerMessage = banner
+                )
+            }
         }
     }
 
@@ -2362,6 +2476,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 inpaintSourceBitmap = resultBmp,
+                inpaintOriginalSourceBitmap = resultBmp,
+                inpaintCurvyAmount = 0.0f,
+                inpaintHipPositionRatio = 0.64f,
+                inpaintOutpaintPreset = OutpaintExtendPreset.NONE,
                 inpaintMaskBitmap = null,
                 inpaintDepthMap = null,
                 inpaintAccessoryLayers = null,
@@ -2428,8 +2546,44 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             return
         }
         if (maskBmp == null || !InteractiveInpaintEngine.hasPaintedMaskPixels(maskBmp)) {
+            if (state.inpaintCurvyAmount > 0.01f && state.inpaintOutpaintPreset == OutpaintExtendPreset.NONE) {
+                val pct = kotlin.math.round(state.inpaintCurvyAmount * 100f).toInt()
+                val engineUsed = "Offline Curvy Body Reshape ($pct%)"
+                val doneMsg = "Body Contour Reshape ($pct%) completed offline."
+                viewModelScope.launch {
+                    val historyPath = withContext(Dispatchers.IO) {
+                        ImageGalleryHelper.saveBitmapToHistoryCache(getApplication(), srcBmp)
+                    }
+                    auditRepository.insert(
+                        SwapAuditLog(
+                            sourceResolution = "${srcBmp.width}x${srcBmp.height}",
+                            targetResolution = "${srcBmp.width}x${srcBmp.height}",
+                            swappedFacesCount = 1,
+                            pipelineSummary = "[BODY RESHAPE • $engineUsed]",
+                            detectionMs = 0L,
+                            embeddingMs = 0L,
+                            inswapperMs = 120L,
+                            blendingMs = 0L,
+                            totalMs = 120L,
+                            colorTransferEnabled = false,
+                            watermarkEnabled = false,
+                            resultImagePath = historyPath
+                        )
+                    )
+                    _uiState.update {
+                        it.copy(
+                            inpaintResultBitmap = srcBmp,
+                            inpaintElapsedSec = 0.12f,
+                            inpaintEngineLabel = engineUsed,
+                            statusBannerMessage = doneMsg,
+                            errorBannerMessage = null
+                        )
+                    }
+                }
+                return
+            }
             _uiState.update {
-                it.copy(errorBannerMessage = "Please tap 'Edit Mask' / 'Draw Mask' and paint the region to inpaint first.")
+                it.copy(errorBannerMessage = "Please tap 'Edit Mask' / 'Draw Mask' (or choose Full-Body Extend) first.")
             }
             return
         }

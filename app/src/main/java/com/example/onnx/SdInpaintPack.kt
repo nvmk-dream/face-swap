@@ -763,7 +763,9 @@ object SdInpaintPackManager {
     ): List<SdInpaintPackType> {
         val resolver = context.contentResolver
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
-        val rootDocName = queryDocDisplayName(context, treeUri, rootDocId).orEmpty()
+        val rootDocName = queryDocDisplayName(context, treeUri, rootDocId)
+            ?.takeIf { it.isNotBlank() }
+            ?: rootDocId.substringAfterLast(':').substringAfterLast('/')
 
         val collectedFiles = mutableListOf<TreeNodeFile>()
 
@@ -838,7 +840,9 @@ object SdInpaintPackManager {
                 val packFolderPath = if (packSegs.isEmpty()) "__root__" else packSegs.joinToString("/")
                 val packFolderName = packSegs.lastOrNull() ?: rootDocName.ifBlank { "sd_inpaint" }
                 if (compName == "tokenizer" && packSegs.isEmpty()) {
-                    // Sibling tokenizer/ folder at selected root can serve packs in child folders too
+                    // Sibling tokenizer/ folder at selected root can serve both root pack and child packs
+                    val rootKey = PackBucketKey("__root__", rootDocName.ifBlank { "sd_inpaint" })
+                    packBuckets.getOrPut(rootKey) { mutableListOf() }.add(compName to file)
                     if (canonicalTokName != null) {
                         rootTokenizerFiles.getOrPut("__root__") { mutableListOf() }.add(file)
                     }
@@ -901,11 +905,21 @@ object SdInpaintPackManager {
                 if (!compsPresent.containsAll(COMPONENT_DIRS)) {
                     null
                 } else {
-                    val packType = classifyPackType(key.packFolderName)
+                    val directType = classifyPackType(key.packFolderName)
+                    val packType = if (directType == SdInpaintPackType.CUSTOM_SD) {
+                        val fileHints = compFiles.joinToString(" ") { it.second.displayName.lowercase() }
+                        when {
+                            fileHints.contains("fp16") || fileHints.contains("f16") -> SdInpaintPackType.SD15_FP16
+                            fileHints.contains("int8") || fileHints.contains("q8") || fileHints.contains("realvis") -> SdInpaintPackType.REALVIS_INT8
+                            else -> directType
+                        }
+                    } else {
+                        directType
+                    }
                     Triple(packType, key, compFiles)
                 }
             }
-            .sortedBy { it.first.priorityOrder } // Priority 1: FP16 first, Priority 2: INT8 second!
+            .sortedBy { it.first.priorityOrder } // Priority 1: FP32 -> RealVis INT8 -> Custom -> FP16
 
         if (completeBuckets.isEmpty()) return emptyList()
 
@@ -1009,10 +1023,14 @@ object SdInpaintPackManager {
         val dataFiles = compDir.listFiles()
             ?.filter {
                 it.isFile && (it.name.endsWith(".data", ignoreCase = true) ||
-                    it.name.endsWith(".onnx_data", ignoreCase = true))
+                    it.name.endsWith(".onnx_data", ignoreCase = true) ||
+                    it.name.endsWith(".pb", ignoreCase = true))
             }
             .orEmpty()
-        val referencesExternalData = fileContainsAnyAsciiToken(onnxFile, listOf(".onnx.data", ".onnx_data", "model.data"))
+        val referencesExternalData = fileContainsAnyAsciiToken(
+            onnxFile,
+            listOf(".onnx.data", ".onnx_data", "model.data", "weights.pb")
+        )
         if (!referencesExternalData) return false
         return dataFiles.none { it.length() > 1024L }
     }
