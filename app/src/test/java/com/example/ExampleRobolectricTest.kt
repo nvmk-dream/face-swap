@@ -742,7 +742,7 @@ class ExampleRobolectricTest {
             targetLandmarks5 = tgtPair.second.landmarks5,
             sourceBitmap = srcPair.first,
             sourceLandmarks5 = srcPair.second.landmarks5,
-            skinToneMode = com.example.onnx.SkinToneSourceMode.TARGET_SCENE,
+            skinToneMode = com.example.onnx.SkinToneSourceMode.SOURCE_IDENTITY,
             faceReactionMode = com.example.onnx.FaceReactionSourceMode.TARGET_REACTION,
             enableColorTransfer = true,
             enableOcclusionProtection = true,
@@ -779,8 +779,8 @@ class ExampleRobolectricTest {
         // Ensure normal user state before pressing Swap Face
         assertFalse("Benchmark must NOT be running before user swap", viewModel.uiState.value.isRunningVisualValidation)
         assertEquals(
-            "Default skinToneMode must be TARGET_SCENE (Target Scene skin colour)",
-            com.example.onnx.SkinToneSourceMode.TARGET_SCENE,
+            "Default skinToneMode must be SOURCE_IDENTITY (Image 1 skin tone)",
+            com.example.onnx.SkinToneSourceMode.SOURCE_IDENTITY,
             viewModel.uiState.value.skinToneMode
         )
         assertEquals(

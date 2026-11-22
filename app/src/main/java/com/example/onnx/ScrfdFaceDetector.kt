@@ -88,6 +88,47 @@ object ScrfdFaceDetector {
     private const val NUM_ANCHORS = 2
     private val STRIDES = intArrayOf(8, 16, 32)
 
+    /**
+     * Enforces InsightFace / ArcFace canonical 5-point keypoint ordering in image coordinates:
+     *  [0] = viewer/image-left eye, [1] = viewer/image-right eye, [2] = nose tip,
+     *  [3] = viewer/image-left mouth corner, [4] = viewer/image-right mouth corner.
+     *
+     * Using 2D cross product `(rEye - lEye) x (nose - eyeMid) > 0` catches inverted anatomical
+     * eye orders (e.g. ML Kit `FaceLandmark.LEFT_EYE` which is subject-left = viewer-right).
+     */
+    internal fun canonicalize5Landmarks(landmarks5: List<PointF>): List<PointF> {
+        if (landmarks5.size < 5) return landmarks5
+        var lEye = landmarks5[0]
+        var rEye = landmarks5[1]
+        val nose = landmarks5[2]
+        var lMouth = landmarks5[3]
+        var rMouth = landmarks5[4]
+
+        val eyeMidX = (lEye.x + rEye.x) * 0.5f
+        val eyeMidY = (lEye.y + rEye.y) * 0.5f
+        val ex = rEye.x - lEye.x
+        val ey = rEye.y - lEye.y
+        val nx = nose.x - eyeMidX
+        val ny = nose.y - eyeMidY
+        // Screen coords (x right, y down): viewer-left->viewer-right eye cross eyeMid->nose must be positive.
+        if (ex * ny - ey * nx < -1e-3f) {
+            val tmp = lEye
+            lEye = rEye
+            rEye = tmp
+        }
+
+        val cEx = rEye.x - lEye.x
+        val cEy = rEye.y - lEye.y
+        val mx = rMouth.x - lMouth.x
+        val my = rMouth.y - lMouth.y
+        if (mx * cEx + my * cEy < -1e-3f) {
+            val tmp = lMouth
+            lMouth = rMouth
+            rMouth = tmp
+        }
+        return listOf(lEye, rEye, nose, lMouth, rMouth)
+    }
+
     fun detectFacesOnnx(
         ortEnv: OrtEnvironment,
         detModelFile: File,
@@ -283,18 +324,20 @@ object ScrfdFaceDetector {
                                     val x2 = (((cx + r) - offsetX) / detScale).coerceIn(0f, origW.toFloat())
                                     val y2 = (((cy + b) - offsetY) / detScale).coerceIn(0f, origH.toFloat())
 
-                                    val landmarks = if (kps != null) {
-                                        val kOffset = anchorIdx * 10
-                                        List(5) { ptIdx ->
-                                            val kx = (((cx + kps[kOffset + ptIdx * 2] * stride) - offsetX) / detScale)
-                                                .coerceIn(0f, origW.toFloat())
-                                            val ky = (((cy + kps[kOffset + ptIdx * 2 + 1] * stride) - offsetY) / detScale)
-                                                .coerceIn(0f, origH.toFloat())
-                                            PointF(kx, ky)
+                                    val landmarks = canonicalize5Landmarks(
+                                        if (kps != null) {
+                                            val kOffset = anchorIdx * 10
+                                            List(5) { ptIdx ->
+                                                val kx = (((cx + kps[kOffset + ptIdx * 2] * stride) - offsetX) / detScale)
+                                                    .coerceIn(0f, origW.toFloat())
+                                                val ky = (((cy + kps[kOffset + ptIdx * 2 + 1] * stride) - offsetY) / detScale)
+                                                    .coerceIn(0f, origH.toFloat())
+                                                PointF(kx, ky)
+                                            }
+                                        } else {
+                                            estimateGeometricLandmarksFromBox(RectF(x1, y1, x2, y2))
                                         }
-                                    } else {
-                                        estimateGeometricLandmarksFromBox(RectF(x1, y1, x2, y2))
-                                    }
+                                    )
 
                                     if (x2 - x1 > 12f && y2 - y1 > 12f) {
                                         val pose3D = Face3DReconstruction.estimate3DHeadPose(landmarks)
@@ -632,21 +675,23 @@ object ScrfdFaceDetector {
                 invScale: Float
             ) {
                 for (face in mlFaces) {
-                    val leftEyePt = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
-                        ?: face.getContour(FaceContour.LEFT_EYE)?.points?.let { pts ->
+                    // ML Kit landmarks are anatomical (subject-relative): subject's RIGHT_EYE is viewer's left eye (ArcFace index 0),
+                    // and subject's LEFT_EYE is viewer's right eye (ArcFace index 1). Same for MOUTH_RIGHT / MOUTH_LEFT.
+                    val leftEyePt = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+                        ?: face.getContour(FaceContour.RIGHT_EYE)?.points?.let { pts ->
                             if (pts.isNotEmpty()) PointF(pts.map { it.x }.average().toFloat(), pts.map { it.y }.average().toFloat()) else null
                         }
-                    val rightEyePt = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
-                        ?: face.getContour(FaceContour.RIGHT_EYE)?.points?.let { pts ->
+                    val rightEyePt = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+                        ?: face.getContour(FaceContour.LEFT_EYE)?.points?.let { pts ->
                             if (pts.isNotEmpty()) PointF(pts.map { it.x }.average().toFloat(), pts.map { it.y }.average().toFloat()) else null
                         }
                     val nosePt = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
                         ?: face.getContour(FaceContour.NOSE_BOTTOM)?.points?.let { pts ->
                             if (pts.isNotEmpty()) pts[pts.size / 2] else null
                         }
-                    val mouthLeftPt = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+                    val mouthLeftPt = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
                         ?: face.getContour(FaceContour.UPPER_LIP_TOP)?.points?.firstOrNull()
-                    val mouthRightPt = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+                    val mouthRightPt = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
                         ?: face.getContour(FaceContour.UPPER_LIP_TOP)?.points?.lastOrNull()
 
                     if (leftEyePt != null && rightEyePt != null && nosePt != null && mouthLeftPt != null && mouthRightPt != null) {
@@ -670,7 +715,7 @@ object ScrfdFaceDetector {
                             (offsetX + mouthRightPt.x * invScale).coerceIn(0f, origW.toFloat()),
                             (offsetY + mouthRightPt.y * invScale).coerceIn(0f, origH.toFloat())
                         )
-                        val landmarks5 = listOf(lEye, rEye, nose, lMouth, rMouth)
+                        val landmarks5 = canonicalize5Landmarks(listOf(lEye, rEye, nose, lMouth, rMouth))
                         val rawContour = face.getContour(FaceContour.FACE)?.points
                         val contourPoints = if (!rawContour.isNullOrEmpty()) {
                             rawContour.map { pt ->

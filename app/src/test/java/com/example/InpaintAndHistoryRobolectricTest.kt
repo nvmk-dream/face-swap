@@ -334,6 +334,25 @@ class InpaintAndHistoryRobolectricTest {
         assertFalse(SdInpaintOnnxEngine.shouldRunUncondCfgPass(5, 7, 7.0f, fastMode = true, hasCachedUncond = true))
         assertTrue(SdInpaintOnnxEngine.shouldRunUncondCfgPass(5, 7, 7.0f, fastMode = false, hasCachedUncond = true))
 
+        // Turbo Mode: 6 base steps (~4 denoise steps at 0.70 strength) + 50% CFG pass reuse + ALL_OPT fusion
+        val turboPlan = SdInpaintOnnxEngine.computeDenoisePlan(fastMode = true, strength = 0.70f, turboMode = true)
+        assertEquals(6, turboPlan.baseSteps)
+        assertEquals(4, turboPlan.denoiseSteps)
+        assertEquals(2, turboPlan.startStepIndex)
+        assertTrue(SdInpaintOnnxEngine.shouldRunUncondCfgPass(1, 4, 7.0f, fastMode = true, hasCachedUncond = true, turboMode = true))
+        assertFalse(SdInpaintOnnxEngine.shouldRunUncondCfgPass(2, 4, 7.0f, fastMode = true, hasCachedUncond = true, turboMode = true))
+        assertFalse(SdInpaintOnnxEngine.shouldForceBasicOptOnNormalStage())
+
+        // Cached UNet fixed 512x512 latent shape [1, 9, 64, 64] pre-selects 512x512 to skip 384->512 double load
+        val preselected512 = SdInpaintOnnxEngine.selectCompatibleDims(
+            candidateDims = SdInpaintOnnxEngine.TargetDimensions(384, 384),
+            vaeEncInfo = null,
+            vaeDecInfo = null,
+            unetSampleShape = listOf(1L, 9L, 64L, 64L)
+        )
+        assertEquals(512, preselected512.width)
+        assertEquals(512, preselected512.height)
+
         val mask = FloatArray(32 * 32)
         mask[16 * 32 + 16] = 1.0f
         val dilated = SdInpaintOnnxEngine.dilateBinaryMask(mask, 32, 32, radiusPx = 5)
@@ -386,6 +405,12 @@ class InpaintAndHistoryRobolectricTest {
 
         vm.updateAccessorySelectionAndExpand(emptySet(), 6f)
         assertFalse(vm.uiState.value.segformerAutoSelectedForAccessory)
+
+        assertFalse(vm.uiState.value.inpaintTurboMode)
+        vm.setInpaintTurboMode(true)
+        assertTrue(vm.uiState.value.inpaintTurboMode)
+        vm.setInpaintTurboMode(false)
+        assertFalse(vm.uiState.value.inpaintTurboMode)
     }
 
     @Test

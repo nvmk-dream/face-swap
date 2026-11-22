@@ -212,6 +212,22 @@ enum class ModelSlot(
         expectedOutputSignature = "landmarks: FLOAT[1, 1404+] (468 3D (x, y, z) vertices)",
         licenseSummary = "Apache-2.0 (MediaPipe / omebly-tools-models)",
         downloadSourceUrl = "https://huggingface.co/hussain5049/omebly-tools-models"
+    ),
+    HEAD_POSE(
+        id = "sixdrepnet",
+        subdirectory = "head_pose",
+        canonicalFileName = "SixDRepNet.onnx",
+        displayName = "6DRepNet360_Slim.onnx / SixDRepNet.onnx (6D Head Pose)",
+        categoryTitle = "models/head_pose/",
+        approximateSizeLabel = "~8–25 MB (Slim) / ~90–145 MB",
+        requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
+        tamilTitle = "12. 6D தலை கோண கணிப்பு (6DRepNet360_Slim / SixDRepNet)",
+        tamilRoleSummary = "6DRepNet360_Slim.onnx அல்லது SixDRepNet.onnx: பக்கவாட்டு முகம் (Extreme Profile), தொப்பி, பெரிய கண்ணாடி அல்லது சாய்ந்த தலையின் Pitch / Yaw / Roll 3D கோணங்களை (±85° வரை) மிகத் துல்லியமாகக் கணித்து Face Swap & Full Head Replacement-ஐச் சீராக்குகிறது.",
+        roleSummary = "Optional 6D Rotation Head Pose ONNX model (6DRepNet360_Slim.onnx / SixDRepNet.onnx / Hopenet / WHENet). Predicts accurate Pitch/Yaw/Roll (±85° profile) even under hats, sunglasses, or partial occlusion. Falls back to FaceMesh / 5-Point PnP if absent.",
+        expectedInputSignature = "input: FLOAT[1, 3, 224, 224] (ImageNet normalized RGB)",
+        expectedOutputSignature = "output: FLOAT[1, 3] (or [1, 6] 6D rotation / [1, 3, 3] matrix / yaw,pitch,roll)",
+        licenseSummary = "MIT License (thohemp/6DRepNet)",
+        downloadSourceUrl = "https://github.com/PINTO0309/PINTO_model_zoo (6DRepNet360_Slim / SixDRepNet)"
     )
 }
 
@@ -258,6 +274,7 @@ object OnnxProtobufInspector {
 
     private const val MODELS_ROOT_DIR = "models"
     private const val EMAP_CACHE_FILE = "inswapper_emap_v2_512x512.bin"
+    private const val EMAP_META_FILE = "inswapper_emap_v2_512x512.meta"
     private const val EMAP_FLOATS = 512 * 512
     private const val EMAP_BYTES = EMAP_FLOATS * 4
 
@@ -274,6 +291,7 @@ object OnnxProtobufInspector {
         "age_estimation",
         "re_aging",
         "face_mesh",
+        "head_pose",
         "head_swap"
     )
 
@@ -942,6 +960,11 @@ object OnnxProtobufInspector {
                 lower.contains("2d106det") || lower.contains("3ddfa") ||
                 lower.contains("mb1_120x120") ->
                 ModelSlot.FACE_MESH_3D
+            lower.contains("sixdrepnet") || lower.contains("6drepnet") ||
+                lower.contains("head_pose") || lower.contains("headpose") ||
+                lower.contains("head-pose") || lower.contains("whenet") ||
+                lower.contains("hopenet") ->
+                ModelSlot.HEAD_POSE
             else -> null
         }
     }
@@ -1130,6 +1153,7 @@ object OnnxProtobufInspector {
                 ModelSlot.MATTING,
                 ModelSlot.INPAINTING,
                 ModelSlot.FACE_MESH_3D,
+                ModelSlot.HEAD_POSE,
                 ModelSlot.AGE_ESTIMATOR,
                 ModelSlot.FACE_REAGING
             )
@@ -1349,6 +1373,16 @@ object OnnxProtobufInspector {
                 "facemesh.onnx",
                 "1k3d68.onnx",
                 "2d106det.onnx"
+            ),
+            ModelSlot.HEAD_POSE to listOf(
+                "6DRepNet360_Slim.onnx",
+                "6drepnet360_slim.onnx",
+                "SixDRepNet.onnx",
+                "sixdrepnet.onnx",
+                "6drepnet.onnx",
+                "6DRepNet_360.onnx",
+                "sixdrepnet_300w_lp.onnx",
+                "head_pose.onnx"
             )
         )
 
@@ -1460,6 +1494,7 @@ object OnnxProtobufInspector {
                     }
                 }
                 File(root, EMAP_CACHE_FILE).delete()
+                File(root, EMAP_META_FILE).delete()
             }
 
             if (destFile.exists()) destFile.delete()
@@ -1472,6 +1507,15 @@ object OnnxProtobufInspector {
             val legacyRootFile = File(root, slot.canonicalFileName)
             if (legacyRootFile.exists() && legacyRootFile.absolutePath != destFile.absolutePath) {
                 legacyRootFile.delete()
+            }
+
+            // Record original picked filename (e.g., 6DRepNet360_Slim.onnx) for clear UI reporting
+            val pickedName = queryDisplayName(context, uri)?.trim()
+            val variantMarker = File(subDir, ".imported_variant_name")
+            if (!pickedName.isNullOrBlank()) {
+                runCatching { variantMarker.writeText(pickedName) }
+            } else if (variantMarker.exists()) {
+                runCatching { variantMarker.delete() }
             }
 
             clearCrashGuardForFile(destFile, context)
@@ -1535,13 +1579,25 @@ object OnnxProtobufInspector {
         val ortValid: Boolean
         var ortNote: String
 
+        val variantMarker = file.parentFile?.let { File(it, ".imported_variant_name") }
+        val recordedVariant = if (variantMarker != null && variantMarker.exists()) {
+            runCatching { variantMarker.readText().trim() }.getOrNull()?.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+        val displayFileLabel = if (recordedVariant != null && !recordedVariant.equals(file.name, ignoreCase = true)) {
+            "$recordedVariant (${file.name})"
+        } else {
+            file.name
+        }
+
         if (cachedEntry != null) {
             runtimeInputs = runCatching { extractDescriptors(cachedEntry.session.inputInfo) }
                 .getOrDefault(defaultInputDescriptors(slot))
             runtimeOutputs = runCatching { extractDescriptors(cachedEntry.session.outputInfo) }
                 .getOrDefault(defaultOutputDescriptors(slot))
             ortValid = true
-            ortNote = "Installed & verified in ONNX Runtime Mobile (${file.name})."
+            ortNote = "Installed & verified in ONNX Runtime Mobile ($displayFileLabel)."
         } else {
             // Fast header validation without allocating hundreds of MBs in native OrtSession
             val validHeader = (headerMeta.irVersion != null && headerMeta.irVersion in 1L..25L) ||
@@ -1552,17 +1608,20 @@ object OnnxProtobufInspector {
             ortNote = if (ortValid) {
                 val irStr = headerMeta.irVersion?.let { "IR v$it" } ?: "ONNX Graph"
                 val opsetStr = headerMeta.opsetVersion?.let { ", Opset $it" } ?: ""
-                "Installed & ready (${file.name}, $irStr$opsetStr)."
+                "Installed & ready ($displayFileLabel, $irStr$opsetStr)."
             } else {
                 "Invalid or truncated ONNX model file."
             }
         }
 
         val cacheFile = File(getModelsRootDir(context), EMAP_CACHE_FILE)
+        val metaFile = File(getModelsRootDir(context), EMAP_META_FILE)
+        val expectedSig = "${file.name}_${file.length()}_${file.lastModified()}"
         val hasEmap = slot == ModelSlot.SWAPPER &&
             !file.name.lowercase().contains("hyperswap") &&
             cacheFile.exists() &&
-            cacheFile.length() == EMAP_BYTES.toLong()
+            cacheFile.length() == EMAP_BYTES.toLong() &&
+            (!metaFile.exists() || runCatching { metaFile.readText() }.getOrNull() == expectedSig)
 
         return OnnxModelInspection(
             slot = slot,
@@ -1606,6 +1665,9 @@ object OnnxProtobufInspector {
             ModelSlot.FACE_MESH_3D -> listOf(
                 TensorDescriptor("input", "FLOAT", listOf(1, 3, 192, 192))
             )
+            ModelSlot.HEAD_POSE -> listOf(
+                TensorDescriptor("input", "FLOAT", listOf(1, 3, 224, 224))
+            )
         }
     }
 
@@ -1626,6 +1688,7 @@ object OnnxProtobufInspector {
             ModelSlot.AGE_ESTIMATOR -> listOf(TensorDescriptor("age", "FLOAT", listOf(1, 1)))
             ModelSlot.FACE_REAGING -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
             ModelSlot.FACE_MESH_3D -> listOf(TensorDescriptor("landmarks", "FLOAT", listOf(1, 1404)))
+            ModelSlot.HEAD_POSE -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3)))
         }
     }
 
@@ -1658,8 +1721,15 @@ object OnnxProtobufInspector {
             // HyperSwap 1a/1b/1c 256 models consume the L2-normalized 512-D ArcFace vector directly
             return null
         }
-        val cacheFile = File(getModelsRootDir(context), EMAP_CACHE_FILE)
-        if (cacheFile.exists() && cacheFile.length() == EMAP_BYTES.toLong()) {
+        val modelsRoot = getModelsRootDir(context)
+        val cacheFile = File(modelsRoot, EMAP_CACHE_FILE)
+        val metaFile = File(modelsRoot, EMAP_META_FILE)
+        val expectedSig = "${inswapperFile.name}_${inswapperFile.length()}_${inswapperFile.lastModified()}"
+        if (cacheFile.exists() &&
+            cacheFile.length() == EMAP_BYTES.toLong() &&
+            metaFile.exists() &&
+            runCatching { metaFile.readText() }.getOrNull() == expectedSig
+        ) {
             return runCatching {
                 val bytes = cacheFile.readBytes()
                 val floats = FloatArray(EMAP_FLOATS)
@@ -1677,6 +1747,12 @@ object OnnxProtobufInspector {
                 val outBytes = ByteBuffer.allocate(EMAP_BYTES).order(ByteOrder.LITTLE_ENDIAN)
                 outBytes.asFloatBuffer().put(extracted)
                 FileOutputStream(cacheFile).use { it.write(outBytes.array()) }
+                metaFile.writeText(expectedSig)
+            }
+        } else {
+            runCatching {
+                cacheFile.delete()
+                metaFile.delete()
             }
         }
         return extracted

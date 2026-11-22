@@ -179,7 +179,7 @@ object VisualValidationBenchmark {
                 targetLandmarks5 = targetFace.landmarks5,
                 sourceBitmap = sourceBitmap,
                 sourceLandmarks5 = sourceFace.landmarks5,
-                skinToneMode = SkinToneSourceMode.TARGET_SCENE,
+                skinToneMode = SkinToneSourceMode.SOURCE_IDENTITY,
                 faceReactionMode = FaceReactionSourceMode.TARGET_REACTION,
                 enableColorTransfer = true,
                 enableOcclusionProtection = true,

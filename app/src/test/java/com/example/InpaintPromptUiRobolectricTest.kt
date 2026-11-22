@@ -10,12 +10,15 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.ui.tabs.FullScreenPromptEditorDialog
+import com.example.ui.tabs.InpaintDiffusionTuningCard
 import com.example.ui.tabs.InpaintMissingTokenizerBanner
 import com.example.ui.tabs.InpaintProgressCancelContent
+import com.example.ui.tabs.InpaintTuningGuideDialog
 import com.example.ui.tabs.SdInpaintAndTokenizerCard
 import com.example.ui.theme.MyApplicationTheme
 import org.junit.Assert.assertEquals
@@ -180,5 +183,65 @@ class InpaintPromptUiRobolectricTest {
             .assertIsDisplayed()
             .performClick()
         assertTrue(inpaintBannerUploadClicked)
+    }
+
+    @Test
+    fun tuningGuideButton_opensBilingualPopupWithOutputDetailsAndAppliesPreset() {
+        var latestStrength = 0.70f
+        var latestCfg = 7.0f
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                var strength by remember { mutableStateOf(0.70f) }
+                var cfg by remember { mutableStateOf(7.0f) }
+                var showGuide by remember { mutableStateOf(false) }
+
+                InpaintDiffusionTuningCard(
+                    inpaintStrength = strength,
+                    inpaintCfgScale = cfg,
+                    onStrengthChanged = {
+                        strength = it
+                        latestStrength = it
+                    },
+                    onCfgScaleChanged = {
+                        cfg = it
+                        latestCfg = it
+                    },
+                    onOpenGuidePopup = { showGuide = true }
+                )
+
+                if (showGuide) {
+                    InpaintTuningGuideDialog(
+                        currentStrengthDisplay = (strength * 10f).coerceIn(1.0f, 10.0f),
+                        currentCfg = cfg,
+                        isTurboMode = false,
+                        onApplyPreset = { sDisp, cVal ->
+                            val newS = (sDisp / 10f).coerceIn(0.10f, 1.00f)
+                            strength = newS
+                            cfg = cVal
+                            latestStrength = newS
+                            latestCfg = cVal
+                            showGuide = false
+                        },
+                        onDismiss = { showGuide = false }
+                    )
+                }
+            }
+        }
+
+        composeTestRule.onNodeWithTag("inpaint_tuning_guide_button")
+            .assertIsDisplayed()
+            .performClick()
+
+        composeTestRule.onNodeWithTag("inpaint_tuning_guide_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Strength 7.0 & CFG 7.0", substring = true).assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("inpaint_preset_strong_btn")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+
+        assertEquals(0.90f, latestStrength, 0.01f)
+        assertEquals(9.5f, latestCfg, 0.01f)
     }
 }

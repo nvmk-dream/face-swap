@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -505,8 +506,7 @@ fun FaceSwapStudioApp(
                             unselectedTextColor = Color(0xFF7D90B8)
                         )
                         NavigationBarItem(
-                            selected = uiState.currentTab == AppTab.MODELS ||
-                                uiState.currentTab == AppTab.STUDIO,
+                            selected = uiState.currentTab == AppTab.MODELS,
                             onClick = { viewModel.selectTab(AppTab.MODELS) },
                             icon = {
                                 Icon(
@@ -517,6 +517,23 @@ fun FaceSwapStudioApp(
                             label = { Text(stringResource(R.string.tab_models)) },
                             colors = navItemColors,
                             modifier = Modifier.testTag("nav_tab_models")
+                        )
+                        NavigationBarItem(
+                            selected = uiState.currentTab == AppTab.STUDIO &&
+                                uiState.studioSubPage == StudioSubPage.SETTINGS_AND_DIAGNOSTICS,
+                            onClick = {
+                                viewModel.selectStudioSubPage(StudioSubPage.SETTINGS_AND_DIAGNOSTICS)
+                                viewModel.selectTab(AppTab.STUDIO)
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = "Face Tuning & 6DRepNet Settings"
+                                )
+                            },
+                            label = { Text("Tuning") },
+                            colors = navItemColors,
+                            modifier = Modifier.testTag("nav_tab_settings_tuning")
                         )
                         NavigationBarItem(
                             selected = uiState.currentTab == AppTab.HISTORY,
@@ -655,6 +672,10 @@ fun FaceSwapStudioApp(
                     onConfirmSwapStrategySelection = viewModel::confirmSwapStrategySelection,
                     onDismissSwapStrategyPopup = viewModel::dismissSwapStrategyPopup,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
+                    onImportModelForSlot = { slot ->
+                        pendingImportSlot = slot
+                        onnxDocumentPicker.launch(arrayOf("*/*"))
+                    },
                     onImportAllFromFolder = {
                         onnxFolderTreePicker.launch(null)
                     },
@@ -677,6 +698,7 @@ fun FaceSwapStudioApp(
                     onInpaintNegativePromptChanged = viewModel::setInpaintNegativePrompt,
                     onResetInpaintNegativePrompt = viewModel::resetInpaintNegativePromptToDefault,
                     onInpaintFastModeChanged = viewModel::setInpaintFastMode,
+                    onInpaintTurboModeChanged = viewModel::setInpaintTurboMode,
                     onInpaintStrengthChanged = viewModel::setInpaintStrength,
                     onInpaintCfgScaleChanged = viewModel::setInpaintCfgScale,
                     onInpaintDepthGuardChanged = viewModel::setInpaintDepthGuardEnabled,

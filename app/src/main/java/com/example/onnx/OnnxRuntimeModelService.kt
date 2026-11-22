@@ -32,6 +32,7 @@ data class OnnxMemoryServiceState(
     val mivoloLoaded: Boolean = false,
     val reagingLoaded: Boolean = false,
     val faceMeshLoaded: Boolean = false,
+    val headPoseLoaded: Boolean = false,
     val loadedSessions: Map<ModelSlot, LoadedSessionInfo> = emptyMap(),
     val totalResidentBytes: Long = 0L,
     val totalLoadTimeMs: Long = 0L,
@@ -126,7 +127,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         identityPreservationMode: Boolean = false,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
-        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_SHAPE_CONTOUR,
+        swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
         captureDiagnostics: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}
@@ -406,6 +407,7 @@ class OnnxRuntimeModelService(
         val mivolo = sessionMetadata[ModelSlot.AGE_ESTIMATOR]?.isLoadedInMemory == true
         val reaging = sessionMetadata[ModelSlot.FACE_REAGING]?.isLoadedInMemory == true
         val faceMesh = sessionMetadata[ModelSlot.FACE_MESH_3D]?.isLoadedInMemory == true
+        val headPose = sessionMetadata[ModelSlot.HEAD_POSE]?.isLoadedInMemory == true
         val emap = cachedEmap512x512 != null
 
         val residentBytes = sessionMetadata.values
@@ -433,6 +435,7 @@ class OnnxRuntimeModelService(
             mivoloLoaded = mivolo,
             reagingLoaded = reaging,
             faceMeshLoaded = faceMesh,
+            headPoseLoaded = headPose,
             loadedSessions = sessionMetadata.toMap(),
             totalResidentBytes = residentBytes,
             totalLoadTimeMs = totalLoadTimeMs,
@@ -446,27 +449,35 @@ class OnnxRuntimeModelService(
         nmsThreshold: Float
     ): List<DetectedFace> {
         val detSession = getOrLoadSession(ModelSlot.DETECTOR, preferHardwareAccel = true)
-        if (detSession != null && ortEnv != null) {
-            return ScrfdFaceDetector.detectFacesWithSession(
+        val rawFaces = if (detSession != null && ortEnv != null) {
+            ScrfdFaceDetector.detectFacesWithSession(
                 ortEnv = ortEnv,
                 session = detSession,
                 bitmap = bitmap,
                 confThreshold = confThreshold,
                 nmsThreshold = nmsThreshold
             )
-        }
-        val detFile = resolveValidFile(ModelSlot.DETECTOR)
-        return if (detFile != null && ortEnv != null) {
-            ScrfdFaceDetector.detectFacesOnnx(
-                ortEnv = ortEnv,
-                detModelFile = detFile,
-                bitmap = bitmap,
-                confThreshold = confThreshold,
-                nmsThreshold = nmsThreshold
-            )
         } else {
-            ScrfdFaceDetector.detectFacesAndroidPreviewFallback(bitmap)
+            val detFile = resolveValidFile(ModelSlot.DETECTOR)
+            if (detFile != null && ortEnv != null) {
+                ScrfdFaceDetector.detectFacesOnnx(
+                    ortEnv = ortEnv,
+                    detModelFile = detFile,
+                    bitmap = bitmap,
+                    confThreshold = confThreshold,
+                    nmsThreshold = nmsThreshold
+                )
+            } else {
+                ScrfdFaceDetector.detectFacesAndroidPreviewFallback(bitmap)
+            }
         }
+        return HeadPoseEstimationEngine.enrichFacesIfModelPresent(
+            context = appContext,
+            ortEnv = ortEnv,
+            bitmap = bitmap,
+            faces = rawFaces,
+            preferHardwareAccel = true
+        ).first
     }
 
     override fun extractFaceIdentity(
