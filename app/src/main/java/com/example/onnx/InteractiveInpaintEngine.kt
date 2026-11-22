@@ -350,7 +350,7 @@ object InteractiveInpaintEngine {
             if (isCancelled()) {
                 throw CancellationException("Inpaint cancelled by user.")
             }
-            if (prompt.isNotBlank()) {
+            if (prompt.isNotBlank() && !isRemovalIntentPrompt(prompt)) {
                 onProgress("Running Mango 4 style prompt-guided inpaint (\"$prompt\")...")
                 inpaintedFull = runPromptGuidedMango4Inpaint(
                     sourceBitmap = sourceBitmap,
@@ -878,6 +878,18 @@ object InteractiveInpaintEngine {
             }
         }
         return out
+    }
+
+    internal fun isRemovalIntentPrompt(prompt: String): Boolean {
+        val trimmed = prompt.trim()
+        if (trimmed.isEmpty()) return false
+        val lower = trimmed.lowercase(java.util.Locale.ROOT)
+        val hasRemovalVerb = Regex("\\b(?:remove|erase|delete|clear|clean|without|hide|vanish)\\b")
+            .containsMatchIn(lower)
+        if (!hasRemovalVerb) return false
+        val hasReplacementVerb = Regex("\\b(?:replace\\s+with|change\\s+to|turn\\s+into|add|wear|put\\s+on)\\b")
+            .containsMatchIn(lower)
+        return !hasReplacementVerb
     }
 
     private fun runPromptGuidedMango4Inpaint(

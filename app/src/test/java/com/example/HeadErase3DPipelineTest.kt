@@ -36,7 +36,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class HeadErase3DPipelineTest {
 
     private val context: Context

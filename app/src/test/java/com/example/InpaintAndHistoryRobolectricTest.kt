@@ -35,7 +35,7 @@ import java.io.File
 import kotlin.math.abs
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class InpaintAndHistoryRobolectricTest {
 
     private val context: Context

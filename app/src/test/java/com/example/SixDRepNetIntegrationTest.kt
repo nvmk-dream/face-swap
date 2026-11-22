@@ -33,7 +33,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class SixDRepNetIntegrationTest {
 
     @get:Rule

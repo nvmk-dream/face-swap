@@ -32,7 +32,7 @@ import android.graphics.Bitmap.CompressFormat
 import java.io.FileOutputStream
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class InpaintFailurePathRobolectricTest {
 
     private val context: Context

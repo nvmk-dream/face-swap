@@ -1052,6 +1052,11 @@ private fun FrontMainWorkspaceCard(
                         selectedOption = uiState.swapStrategyOption,
                         onSelectRequested = onRequestSwapStrategySelection
                     )
+
+                    CraniofacialAnalysisDiagnosticCard(
+                        report = uiState.craniofacialReport,
+                        selectedStrategy = uiState.swapStrategyOption
+                    )
                 }
 
                 if (uiState.studioMode == StudioMode.HEAD_REPLACEMENT ||
@@ -2079,7 +2084,7 @@ internal fun FaceSwapStrategySelectorCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Output Style (A / B / B+C)",
+                text = "Output Style (A / B / B+C / D)",
                 color = Color(0xFF0369A1),
                 fontWeight = FontWeight.Bold,
                 fontSize = 12.sp
@@ -2100,65 +2105,198 @@ internal fun FaceSwapStrategySelectorCard(
             }
         }
 
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            com.example.onnx.FaceSwapStrategyOption.entries.forEach { option ->
-                val selected = selectedOption == option
-                val tag = when (option) {
-                    com.example.onnx.FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY -> "strategy_option_a"
-                    com.example.onnx.FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY -> "strategy_option_b"
-                    com.example.onnx.FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD -> "strategy_option_bc"
-                }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(
-                            if (selected) Color(0xFF0F2C59) else Color(0xFF1E293B)
-                        )
-                        .border(
-                            width = if (selected) 1.8.dp else 1.dp,
-                            color = if (selected) Color(0xFF00E5FF) else Color(0xFF334155),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-                        .clickable { onSelectRequested(option) }
-                        .padding(horizontal = 6.dp, vertical = 6.dp)
-                        .testTag(tag),
-                    contentAlignment = Alignment.Center
+            com.example.onnx.FaceSwapStrategyOption.entries.chunked(2).forEach { rowOptions ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Text(
-                            text = "Option ${option.shortCode}",
-                            color = if (selected) Color(0xFF38BDF8) else Color(0xFFE2E8F0),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.5.sp,
-                            maxLines = 1
-                        )
-                        Text(
-                            text = option.badgeSummary,
-                            color = if (selected) Color.White else Color(0xFF94A3B8),
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            fontSize = 9.5.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                    rowOptions.forEach { option ->
+                        val selected = selectedOption == option
+                        val tag = when (option) {
+                            com.example.onnx.FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY -> "strategy_option_a"
+                            com.example.onnx.FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY -> "strategy_option_b"
+                            com.example.onnx.FaceSwapStrategyOption.OPTION_BC_FULL_HEAD_HD -> "strategy_option_bc"
+                            com.example.onnx.FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT -> "strategy_option_d"
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (selected) Color(0xFF0F2C59) else Color(0xFF1E293B)
+                                )
+                                .border(
+                                    width = if (selected) 1.8.dp else 1.dp,
+                                    color = if (selected) Color(0xFF00E5FF) else Color(0xFF334155),
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable { onSelectRequested(option) }
+                                .padding(horizontal = 6.dp, vertical = 6.dp)
+                                .testTag(tag),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "Option ${option.shortCode}",
+                                    color = if (selected) Color(0xFF38BDF8) else Color(0xFFE2E8F0),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = option.badgeSummary,
+                                    color = if (selected) Color.White else Color(0xFF94A3B8),
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontSize = 9.5.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
         Text(
-            text = "தொட்டுப் பார்க்கவும்: ${selectedOption.shortCode} தேர்ந்தெடுக்கப்பட்டது (விளக்கம் பார்க்க A / B / B+C தட்டவும்)",
+            text = "தொட்டுப் பார்க்கவும்: ${selectedOption.shortCode} தேர்ந்தெடுக்கப்பட்டது (விளக்கம் பார்க்க A / B / B+C / D தட்டவும்)",
             color = Color(0xFF475569),
             fontSize = 10.sp,
             lineHeight = 14.sp
         )
+    }
+}
+
+@Composable
+internal fun CraniofacialAnalysisDiagnosticCard(
+    report: com.example.onnx.CraniofacialPairReport?,
+    selectedStrategy: com.example.onnx.FaceSwapStrategyOption,
+    modifier: Modifier = Modifier
+) {
+    val badgeColor = when {
+        report == null -> Color(0xFF64748B)
+        report.overallCompatibilityPct >= 82 -> Color(0xFF059669)
+        report.overallCompatibilityPct >= 66 -> Color(0xFFD97706)
+        else -> Color(0xFFDC2626)
+    }
+    val badgeText = if (report != null) "${report.overallCompatibilityPct}% Match" else "1-2-3 Ready"
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("craniofacial_analysis_card"),
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFF0F9FF),
+        border = BorderStroke(1.dp, Color(0x550284C7))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 9.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "1-2-3 Craniofacial Match & Diagnostics",
+                    color = Color(0xFF0F172A),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.5.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Surface(
+                    shape = RoundedCornerShape(7.dp),
+                    color = badgeColor.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.45f))
+                ) {
+                    Text(
+                        text = badgeText,
+                        color = badgeColor,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            if (report == null) {
+                Text(
+                    text = "Source + Target படங்களைத் தேர்ந்தெடுத்தால் 1-2-3 முக வடிவ (Cheek 1 : SqJaw 0.7 : Chin 0.4 & K/L Neck) பகுப்பாய்வு இங்கே தோன்றும்.",
+                    color = Color(0xFF475569),
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp
+                )
+            } else {
+                Text(
+                    text = "Jaw Ratios: ${report.jawMatchSummary}",
+                    color = Color(0xFF1E293B),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "${report.foreheadThirdsSummary} • ${report.poseDeltaSummary}",
+                    color = Color(0xFF334155),
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = "${report.klArcSummary} • ${report.reactionSyncSummary}",
+                    color = Color(0xFF475569),
+                    fontSize = 9.5.sp
+                )
+                Text(
+                    text = report.mandibularSummary,
+                    color = Color(0xFF0F766E),
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 9.5.sp,
+                    modifier = Modifier.testTag("craniofacial_mandibular_summary")
+                )
+                if (selectedStrategy == com.example.onnx.FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
+                    Text(
+                        text = "Option D Active: A (Source Face + Target Reaction + Target Skin) + B (Target Neck/Body)",
+                        color = Color(0xFF0369A1),
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 10.sp
+                    )
+                }
+                if (report.diagnosticWarnings.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFFFFBEB),
+                        border = BorderStroke(1.dp, Color(0x66D97706)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("craniofacial_warning_box")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            report.diagnosticWarnings.forEach { warn ->
+                                Text(
+                                    text = "⚠ $warn",
+                                    color = Color(0xFF92400E),
+                                    fontSize = 9.5.sp,
+                                    lineHeight = 13.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

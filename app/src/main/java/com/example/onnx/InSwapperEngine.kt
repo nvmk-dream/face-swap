@@ -258,7 +258,7 @@ object InSwapperEngine {
         if (isCancelled()) throw java.util.concurrent.CancellationException("Face swap cancelled by user.")
         val embMs = (System.currentTimeMillis() - tEmbStart).coerceAtLeast(1L)
 
-        // Stage 3a: Age Harmony Plan (Skip automatic body-age mutation in Clean Option B unless user sets manual age slider)
+        // Stage 3a: Age Harmony Plan (Run MiVOLO v2 before loading heavy Swapper / GFPGAN sessions)
         val ageConfig = AgeHarmonyEngine.AgeHarmonyConfig(
             autoBodyAgeMatch = autoBodyAgeMatch && swapStrategyOption != FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
             manualAgingFactor = faceAgingFactor
@@ -545,7 +545,9 @@ object InSwapperEngine {
                         },
                         ageMatchPlan = targetAgePlans.getOrNull(idx),
                         faceReagingFile = if (reagingFile.exists() && reagingFile.length() > 1024L) reagingFile else null,
-                        swapStrategyOption = swapStrategyOption
+                        swapStrategyOption = swapStrategyOption,
+                        sourceDetectedFace = sourceFace,
+                        targetDetectedFace = targetFace
                     )
 
                     rawSwappedCrop.recycle()
@@ -1263,7 +1265,7 @@ object InSwapperEngine {
         return swappedBitmap to diagSummary
     }
 
-    internal const val PASSTHROUGH_CENTER_DIFF_THRESHOLD = 20.0f
+    internal const val PASSTHROUGH_CENTER_DIFF_THRESHOLD = 7.5f
 
     internal fun shouldRetryNearIdentityPassthrough(
         isHyperSwapModel: Boolean,
@@ -1273,7 +1275,7 @@ object InSwapperEngine {
     ): Boolean {
         return isHyperSwapModel &&
             !hasCorruption &&
-            lumaCorrelation > 0.955f &&
+            lumaCorrelation > 0.965f &&
             centerFaceDiff < PASSTHROUGH_CENTER_DIFF_THRESHOLD
     }
 
