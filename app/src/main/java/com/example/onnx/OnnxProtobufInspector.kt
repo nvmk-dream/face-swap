@@ -952,7 +952,8 @@ object OnnxProtobufInspector {
                 lower.contains("fran") ||
                 ((lower == "unet.onnx" || lower == "unet_fp16.onnx") &&
                     !parentPathHint.lowercase().let { p ->
-                        p.contains("sd") || p.contains("inpaint") || p.contains("realvis")
+                        p.contains("sd") || p.contains("inpaint") || p.contains("realvis") ||
+                            p.contains("realistic_vision") || p.contains("realistic-vision")
                     }) ->
                 ModelSlot.FACE_REAGING
             lower.contains("facemesh") || lower.contains("face_mesh") || lower.contains("face-mesh") ||

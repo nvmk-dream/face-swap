@@ -214,6 +214,20 @@ fun FaceSwapStudioApp(
         }
     }
 
+    val realVisFp16FolderTreePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            viewModel.importRealisticVisionFp16FromFolder(treeUri)
+        }
+    }
+
     var pendingSingleTokenizerHint by remember { mutableStateOf<String?>(null) }
 
     val clipTokenizerPicker = rememberLauncherForActivityResult(
@@ -686,6 +700,9 @@ fun FaceSwapStudioApp(
                         inpaintSourceFolderPicker.launch(arrayOf("image/*"))
                     },
                     onSelectInpaintModelOption = viewModel::selectInpaintModelOption,
+                    onUploadRealVisFp16Folder = {
+                        realVisFp16FolderTreePicker.launch(null)
+                    },
                     onUploadClipTokenizer = {
                         clipTokenizerPicker.launch(arrayOf("*/*"))
                     },
@@ -767,6 +784,9 @@ fun FaceSwapStudioApp(
                     onUploadSingleTokenizerFile = { expectedName ->
                         pendingSingleTokenizerHint = expectedName
                         singleTokenizerPicker.launch(arrayOf("*/*"))
+                    },
+                    onUploadRealVisFp16Folder = {
+                        realVisFp16FolderTreePicker.launch(null)
                     },
                     onPreloadMemoryModels = viewModel::preloadModelsIntoMemory,
                     onReleaseMemoryModels = viewModel::releaseModelsFromMemory

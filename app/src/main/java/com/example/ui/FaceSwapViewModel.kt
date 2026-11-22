@@ -917,6 +917,79 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun importRealisticVisionFp16FromFolder(treeUri: Uri) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isInspectingModels = true,
+                    statusBannerMessage = "Scanning & uploading Realistic Vision V5.1 (FP16) folder...",
+                    errorBannerMessage = null
+                )
+            }
+            val ctx = getApplication<Application>()
+            val importedTypes = withContext(Dispatchers.IO) {
+                OnnxProtobufInspector.clearCachedSessions()
+                SdInpaintOnnxEngine.clearSessionCache()
+                runCatching {
+                    SdInpaintPackManager.importSdInpaintPacksFromTreeUri(
+                        context = ctx,
+                        treeUri = treeUri,
+                        targetPackTypeOverride = SdInpaintPackType.REALVIS_FP16,
+                        onProgress = { msg ->
+                            _uiState.update { s -> s.copy(statusBannerMessage = msg) }
+                        }
+                    )
+                }.getOrDefault(emptyList())
+            }
+            val (packDetails, tokStatus, lamaFile) = withContext(Dispatchers.IO) {
+                Triple(
+                    SdInpaintPackManager.discoverInstalledPacks(ctx),
+                    SdInpaintPackManager.inspectClipTokenizerStatus(ctx),
+                    OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
+                )
+            }
+            val sdPackTypes = packDetails.map { it.packType }
+            val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
+            val succeeded = SdInpaintPackType.REALVIS_FP16 in importedTypes ||
+                SdInpaintPackType.REALVIS_FP16 in sdPackTypes
+            val nextOption = if (succeeded) {
+                InpaintModelOption.REALVIS_FP16
+            } else {
+                _uiState.value.inpaintModelOption
+            }
+            val nextLabel = SdInpaintPackManager.formatDropdownLabel(
+                ctx,
+                nextOption,
+                if (hasLama) lamaFile else null
+            )
+            if (succeeded) {
+                OnnxProtobufInspector.saveLinkedModelsFolderUri(ctx, treeUri)
+            }
+            _uiState.update {
+                it.copy(
+                    installedSdInpaintPacks = sdPackTypes,
+                    installedSdPackDetails = packDetails,
+                    clipTokenizerStatus = tokStatus,
+                    isLamaInpaintReady = hasLama,
+                    inpaintModelOption = nextOption,
+                    inpaintModelLabel = nextLabel,
+                    isInspectingModels = false,
+                    statusBannerMessage = if (succeeded) {
+                        val tokNote = if (tokStatus.isReady) "Tokenizer Ready ✓" else "Tokenizer Missing"
+                        "✓ Realistic Vision V5.1 (FP16) தனி slot-இல் upload ஆகிவிட்டது ($tokNote)."
+                    } else {
+                        null
+                    },
+                    errorBannerMessage = if (!succeeded) {
+                        "தேர்வு செய்த folder-இல் unet, text_encoder, vae_encoder, vae_decoder ONNX கோப்புகள் கிடைக்கவில்லை. Realistic_Vision_V5.1-inpainting-onnx-fp16 folder-ஐ தேர்வு செய்யவும்."
+                    } else {
+                        null
+                    }
+                )
+            }
+        }
+    }
+
     fun onTokenizerPickerCancelled() {
         _uiState.update {
             it.copy(
@@ -2264,6 +2337,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         val nextOption = when {
             SdInpaintPackType.SD15_FP32 in installedPacks -> InpaintModelOption.SD15_FP32
             SdInpaintPackType.REALVIS_INT8 in installedPacks -> InpaintModelOption.REALVIS_INT8
+            SdInpaintPackType.REALVIS_FP16 in installedPacks -> InpaintModelOption.REALVIS_FP16
             SdInpaintPackType.SD15_FP16 in installedPacks -> InpaintModelOption.SD15_FP16
             else -> cur.inpaintModelOption
         }

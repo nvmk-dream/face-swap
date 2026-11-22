@@ -163,6 +163,7 @@ object InteractiveInpaintEngine {
 
         val requiresExplicitSdPack = selectedOption == InpaintModelOption.SD15_FP32 ||
             selectedOption == InpaintModelOption.SD15_FP16 ||
+            selectedOption == InpaintModelOption.REALVIS_FP16 ||
             selectedOption == InpaintModelOption.REALVIS_INT8
         if (requiresExplicitSdPack) {
             if (primarySdPack == null) {

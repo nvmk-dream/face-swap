@@ -147,6 +147,7 @@ fun InpaintPage(
     onPickSourceFromFolder: () -> Unit,
     onSelectModelOption: (InpaintModelOption) -> Unit,
     onImportModelFolder: () -> Unit,
+    onUploadRealVisFp16Folder: () -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onMaskUpdated: (Bitmap?) -> Unit,
@@ -381,6 +382,7 @@ fun InpaintPage(
 
                         val hasFp32 = SdInpaintPackType.SD15_FP32 in uiState.installedSdInpaintPacks
                         val hasInt8 = SdInpaintPackType.REALVIS_INT8 in uiState.installedSdInpaintPacks
+                        val hasRealVisFp16 = SdInpaintPackType.REALVIS_FP16 in uiState.installedSdInpaintPacks
                         val hasFp16 = SdInpaintPackType.SD15_FP16 in uiState.installedSdInpaintPacks
                         val hasLama = uiState.isLamaInpaintReady
 
@@ -389,8 +391,8 @@ fun InpaintPage(
                             onDismissRequest = { showModelDropdown = false }
                         ) {
                             ModelDropdownEntry(
-                                title = "Auto (FP32 / INT8 > FP16)",
-                                statusBadge = if (hasFp32 || hasInt8 || hasFp16) "Priority" else "Coming Soon",
+                                title = "Auto (FP32 / INT8 / RV-FP16 > FP16)",
+                                statusBadge = if (hasFp32 || hasInt8 || hasRealVisFp16 || hasFp16) "Priority" else "Coming Soon",
                                 selected = uiState.inpaintModelOption == InpaintModelOption.AUTO,
                                 enabled = true,
                                 onClick = {
@@ -415,6 +417,16 @@ fun InpaintPage(
                                 enabled = hasInt8,
                                 onClick = {
                                     onSelectModelOption(InpaintModelOption.REALVIS_INT8)
+                                    showModelDropdown = false
+                                }
+                            )
+                            ModelDropdownEntry(
+                                title = "Realistic Vision V5.1 (FP16)",
+                                statusBadge = if (hasRealVisFp16) "Photoreal • Ready" else "Missing",
+                                selected = uiState.inpaintModelOption == InpaintModelOption.REALVIS_FP16,
+                                enabled = hasRealVisFp16,
+                                onClick = {
+                                    onSelectModelOption(InpaintModelOption.REALVIS_FP16)
                                     showModelDropdown = false
                                 }
                             )
@@ -468,6 +480,32 @@ fun InpaintPage(
                                 onClick = {
                                     showModelDropdown = false
                                     onImportModelFolder()
+                                }
+                            )
+                            DropdownMenuItem(
+                                modifier = Modifier.testTag("inpaint_dropdown_upload_realvis_fp16"),
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.UploadFile,
+                                        contentDescription = "Upload Realistic Vision V5.1 FP16 Folder",
+                                        tint = Color(0xFF4F46E5)
+                                    )
+                                },
+                                text = {
+                                    Text(
+                                        text = if (hasRealVisFp16) {
+                                            "Realistic Vision V5.1 (FP16) ✓ (Replace)"
+                                        } else {
+                                            "Upload Realistic Vision V5.1 (FP16)"
+                                        },
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5),
+                                        fontSize = 13.sp
+                                    )
+                                },
+                                onClick = {
+                                    showModelDropdown = false
+                                    onUploadRealVisFp16Folder()
                                 }
                             )
                             DropdownMenuItem(
@@ -665,11 +703,13 @@ fun InpaintPage(
                 }
             }
 
-            // Prominent 1-Tap Folder Auto-Pick (.onnx & SD 1.5 Pack)
+            // Prominent 1-Tap Folder Auto-Pick (.onnx & SD 1.5 Pack) + Dedicated RealVis V5.1 (FP16) Slot
             InpaintFolderAutoPickButton(
                 isBusy = uiState.isInspectingModels,
                 installedPacksCount = uiState.installedSdInpaintPacks.size,
-                onAutoPickFolder = onImportModelFolder
+                onAutoPickFolder = onImportModelFolder,
+                hasRealVisFp16Installed = SdInpaintPackType.REALVIS_FP16 in uiState.installedSdInpaintPacks,
+                onUploadRealVisFp16Folder = onUploadRealVisFp16Folder
             )
 
             val usesSdPack = uiState.installedSdInpaintPacks.isNotEmpty() &&

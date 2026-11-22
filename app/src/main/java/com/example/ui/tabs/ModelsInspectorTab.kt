@@ -73,6 +73,7 @@ fun ModelsInspectorTab(
     onImportAllFromFolder: () -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
+    onUploadRealVisFp16Folder: () -> Unit = {},
     onPreloadMemoryModels: () -> Unit = {},
     onReleaseMemoryModels: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -461,6 +462,7 @@ fun ModelsInspectorTab(
                 isBusy = isInspecting,
                 onUploadClipTokenizer = onUploadClipTokenizer,
                 onUploadSingleTokenizerFile = onUploadSingleTokenizerFile,
+                onUploadRealVisFp16Folder = onUploadRealVisFp16Folder,
                 onImportSdFolder = onImportAllFromFolder
             )
 
@@ -839,9 +841,11 @@ internal fun SdInpaintAndTokenizerCard(
     isBusy: Boolean,
     onUploadClipTokenizer: () -> Unit,
     onUploadSingleTokenizerFile: (String) -> Unit = {},
+    onUploadRealVisFp16Folder: () -> Unit = {},
     onImportSdFolder: () -> Unit
 ) {
     val isTokenizerReady = clipTokenizerStatus.isReady
+    val hasRealVisFp16 = sdPackDetails.any { it.packType == com.example.onnx.SdInpaintPackType.REALVIS_FP16 }
     val cardBorder = if (isTokenizerReady) Color(0xFF10B981) else Color(0xFFF59E0B)
     Card(
         modifier = Modifier
@@ -1002,6 +1006,37 @@ internal fun SdInpaintAndTokenizerCard(
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("SD Folder", fontWeight = FontWeight.SemiBold)
                 }
+            }
+
+            OutlinedButton(
+                onClick = onUploadRealVisFp16Folder,
+                enabled = !isBusy,
+                border = BorderStroke(
+                    1.2.dp,
+                    if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("models_upload_realvis_fp16_button"),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Folder,
+                    contentDescription = "Upload Realistic Vision V5.1 (FP16) Folder",
+                    tint = if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (hasRealVisFp16) {
+                        "✓ Realistic Vision V5.1 (FP16) Ready • Replace Folder"
+                    } else {
+                        "Upload Realistic_Vision_V5.1 (FP16) Folder"
+                    },
+                    color = if (hasRealVisFp16) Color(0xFF065F46) else Color(0xFF3730A3),
+                    fontWeight = FontWeight.Bold
+                )
             }
 
             FlowRow(

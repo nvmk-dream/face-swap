@@ -146,4 +146,24 @@ class ExampleUnitTest {
         assertTrue(updated.contains("red silk saree"))
         assertTrue(updated.contains("feet"))
     }
+
+    @Test
+    fun classifyPackType_separatesRealisticVisionFp16FromSd15Fp16AndRealVisInt8() {
+        assertEquals(
+            com.example.onnx.SdInpaintPackType.REALVIS_FP16,
+            com.example.onnx.SdInpaintPackManager.classifyPackType("Realistic_Vision_V5.1-inpainting-onnx-fp16")
+        )
+        assertEquals(
+            com.example.onnx.SdInpaintPackType.SD15_FP16,
+            com.example.onnx.SdInpaintPackManager.classifyPackType("stable-diffusion-v1-5-inpainting-onnx-fp16")
+        )
+        assertEquals(
+            com.example.onnx.SdInpaintPackType.REALVIS_INT8,
+            com.example.onnx.SdInpaintPackManager.classifyPackType("realvis51-inpaint-int8-onnx")
+        )
+        assertEquals(
+            com.example.onnx.SdInpaintPackType.SD15_FP32,
+            com.example.onnx.SdInpaintPackManager.classifyPackType("sd15-inpainting-onnx-fp32")
+        )
+    }
 }

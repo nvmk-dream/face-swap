@@ -54,6 +54,8 @@ fun InpaintFolderAutoPickButton(
     isBusy: Boolean,
     installedPacksCount: Int,
     onAutoPickFolder: () -> Unit,
+    hasRealVisFp16Installed: Boolean = false,
+    onUploadRealVisFp16Folder: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(14.dp)
@@ -61,86 +63,147 @@ fun InpaintFolderAutoPickButton(
         shape = shape,
         color = Color(0xEBF0F9FF),
         border = BorderStroke(1.3.dp, Color(0xFF0284C7)),
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .clip(shape)
-            .clickable(enabled = !isBusy, onClick = onAutoPickFolder)
-            .testTag("inpaint_folder_autopick_btn")
+        modifier = modifier.fillMaxWidth()
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clickable(enabled = !isBusy, onClick = onAutoPickFolder)
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("inpaint_folder_autopick_btn"),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.weight(1f)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.linearGradient(
-                                listOf(Color(0xFF0284C7), Color(0xFF6366F1))
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    if (isBusy) {
-                        CircularProgressIndicator(
-                            color = Color.White,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(18.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFF0284C7), Color(0xFF6366F1))
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isBusy) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = "Auto-Pick ONNX & SD Model Folder",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        Text(
+                            text = if (isBusy) "Scanning & Auto-Uploading Models..." else "Folder Auto-Pick (.onnx & SD 1.5 Pack)",
+                            color = Color(0xFF0F172A),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.FolderOpen,
-                            contentDescription = "Auto-Pick ONNX & SD Model Folder",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
+                        Text(
+                            text = if (installedPacksCount > 0) {
+                                "$installedPacksCount SD pack ready • Tap to add or switch folder"
+                            } else {
+                                "Folder select செய்தால் போதும் — ONNX + Tokenizer auto upload ஆகும்"
+                            },
+                            color = Color(0xFF0369A1),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
-                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Color(0xFF0284C7)
+                ) {
                     Text(
-                        text = if (isBusy) "Scanning & Auto-Uploading Models..." else "Folder Auto-Pick (.onnx & SD 1.5 Pack)",
-                        color = Color(0xFF0F172A),
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (installedPacksCount > 0) {
-                            "$installedPacksCount SD pack ready • Tap to add or switch folder"
-                        } else {
-                            "Folder select செய்தால் போதும் — ONNX + Tokenizer auto upload ஆகும்"
-                        },
-                        color = Color(0xFF0369A1),
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        text = "Pick",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.5.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                     )
                 }
             }
-            Spacer(modifier = Modifier.width(6.dp))
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = Color(0xFF0284C7)
-            ) {
-                Text(
-                    text = "Pick",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.5.sp,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+
+            if (onUploadRealVisFp16Folder != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Color(0x330284C7))
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .background(
+                            if (hasRealVisFp16Installed) Color(0x80ECFDF5) else Color(0x66EEF2FF)
+                        )
+                        .clickable(enabled = !isBusy, onClick = onUploadRealVisFp16Folder)
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("inpaint_upload_realvis_fp16_btn"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(1.dp)
+                    ) {
+                        Text(
+                            text = "Realistic_Vision_V5.1 (FP16) — தனி Slot",
+                            color = Color(0xFF0F172A),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (hasRealVisFp16Installed) {
+                                "✓ Installed separately from SD 1.5 (FP16) • Tap to Replace"
+                            } else {
+                                "SD 1.5 (FP16) உடன் சேராமல் தனி folder-ஆக upload செய்ய தட்டவும்"
+                            },
+                            color = if (hasRealVisFp16Installed) Color(0xFF047857) else Color(0xFF4338CA),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 10.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (hasRealVisFp16Installed) Color(0xFF059669) else Color(0xFF4F46E5)
+                    ) {
+                        Text(
+                            text = if (hasRealVisFp16Installed) "✓ Replace" else "+ Upload",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
             }
         }
     }
