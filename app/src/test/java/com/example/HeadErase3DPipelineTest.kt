@@ -10,12 +10,14 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.onnx.CleanEraseHeadReplacementEngine
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceMesh3DEngine
+import com.example.onnx.FaceReactionSourceMode
 import com.example.onnx.GhostHeadReplacementEngine
 import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.HeadSegmentationAndInpainting
 import com.example.onnx.ModelSlot
 import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.SdInpaintOnnxEngine
+import com.example.onnx.SkinToneSourceMode
 import com.example.ui.FaceSwapUiState
 import com.example.ui.FaceSwapViewModel
 import com.example.ui.ProcessingQualityLevel
@@ -1111,6 +1113,194 @@ class HeadErase3DPipelineTest {
         tgtBmp.recycle()
         result.outputBitmap.recycle()
     }
+
+    @Test
+    fun `closeSmallNotchesAndFillInteriorHoles seals enclosed brow and ear holes without filling exterior`() {
+        val size = 64
+        val alpha = FloatArray(size * size)
+        val skin = FloatArray(size * size)
+        for (y in 12..52) {
+            for (x in 14..50) {
+                alpha[y * size + x] = 1.0f
+                if (y >= 24) skin[y * size + x] = 1.0f
+            }
+        }
+        // Punch enclosed highlight hole inside forehead/brow and cheek
+        for (y in 20..24) {
+            for (x in 22..26) {
+                alpha[y * size + x] = 0.0f
+                skin[y * size + x] = 0.0f
+            }
+        }
+        for (y in 34..37) {
+            for (x in 34..37) {
+                alpha[y * size + x] = 0.0f
+                skin[y * size + x] = 0.0f
+            }
+        }
+
+        HeadSegmentationAndInpainting.closeSmallNotchesAndFillInteriorHoles(alpha, skin, size)
+
+        assertEquals(1.0f, alpha[22 * size + 24], 0.01f)
+        assertEquals(1.0f, alpha[35 * size + 35], 0.01f)
+        assertEquals(1.0f, skin[35 * size + 35], 0.01f)
+        assertEquals("Exterior corners must remain 0f", 0.0f, alpha[4 * size + 4], 0.01f)
+    }
+
+    @Test
+    fun `detectInnerPhotoContentBounds strips Gallery white UI bars and keeps intact bun uncut`() {
+        val w = 240
+        val h = 400
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        // Top & bottom Gallery white UI bars (y=0..89 and y=310..399) with dark status bar text glyphs
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                px[y * w + x] = when {
+                    y < 90 || y >= 310 -> {
+                        if (x in 20..44 && (y in 18..24 || y in 350..356)) Color.rgb(30, 30, 30)
+                        else Color.rgb(252, 252, 252)
+                    }
+                    else -> Color.rgb(185, 200, 195) // Interior photo wall
+                }
+            }
+        }
+        // Tall intact portrait + hair bun inside y=104..308
+        val cx = 120f
+        val eyeY = 215f
+        val eyeDist = 40f
+        for (y in 104 until 310) {
+            for (x in 0 until w) {
+                val hDx = (x - cx) / 62f
+                val hDy = (y - 185f) / 76f
+                if (hDx * hDx + hDy * hDy <= 1f) {
+                    px[y * w + x] = Color.rgb(28, 24, 24)
+                }
+                val fDx = (x - cx) / 42f
+                val fDy = (y - 222f) / 50f
+                if (fDx * fDx + fDy * fDy <= 1f) {
+                    px[y * w + x] = Color.rgb(228, 182, 152)
+                }
+            }
+        }
+        bmp.setPixels(px, 0, w, 0, 0, w, h)
+
+        val (minY, maxY) = FaceMesh3DEngine.detectInnerPhotoContentBounds(
+            srcPixels = px,
+            srcW = w,
+            srcH = h,
+            srcEyeY = eyeY,
+            srcEyeDist = eyeDist,
+            srcChinY = 278f
+        )
+        assertTrue("Expected top white Gallery UI bar excluded (minY=$minY)", minY >= 85f)
+        assertTrue("Expected bottom white Gallery UI bar excluded (maxY=$maxY)", maxY <= 312f)
+
+        // Also run full B+C execute with gallery-framed Source to confirm Output 2 cutout strips white UI bar & preserves head core
+        val srcFace = DetectedFace(
+            index = 0,
+            boundingBox = RectF(cx - 46f, eyeY - 40f, cx + 46f, 280f),
+            score = 0.99f,
+            landmarks5 = listOf(
+                PointF(cx - eyeDist * 0.5f, eyeY),
+                PointF(cx + eyeDist * 0.5f, eyeY),
+                PointF(cx, eyeY + eyeDist * 0.55f),
+                PointF(cx - eyeDist * 0.42f, eyeY + eyeDist * 1.05f),
+                PointF(cx + eyeDist * 0.42f, eyeY + eyeDist * 1.05f)
+            ),
+            detectorSource = "GalleryScreenshotSrc"
+        )
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = 256,
+            height = 256,
+            bgColor = Color.rgb(90, 58, 36),
+            skinColor = Color.rgb(212, 168, 140),
+            hairColor = Color.rgb(24, 20, 20)
+        )
+
+        val res = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = bmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(tgtFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            onProgress = {}
+        )
+        val cutout = res.sourceHeadCutoutPreview!!
+        // Bottom-corner gallery white UI rectangle must have alpha == 0f (completely transparent) in Output 2!
+        assertEquals(0, Color.alpha(cutout.getPixel(80, 485)))
+        assertEquals(0, Color.alpha(cutout.getPixel(430, 485)))
+
+        bmp.recycle()
+        tgtBmp.recycle()
+        res.outputBitmap.recycle()
+    }
+
+    @Test
+    fun `CleanErase TARGET_REACTION preserves Target closed-mouth smile vs SOURCE_REACTION open teeth`() {
+        val w = 256
+        val h = 256
+        val (srcBmp, srcFace) = createPortrait(
+            width = w,
+            height = h,
+            bgColor = Color.rgb(230, 235, 240),
+            skinColor = Color.rgb(228, 185, 155),
+            hairColor = Color.rgb(26, 22, 22)
+        )
+        val srcMouthY = ((srcFace.landmarks5[3].y + srcFace.landmarks5[4].y) * 0.5f).toInt()
+        for (y in (srcMouthY - 5)..(srcMouthY + 5)) {
+            for (x in 114..142) {
+                srcBmp.setPixel(x, y, Color.rgb(248, 248, 248)) // Open bright white Source teeth
+            }
+        }
+
+        val (tgtBmp, tgtFace) = createPortrait(
+            width = w,
+            height = h,
+            bgColor = Color.rgb(120, 80, 50),
+            skinColor = Color.rgb(212, 168, 140),
+            hairColor = Color.rgb(24, 20, 20)
+        )
+        val tgtMouthY = ((tgtFace.landmarks5[3].y + tgtFace.landmarks5[4].y) * 0.5f).toInt()
+        for (y in (tgtMouthY - 4)..(tgtMouthY + 4)) {
+            for (x in 114..142) {
+                tgtBmp.setPixel(x, y, Color.rgb(168, 74, 82)) // Closed rose-berry Target smile
+            }
+        }
+
+        val targetReactRes = CleanEraseHeadReplacementEngine.execute(
+            context = context,
+            ortEnv = null,
+            sourceBitmap = srcBmp,
+            sourceFace = srcFace,
+            targetBitmap = tgtBmp,
+            targetFacesToReplace = listOf(tgtFace),
+            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+            enableColorTransfer = true,
+            enableProvenanceWatermark = false,
+            allowTwoModelFallbackForTesting = true,
+            lowMemoryMode = true,
+            faceReactionMode = FaceReactionSourceMode.TARGET_REACTION,
+            onProgress = {}
+        )
+
+        val mouthCenterTgt = targetReactRes.outputBitmap.getPixel(128, tgtMouthY)
+        assertTrue(
+            "Expected TARGET_REACTION mouth center to keep closed Target rose lip (not white Source teeth), got RGB=(${Color.red(mouthCenterTgt)},${Color.green(mouthCenterTgt)},${Color.blue(mouthCenterTgt)})",
+            Color.red(mouthCenterTgt) > Color.green(mouthCenterTgt) + 30 && Color.blue(mouthCenterTgt) < 150
+        )
+
+        srcBmp.recycle()
+        tgtBmp.recycle()
+        targetReactRes.outputBitmap.recycle()
+    }
 }
+
 
 

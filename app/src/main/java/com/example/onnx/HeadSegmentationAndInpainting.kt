@@ -275,6 +275,9 @@ object HeadSegmentationAndInpainting {
             }
         }
 
+        // Close small jagged SegFormer highlight/earring notches and seal any enclosed interior 0-holes
+        closeSmallNotchesAndFillInteriorHoles(headMaskCrop, skinMaskCrop, cropSize)
+
         val cropPixels = IntArray(cropSize * cropSize)
         alignedHeadCrop.getPixels(cropPixels, 0, cropSize, 0, 0, cropSize, cropSize)
         val smoothedAlpha = refineAlphaJointBilateral(headMaskCrop, cropPixels, cropSize)
@@ -290,6 +293,118 @@ object HeadSegmentationAndInpainting {
                 "segformer_B5_ce.onnx (ONNX Runtime)"
             }
         )
+    }
+
+    /**
+     * Repairs SegFormer binary argmax highlight dropouts (eyebrow highlights, cheeks, shiny earrings):
+     * 1) 3px morphological closing inside the inner head region to bridge narrow notches,
+     * 2) BFS flood-fill from crop borders to locate and seal 100% of enclosed interior 0-islands.
+     */
+    internal fun closeSmallNotchesAndFillInteriorHoles(
+        headAlpha: FloatArray,
+        skinMask: FloatArray,
+        size: Int
+    ) {
+        val total = size * size
+        if (headAlpha.size < total || size < 16) return
+
+        // Step 1: 3px morphological closing (dilate then erode) on foreground alpha
+        val rad = max(2, size / 170)
+        val dilated = FloatArray(total)
+        for (y in 0 until size) {
+            val y0 = max(0, y - rad)
+            val y1 = min(size - 1, y + rad)
+            val row = y * size
+            for (x in 0 until size) {
+                if (headAlpha[row + x] >= 0.85f) {
+                    dilated[row + x] = headAlpha[row + x]
+                    continue
+                }
+                var m = headAlpha[row + x]
+                val x0 = max(0, x - rad)
+                val x1 = min(size - 1, x + rad)
+                for (ny in y0..y1) {
+                    val nRow = ny * size
+                    for (nx in x0..x1) {
+                        val v = headAlpha[nRow + nx]
+                        if (v > m) m = v
+                    }
+                }
+                dilated[row + x] = m
+            }
+        }
+        for (y in 0 until size) {
+            val y0 = max(0, y - rad)
+            val y1 = min(size - 1, y + rad)
+            val row = y * size
+            for (x in 0 until size) {
+                if (headAlpha[row + x] >= 0.85f) continue
+                var m = dilated[row + x]
+                val x0 = max(0, x - rad)
+                val x1 = min(size - 1, x + rad)
+                for (ny in y0..y1) {
+                    val nRow = ny * size
+                    for (nx in x0..x1) {
+                        val v = dilated[nRow + nx]
+                        if (v < m) m = v
+                    }
+                }
+                if (m > headAlpha[row + x]) {
+                    headAlpha[row + x] = m
+                    if (m > 0.5f && skinMask[row + x] < 0.5f) {
+                        // Inherit skin label if close neighbors are skin
+                        val nbSkin = skinMask[max(0, y - rad) * size + x] +
+                            skinMask[min(size - 1, y + rad) * size + x] +
+                            skinMask[row + max(0, x - rad)] +
+                            skinMask[row + min(size - 1, x + rad)]
+                        if (nbSkin >= 1.5f) skinMask[row + x] = 1.0f
+                    }
+                }
+            }
+        }
+
+        // Step 2: BFS flood-fill from image borders on exterior pixels (alpha < 0.45f)
+        val exterior = BooleanArray(total)
+        val queue = IntArray(total)
+        var head = 0
+        var tail = 0
+        fun trySeed(idx: Int) {
+            if (!exterior[idx] && headAlpha[idx] < 0.45f) {
+                exterior[idx] = true
+                queue[tail++] = idx
+            }
+        }
+        for (x in 0 until size) {
+            trySeed(x)
+            trySeed((size - 1) * size + x)
+        }
+        for (y in 1 until size - 1) {
+            trySeed(y * size)
+            trySeed(y * size + (size - 1))
+        }
+        while (head < tail) {
+            val cur = queue[head++]
+            val cx = cur % size
+            val cy = cur / size
+            if (cx > 0) trySeed(cur - 1)
+            if (cx + 1 < size) trySeed(cur + 1)
+            if (cy > 0) trySeed(cur - size)
+            if (cy + 1 < size) trySeed(cur + size)
+        }
+
+        // Any non-exterior pixel with alpha < 0.45f is an enclosed interior hole -> fill to 1.0f
+        // (strictly leaves [0.45f..0.95f] soft exterior hair/feathering perimeter untouched!)
+        for (i in 0 until total) {
+            if (!exterior[i] && headAlpha[i] < 0.45f) {
+                headAlpha[i] = 1.0f
+                if (skinMask[i] < 0.5f) {
+                    val y = i / size
+                    if (y > (size * 0.28f).toInt()) {
+                        skinMask[i] = 1.0f
+                    }
+                }
+            }
+        }
     }
 
     private fun runSegformerOnnx(
@@ -376,8 +491,15 @@ object HeadSegmentationAndInpainting {
                             ).coerceIn(0f, 1f)
 
                         val idx = rowOff + x
+                        val nx = x.toFloat() / cropSize.toFloat()
                         val combined = if (hasNeuralSegformer) {
-                            (0.40f * baseAlpha[idx] + 0.60f * modVal).coerceIn(0f, 1f)
+                            val blended = (0.40f * baseAlpha[idx] + 0.60f * modVal).coerceIn(0f, 1f)
+                            val inCenterHeadZone = nx in 0.20f..0.80f && ny in 0.14f..0.86f
+                            if (inCenterHeadZone && modVal >= 0.78f && baseAlpha[idx] < 0.35f) {
+                                max(blended, modVal * 0.94f)
+                            } else {
+                                blended
+                            }
                         } else {
                             // Contrast-clean MODNet foreground (solid hair/face = 1.0, crisp background = 0.0)
                             val shapedMod = when {
@@ -386,7 +508,6 @@ object HeadSegmentationAndInpainting {
                                 else -> ((modVal - 0.09f) / 0.71f).coerceIn(0f, 1f)
                             }
                             // Only guarantee interior face oval near eye/nose/mouth stays 1.0 (never exterior walls)
-                            val nx = x.toFloat() / cropSize.toFloat()
                             val fDx = (nx - 0.50f) / 0.17f
                             val fDy = (ny - 0.57f) / 0.19f
                             val inFaceCore = (fDx * fDx + fDy * fDy) < 0.85f

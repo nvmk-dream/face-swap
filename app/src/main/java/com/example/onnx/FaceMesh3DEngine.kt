@@ -668,7 +668,7 @@ object FaceMesh3DEngine {
         var deltaAxisRad = tgtAxisAngle - srcAxisAngle
         while (deltaAxisRad > Math.PI.toFloat()) deltaAxisRad -= (2.0 * Math.PI).toFloat()
         while (deltaAxisRad < -Math.PI.toFloat()) deltaAxisRad += (2.0 * Math.PI).toFloat()
-        val axisSyncRad = (deltaAxisRad * 0.55f).coerceIn(-0.18f, 0.18f)
+        val axisSyncRad = (deltaAxisRad * 0.85f).coerceIn(-0.30f, 0.30f)
         val yawDeltaNorm = ((targetMesh.headPose.yawDeg - sourceMesh.headPose.yawDeg) / 55f).coerceIn(-0.48f, 0.48f)
 
         fun rotateAndPerspectiveSync(p: PointF, rotFraction: Float, yawPerspStrength: Float): PointF {
@@ -691,39 +691,39 @@ object FaceMesh3DEngine {
         val tgtCanvasPts = Array(CONTROL_POINT_COUNT) { i ->
             val projectedSrcPt = rawProjectedPts[i]
             val basePt = when {
-                // Keep inner facial features (eyes, nose, lips, teeth, brows) distortion-free for Source identity,
-                // gently aligning only temples (13..14) with cranial axis.
-                i in 0..12 -> projectedSrcPt
-                i in 13..14 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.45f, yawPerspStrength = 0.22f)
-                // Smoothly align outer jawline/chin (15..17) with Target's 3D tilt angle & neck center (32% Target)
+                // Coherently tilt entire inner facial block (0..12) by exact same axisSyncRad so eyes/nose/mouth
+                // stay rigidly aligned with the jaw/crown/neck tilt without facial shear.
+                i in 0..12 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.82f, yawPerspStrength = 0f)
+                i in 13..14 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.84f, yawPerspStrength = 0.22f)
+                // Taper & seat jawline/chin (15..17) cleanly onto Target's 3D tilt angle & neck width (44% Target)
                 i in 15..17 -> {
-                    val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.85f, yawPerspStrength = 0.30f)
+                    val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.86f, yawPerspStrength = 0.28f)
                     PointF(
-                        synced.x * 0.68f + rawCanvasPts[i].x * 0.32f,
-                        synced.y * 0.68f + rawCanvasPts[i].y * 0.32f
+                        synced.x * 0.56f + rawCanvasPts[i].x * 0.44f,
+                        synced.y * 0.56f + rawCanvasPts[i].y * 0.44f
                     )
                 }
                 // Keep cranial dome/crown (18..24) cohesive with aligned head tilt & subtle wing alignment
-                i in 18..22 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.78f, yawPerspStrength = 0.18f)
+                i in 18..22 -> rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.82f, yawPerspStrength = 0.18f)
                 i in 23..24 -> {
                     val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.85f, yawPerspStrength = 0.24f)
                     PointF(
-                        synced.x * 0.86f + rawCanvasPts[i].x * 0.14f,
-                        synced.y * 0.86f + rawCanvasPts[i].y * 0.14f
+                        synced.x * 0.84f + rawCanvasPts[i].x * 0.16f,
+                        synced.y * 0.84f + rawCanvasPts[i].y * 0.16f
                     )
                 }
-                // Upper neck (25..27): smooth continuous 58% Target bridge from jaw (32%) to lower collar (84%)
+                // Upper neck (25..27): smooth continuous 68% Target bridge from jaw (44%) to lower collar (88%)
                 i in 25..27 -> {
                     val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.90f, yawPerspStrength = 0.20f)
                     PointF(
-                        synced.x * 0.42f + rawCanvasPts[i].x * 0.58f,
-                        synced.y * 0.42f + rawCanvasPts[i].y * 0.58f
+                        synced.x * 0.32f + rawCanvasPts[i].x * 0.68f,
+                        synced.y * 0.32f + rawCanvasPts[i].y * 0.68f
                     )
                 }
-                // Anchor lower neck & collar junction (28..30) cleanly onto Target neck/collar axis (84% Target)
+                // Anchor lower neck & collar junction (28..30) cleanly onto Target neck/collar axis (88% Target)
                 else -> PointF(
-                    projectedSrcPt.x * 0.16f + rawCanvasPts[i].x * 0.84f,
-                    projectedSrcPt.y * 0.16f + rawCanvasPts[i].y * 0.84f
+                    projectedSrcPt.x * 0.12f + rawCanvasPts[i].x * 0.88f,
+                    projectedSrcPt.y * 0.12f + rawCanvasPts[i].y * 0.88f
                 )
             }
             // Apply user scaleAdjust & offset around eye midpoint
@@ -738,6 +738,16 @@ object FaceMesh3DEngine {
         val srcPixels = IntArray(srcW * srcH)
         sourceBitmap.getPixels(srcPixels, 0, srcW, 0, 0, srcW, srcH)
 
+        // Detect top/bottom monochrome UI/letterbox bars (e.g., phone Gallery screenshots with Share/Delete bar)
+        val (contentMinY, contentMaxY) = detectInnerPhotoContentBounds(
+            srcPixels = srcPixels,
+            srcW = srcW,
+            srcH = srcH,
+            srcEyeY = srcEyeMidY,
+            srcEyeDist = srcEyeDist,
+            srcChinY = srcCtrl[17].y
+        )
+
         // Fallback global similarity transform for pixels slightly outside the 31-pt cage
         val globalInv = estimateSimilarity2x3(tgtCanvasPts.toList(), srcCtrl)
         val outPixels = IntArray(canvasSize * canvasSize)
@@ -746,7 +756,10 @@ object FaceMesh3DEngine {
         val edgeMarginPx = (min(srcW, srcH) * 0.045f).coerceIn(10f, 22f)
 
         fun computeBoundsAlpha(sx: Float, sy: Float): Float {
-            val edgeDist = min(min(sx, (srcW - 1f) - sx), min(sy, (srcH - 1f) - sy))
+            val edgeDist = min(
+                min(sx, (srcW - 1f) - sx),
+                min(sy - contentMinY, contentMaxY - sy)
+            )
             return when {
                 edgeDist <= 0.5f -> 0f
                 edgeDist >= edgeMarginPx -> 1f
@@ -928,6 +941,118 @@ object FaceMesh3DEngine {
         val tx = dMx - (a * sMx - b * sMy)
         val ty = dMy - (b * sMx + a * sMy)
         return floatArrayOf(a, -b, tx, b, a, ty)
+    }
+
+    /**
+     * Detects monochrome top/bottom UI chrome or letterbox strips (e.g., phone Gallery screenshots
+     * with date headers or Share/Favourite/Delete action bars) separated from the interior photo by
+     * a crisp horizontal frame edge. Leaves genuine uniform photo/studio backgrounds untouched `(0f..srcH-1f)`.
+     */
+    internal fun detectInnerPhotoContentBounds(
+        srcPixels: IntArray,
+        srcW: Int,
+        srcH: Int,
+        srcEyeY: Float,
+        srcEyeDist: Float,
+        srcChinY: Float
+    ): Pair<Float, Float> {
+        if (srcW < 24 || srcH < 48 || srcPixels.size < srcW * srcH) {
+            return 0f to (srcH - 1f)
+        }
+        val minBarPx = max(16, (srcH * 0.045f).toInt())
+        val sampleCount = 32
+        val xStart = (srcW * 0.03f).toInt().coerceIn(0, srcW - 1)
+        val xEnd = (srcW * 0.97f).toInt().coerceIn(xStart + 1, srcW - 1)
+        val xStep = ((xEnd - xStart).toFloat() / (sampleCount - 1)).coerceAtLeast(1f)
+
+        // Returns 1 if row matches near-white UI strip (>=80%), -1 if near-black UI strip (>=80%), 0 otherwise
+        fun classifyUiRow(y: Int): Int {
+            val row = y * srcW
+            var whiteCnt = 0
+            var blackCnt = 0
+            for (k in 0 until sampleCount) {
+                val x = (xStart + k * xStep).toInt().coerceIn(0, srcW - 1)
+                val c = srcPixels[row + x]
+                val r = (c ushr 16) and 0xFF
+                val g = (c ushr 8) and 0xFF
+                val b = c and 0xFF
+                val chroma = max(r, max(g, b)) - min(r, min(g, b))
+                val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                if (lum >= 240f && chroma <= 12) whiteCnt++
+                if (lum <= 14f && chroma <= 10) blackCnt++
+            }
+            val thresh = (sampleCount * 0.78f).toInt()
+            return when {
+                whiteCnt >= thresh -> 1
+                blackCnt >= thresh -> -1
+                else -> 0
+            }
+        }
+
+        fun hasHorizontalFrameJump(probeY: Int, barIsWhite: Boolean): Boolean {
+            if (probeY !in 0 until srcH) return false
+            val row = probeY * srcW
+            val refLum = if (barIsWhite) 250f else 8f
+            var diffCnt = 0
+            for (k in 0 until sampleCount) {
+                val x = (xStart + k * xStep).toInt().coerceIn(0, srcW - 1)
+                val c = srcPixels[row + x]
+                val r = (c ushr 16) and 0xFF
+                val g = (c ushr 8) and 0xFF
+                val b = c and 0xFF
+                val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                if (abs(lum - refLum) >= 14f) diffCnt++
+            }
+            return diffCnt >= (sampleCount * 0.35f).toInt()
+        }
+
+        var contentMinY = 0f
+        val topKind = classifyUiRow(0)
+        if (topKind != 0) {
+            val maxTopScan = min((srcEyeY - srcEyeDist * 0.90f).toInt(), (srcH * 0.45f).toInt())
+                .coerceIn(0, srcH - 2)
+            var topEnd = 0
+            var missStreak = 0
+            for (y in 0..maxTopScan) {
+                if (classifyUiRow(y) == topKind) {
+                    topEnd = y
+                    missStreak = 0
+                } else {
+                    missStreak++
+                    if (missStreak >= 4) break
+                }
+            }
+            if (topEnd >= minBarPx &&
+                (hasHorizontalFrameJump(topEnd + 3, topKind == 1) || hasHorizontalFrameJump(topEnd + 6, topKind == 1))
+            ) {
+                contentMinY = (topEnd + 2f).coerceIn(0f, maxTopScan.toFloat())
+            }
+        }
+
+        var contentMaxY = (srcH - 1f)
+        val botKind = classifyUiRow(srcH - 1)
+        if (botKind != 0) {
+            val minBotScan = max((srcChinY - srcEyeDist * 0.15f).toInt(), (srcH * 0.50f).toInt())
+                .coerceIn(1, srcH - 1)
+            var botStart = srcH - 1
+            var missStreak = 0
+            for (y in srcH - 1 downTo minBotScan) {
+                if (classifyUiRow(y) == botKind) {
+                    botStart = y
+                    missStreak = 0
+                } else {
+                    missStreak++
+                    if (missStreak >= 4) break
+                }
+            }
+            if ((srcH - 1 - botStart) >= minBarPx &&
+                (hasHorizontalFrameJump(botStart - 3, botKind == 1) || hasHorizontalFrameJump(botStart - 6, botKind == 1))
+            ) {
+                contentMaxY = (botStart - 2f).coerceIn(contentMinY + 24f, srcH - 1f)
+            }
+        }
+
+        return contentMinY to contentMaxY
     }
 
     private fun floorInt(v: Float): Int = kotlin.math.floor(v.toDouble()).toInt()
