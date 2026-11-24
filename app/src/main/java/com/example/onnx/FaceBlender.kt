@@ -3098,23 +3098,26 @@ object FaceBlender {
                     // if Source jaw extends below Target's chin contour into neck shadow, taper alpha smoothly;
                     // Option D uses K/L Ear-to-Chin arc strength specifically along the lower jawline-to-neck seam.
                     val chinStartRatio = when {
+                        isCleanOptionB -> 0.90f
                         optionDJawFuller -> 0.88f
                         swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT -> 0.80f
-                        isNeuralSwap -> 0.82f
+                        isNeuralSwap -> 0.86f
                         else -> 0.72f
                     }
                     val lumThresh = when {
                         optionDJawFuller -> 34f
-                        isNeuralSwap -> 22f
+                        isNeuralSwap -> 32f
                         else -> 16f
                     }
+                    val maxJawFade = if (isNeuralSwap && swapStrategyOption != FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) 0.55f else 0.80f
                     if (localY > chinStartRatio * radiusYBottom && abs(sLum - tLum) > lumThresh) {
-                        val jawMismatch = ((abs(sLum - tLum) - lumThresh) / 40f).coerceIn(0f, 1f)
+                        val jawMismatch = ((abs(sLum - tLum) - lumThresh) / 38f).coerceIn(0f, 1f)
                         val chinFade = (((localY / radiusYBottom) - chinStartRatio) / (1.0f - chinStartRatio)).coerceIn(0f, 1f)
                         val klExtra = if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT && !optionDJawFuller) {
                             ((optionDFit?.klArcNeckBlendStrength ?: 0.28f) * 0.32f).coerceIn(0f, 0.20f)
                         } else 0f
-                        alpha *= (1.0f - (jawMismatch * chinFade * (0.80f + klExtra)).coerceIn(0f, 0.88f))
+                        val cap = (maxJawFade + klExtra).coerceIn(0f, 0.88f)
+                        alpha *= (1.0f - (jawMismatch * chinFade * cap).coerceIn(0f, cap))
                     }
                 }
 

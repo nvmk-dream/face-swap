@@ -535,6 +535,42 @@ object HeadSegmentationAndInpainting {
         return refined
     }
 
+    internal fun computeShadowAwareSkinLikelihood(
+        r: Float,
+        g: Float,
+        b: Float,
+        skinR: Float,
+        skinG: Float,
+        skinB: Float
+    ): Float {
+        val skinDist = sqrt(
+            (r - skinR) * (r - skinR) * 0.35f +
+                (g - skinG) * (g - skinG) * 0.45f +
+                (b - skinB) * (b - skinB) * 0.20f
+        )
+        val rgbSkinSim = (1.0f - (skinDist / 62.0f)).coerceIn(0f, 1f)
+
+        val pSum = (r + g + b).coerceAtLeast(18f)
+        val sSum = (skinR + skinG + skinB).coerceAtLeast(18f)
+        val chromaDist = abs((r / pSum) - (skinR / sSum)) +
+            abs((g / pSum) - (skinG / sSum)) +
+            abs((b / pSum) - (skinB / sSum))
+        val pLum = 0.299f * r + 0.587f * g + 0.114f * b
+        val sLum = (0.299f * skinR + 0.587f * skinG + 0.114f * skinB).coerceAtLeast(24f)
+        val lumRatio = pLum / sLum
+        val shadowSkinSim = if (pLum >= 26f && r >= b - 4f && lumRatio in 0.30f..1.35f) {
+            val chromaOk = (1.0f - (chromaDist / 0.16f)).coerceIn(0f, 1f)
+            val lumOk = when {
+                lumRatio >= 0.48f -> 1.0f
+                else -> ((lumRatio - 0.30f) / 0.18f).coerceIn(0f, 1f)
+            }
+            chromaOk * lumOk * 0.92f
+        } else {
+            0f
+        }
+        return max(rgbSkinSim, shadowSkinSim).coerceIn(0f, 1f)
+    }
+
     /**
      * Built-in Android Head/Hair/Skull/Neck segmentation & matting engine.
      * Separates background from hair crown, skull, ears, face, and upper neck using exterior
@@ -622,13 +658,9 @@ object HeadSegmentationAndInpainting {
                 }
                 val bgLikelihood = (sqrt(minBgDistSq) / 38.0f).coerceIn(0f, 1f)
 
-                // Distance to facial skin chrominance
-                val skinDist = sqrt(
-                    (r - skinR) * (r - skinR) * 0.35f +
-                        (g - skinG) * (g - skinG) * 0.45f +
-                        (b - skinB) * (b - skinB) * 0.20f
-                )
-                val isSkinLike = (1.0f - (skinDist / 62.0f)).coerceIn(0f, 1f)
+                // Distance to facial skin chrominance (Euclidean + luminance-normalized hue similarity
+                // so naturally shadowed chin-to-neck skin is never misclassified as non-skin background).
+                val isSkinLike = computeShadowAwareSkinLikelihood(r, g, b, skinR, skinG, skinB)
 
                 // Anatomical regions in canonical 256x256 head space:
                 // A) Core Face Oval: center (0.50, 0.56), rx = 0.21, ry = 0.23
@@ -663,10 +695,10 @@ object HeadSegmentationAndInpainting {
                     0f
                 }
 
-                // C) Upper Neck Column (ny in 0.70..0.92, nx in 0.33..0.67)
-                val neckAlpha = if (ny in 0.68f..0.93f) {
-                    val nxDist = abs(nx - 0.50f) / 0.165f
-                    val nyTaper = ((0.93f - ny) / (0.93f - 0.68f)).coerceIn(0f, 1f)
+                // C) Upper & Mid Neck Column (ny in 0.66..0.95, yaw-tolerant width nx in 0.30..0.70)
+                val neckAlpha = if (ny in 0.66f..0.95f) {
+                    val nxDist = abs(nx - 0.50f) / 0.195f
+                    val nyTaper = ((0.95f - ny) / (0.95f - 0.66f)).coerceIn(0f, 1f)
                     if (nxDist < 1.0f) {
                         val horiz = (0.5f * (1f + cos(Math.PI * nxDist))).toFloat()
                         horiz * nyTaper * (0.55f + 0.45f * isSkinLike)
