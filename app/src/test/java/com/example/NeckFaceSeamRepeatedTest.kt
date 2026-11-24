@@ -266,4 +266,105 @@ class NeckFaceSeamRepeatedTest {
             assertEquals(rgb(165, 148, 52), out[cpy * w + cpx])
         }
     }
+
+    @Test
+    fun repairNeckChinSeamPixels_neverSmudgesEarringsOrShoulderHairCurlsUnderJaw() {
+        val w = 260
+        val h = 260
+        val eyeDist = 48f
+        val eyeMidX = 130f
+        val eyeMidY = 88f
+        val chinY = eyeMidY + eyeDist * 1.65f // ~167.2
+
+        // Scenario 4 (Result #79): Draped shoulder curls (lum 48..62, warm brown-black) + gold earrings
+        // flanking a central neck with a dark U-trough & slight two-tone chin step
+        val orig = IntArray(w * h) { rgb(190, 200, 210) }
+        val out = IntArray(w * h) { rgb(190, 200, 210) }
+
+        // Central healthy neck skin (|dx| <= 0.72 * eyeDist initially in background around earrings/curls)
+        for (y in 60..235) {
+            for (x in 90..170) {
+                val skin = if (y <= 170) rgb(224, 178, 146) else rgb(202, 158, 128)
+                orig[y * w + x] = rgb(202, 158, 128)
+                out[y * w + x] = skin
+            }
+        }
+        // Inject center U-trough in neck (|dx| <= 0.34 * eyeDist, y = 171..177)
+        for (y in 171..177) {
+            for (x in 114..146) {
+                out[y * w + x] = rgb(44, 34, 30)
+            }
+        }
+        // Inject wavy brown-black shoulder curls (|dx| in 0.44..0.82 * eyeDist, y = 165..220)
+        // Crucially: on outPx they overlap neck skin (where origPx had skin at |dx|=0.44..0.58)
+        val curlColor = rgb(62, 48, 42) // lum ~ 51.5, r-b = 20 (caught by new lum<86 & r-b<26 + belowIsDarkHair!)
+        for (y in 165..220) {
+            for (x in 92..108) {
+                out[y * w + x] = curlColor
+            }
+            for (x in 152..168) {
+                out[y * w + x] = curlColor
+            }
+        }
+        // Gold dangling earrings at |dx| ~ 0.62..0.75 * eyeDist, y = 158..172
+        val goldEarring = rgb(218, 172, 72)
+        for (y in 158..172) {
+            for (x in 94..101) {
+                orig[y * w + x] = goldEarring
+                out[y * w + x] = goldEarring
+            }
+            for (x in 159..166) {
+                orig[y * w + x] = goldEarring
+                out[y * w + x] = goldEarring
+            }
+        }
+
+        val healed = CleanEraseHeadReplacementEngine.repairNeckChinSeamPixels(
+            outPx = out, origPx = orig, w = w, h = h,
+            eyeMidX = eyeMidX, eyeMidY = eyeMidY, eyeDist = eyeDist,
+            chinEstX = eyeMidX, chinEstY = chinY
+        )
+        assertTrue("Center U-trough should heal cleanly, healed=$healed", healed > 80)
+
+        // 1. Center trough must be healed to healthy warm skin
+        val centerTrough = out[174 * w + 130]
+        assertTrue(
+            "Center trough wasn't healed: R=${(centerTrough ushr 16) and 0xFF}",
+            ((centerTrough ushr 16) and 0xFF) > 165
+        )
+
+        // 2. ZERO smudging on left or right dark shoulder curls (both inner 0.46*eyeDist and outer 0.68*eyeDist)!
+        for (y in 166..205) {
+            for (x in 92..108) {
+                if (x !in 94..101 || y !in 158..172) {
+                    assertEquals("Left shoulder curl smudged at ($x,$y)", curlColor, out[y * w + x])
+                }
+            }
+            for (x in 152..168) {
+                if (x !in 159..166 || y !in 158..172) {
+                    assertEquals("Right shoulder curl smudged at ($x,$y)", curlColor, out[y * w + x])
+                }
+            }
+        }
+
+        // 3. ZERO smudging on gold earrings!
+        for (y in 158..172) {
+            for (x in 94..101) {
+                assertEquals("Left earring smudged at ($x,$y)", goldEarring, out[y * w + x])
+            }
+            for (x in 159..166) {
+                assertEquals("Right earring smudged at ($x,$y)", goldEarring, out[y * w + x])
+            }
+        }
+
+        // Scenario 5: Healthy uniform neck with no seam or drift -> ZERO unnecessary smoothing/blur!
+        val cleanOrig = IntArray(w * h) { rgb(208, 164, 134) }
+        val cleanOut = IntArray(w * h) { rgb(208, 164, 134) }
+        val untouched = CleanEraseHeadReplacementEngine.repairNeckChinSeamPixels(
+            outPx = cleanOut, origPx = cleanOrig, w = w, h = h,
+            eyeMidX = eyeMidX, eyeMidY = eyeMidY, eyeDist = eyeDist,
+            chinEstX = eyeMidX, chinEstY = chinY
+        )
+        assertEquals("Healthy uniform neck should have 0 pixels modified", 0, untouched)
+    }
 }
