@@ -6,9 +6,13 @@ import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.PointF
+import kotlin.math.abs
+import kotlin.math.cbrt
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -200,7 +204,7 @@ object GhostHeadReplacementEngine {
                 progressFraction = 0.42f
             )
         )
-        val srcMasks = HeadSegmentationAndInpainting.segmentHeadHairNeck(
+        val rawSrcMasks = HeadSegmentationAndInpainting.segmentHeadHairNeck(
             ortEnv = ortEnv,
             alignedHeadCrop = alignedSourceHead,
             segModelFile = if (segFile.exists()) segFile else null,
@@ -208,6 +212,19 @@ object GhostHeadReplacementEngine {
             preferHardwareAccel = preferHardwareAccel,
             preloadedSegformerSession = preloadedSegformerSession
         )
+        val canonicalSrcTemplate = HeadSegmentationAndInpainting.getCanonicalHeadTemplate(
+            cropSize = headCropSize,
+            yawRatio = srcHeadPose.yawRatio
+        )
+        val canonicalCenterNx = (canonicalSrcTemplate[2].x / headCropSize.toFloat()).coerceIn(0.38f, 0.62f)
+        val cleanedSrcAlpha = sanitizeCopyPasteHeadAlpha(
+            rawAlpha = rawSrcMasks.fullHeadAlpha,
+            cropBitmap = alignedSourceHead,
+            cropSize = headCropSize,
+            centerNx = canonicalCenterNx,
+            isSourceMask = true
+        )
+        val srcMasks = rawSrcMasks.copy(fullHeadAlpha = cleanedSrcAlpha)
 
         val targetW = targetBitmap.width
         val targetH = targetBitmap.height
@@ -279,7 +296,7 @@ object GhostHeadReplacementEngine {
                 )
             )
 
-            val tgtMasks = HeadSegmentationAndInpainting.segmentHeadHairNeck(
+            val rawTgtMasks = HeadSegmentationAndInpainting.segmentHeadHairNeck(
                 ortEnv = ortEnv,
                 alignedHeadCrop = alignedTargetHead,
                 segModelFile = if (segFile.exists()) segFile else null,
@@ -287,9 +304,17 @@ object GhostHeadReplacementEngine {
                 preferHardwareAccel = preferHardwareAccel,
                 preloadedSegformerSession = preloadedSegformerSession
             )
+            val cleanedTgtAlpha = sanitizeCopyPasteHeadAlpha(
+                rawAlpha = rawTgtMasks.fullHeadAlpha,
+                cropBitmap = alignedTargetHead,
+                cropSize = headCropSize,
+                centerNx = canonicalCenterNx,
+                isSourceMask = false
+            )
+            val tgtMasks = rawTgtMasks.copy(fullHeadAlpha = cleanedTgtAlpha)
 
             // 5a. Inpaint disoccluded background where target's old hair/ears extended beyond the new source head
-            val inpaintedTargetCrop = HeadSegmentationAndInpainting.inpaintTargetBackgroundGap(
+            val rawInpaintedTargetCrop = HeadSegmentationAndInpainting.inpaintTargetBackgroundGap(
                 ortEnv = ortEnv,
                 targetAlignedCrop = alignedTargetHead,
                 targetHeadAlpha = tgtMasks.fullHeadAlpha,
@@ -297,6 +322,17 @@ object GhostHeadReplacementEngine {
                 lamaModelFile = if (lamaFile.exists()) lamaFile else null,
                 preferHardwareAccel = preferHardwareAccel
             )
+            val inpaintedTargetCrop = cleanInpaintedEarSideGaps(
+                inpaintedCrop = rawInpaintedTargetCrop,
+                alignedTargetCrop = alignedTargetHead,
+                targetHeadAlpha = tgtMasks.fullHeadAlpha,
+                sourceHeadAlpha = srcMasks.fullHeadAlpha,
+                cropSize = headCropSize,
+                centerNx = canonicalCenterNx
+            )
+            if (inpaintedTargetCrop !== rawInpaintedTargetCrop) {
+                rawInpaintedTargetCrop.recycle()
+            }
 
             // 5b. Adapt skin & neck lighting/warmth according to SkinToneSourceMode without recoloring source hair
             val illuminationAdaptedHead = if (enableColorTransfer) {
@@ -407,9 +443,12 @@ object GhostHeadReplacementEngine {
             }
 
             // Paste the full head + inpainted disocclusion envelope back onto the full-resolution target photo
-            val baseEnvelopeAlpha = FloatArray(headCropSize * headCropSize) { i ->
-                max(srcMasks.fullHeadAlpha[i], tgtMasks.fullHeadAlpha[i] * 0.90f).coerceIn(0f, 1f)
-            }
+            val baseEnvelopeAlpha = buildCleanCopyPasteEnvelopeAlpha(
+                sourceHeadAlpha = srcMasks.fullHeadAlpha,
+                targetHeadAlpha = tgtMasks.fullHeadAlpha,
+                cropSize = headCropSize,
+                centerNx = canonicalCenterNx
+            )
             val warpSize = enhancedHeadCrop.width
             val warpScale = warpSize.toFloat() / headCropSize.toFloat()
             val warpMatrix2x3 = if (warpSize == headCropSize) {
@@ -420,13 +459,7 @@ object GhostHeadReplacementEngine {
             val warpEnvelopeAlpha = if (warpSize == headCropSize) {
                 baseEnvelopeAlpha
             } else {
-                FloatArray(warpSize * warpSize) { idx512 ->
-                    val y512 = idx512 / warpSize
-                    val x512 = idx512 % warpSize
-                    val sy = (y512 * headCropSize / warpSize).coerceIn(0, headCropSize - 1)
-                    val sx = (x512 * headCropSize / warpSize).coerceIn(0, headCropSize - 1)
-                    baseEnvelopeAlpha[sy * headCropSize + sx]
-                }
+                upscaleAlphaBilinear(baseEnvelopeAlpha, headCropSize, warpSize)
             }
 
             warpHeadCropBackToTarget(
@@ -441,6 +474,25 @@ object GhostHeadReplacementEngine {
                 offsetY = offsetY * warpScale,
                 scaleAdjust = scaleAdjust
             )
+
+            // Final post-swap retouch: match output face skin colour directly to Target's actual neck colour
+            if (enableColorTransfer) {
+                applyFinalNeckToFaceColorRetouch(
+                    compositePixels = compositePixels,
+                    targetBitmap = targetBitmap,
+                    targetWidth = targetW,
+                    targetHeight = targetH,
+                    forwardHeadMatrix2x3 = tgtHeadMatrix,
+                    headCropSize = headCropSize,
+                    envelopeAlpha = baseEnvelopeAlpha,
+                    skinAndNeckWeight = srcMasks.skinAndNeckWeight,
+                    centerNx = canonicalCenterNx,
+                    skinToneMode = skinToneMode,
+                    offsetX = offsetX,
+                    offsetY = offsetY,
+                    scaleAdjust = scaleAdjust
+                )
+            }
 
             if (illuminationAdaptedHead !== synthesizedHeadCrop) illuminationAdaptedHead.recycle()
             inpaintedTargetCrop.recycle()
@@ -1052,5 +1104,687 @@ object GhostHeadReplacementEngine {
                 }
             }
         }
+    }
+
+    /**
+     * LEGACY_COPY_PASTE-only mask cleanup:
+     * 1. Deletes sideways-flaring MODNet shoulder/chest wings below the jawline (`ny > 0.62`)
+     *    and tapers the lower neck smoothly before the bottom crop boundary (`ny in 0.81..0.92`).
+     * 2. Suppresses ear-side dangling earring/halo fringes (`ny in 0.48..0.78`, lateral zone)
+     *    and applies a 1px outer-fringe erosion on semi-transparent boundary pixels.
+     */
+    internal fun sanitizeCopyPasteHeadAlpha(
+        rawAlpha: FloatArray,
+        cropBitmap: Bitmap,
+        cropSize: Int,
+        centerNx: Float,
+        isSourceMask: Boolean
+    ): FloatArray {
+        val pixels = IntArray(cropSize * cropSize)
+        cropBitmap.getPixels(pixels, 0, cropSize, 0, 0, cropSize, cropSize)
+        return sanitizeCopyPasteHeadAlphaPixels(
+            rawAlpha = rawAlpha,
+            pixels = pixels,
+            cropSize = cropSize,
+            centerNx = centerNx,
+            isSourceMask = isSourceMask
+        )
+    }
+
+    internal fun sanitizeCopyPasteHeadAlphaPixels(
+        rawAlpha: FloatArray,
+        pixels: IntArray,
+        cropSize: Int,
+        centerNx: Float,
+        isSourceMask: Boolean
+    ): FloatArray {
+        val total = cropSize * cropSize
+        val out = FloatArray(total)
+
+        // Sample interior hair/skin brightness near temples to detect metallic/bright dangling earrings
+        var hairLumSum = 0f
+        var hairCount = 0
+        for (y in (cropSize * 0.18f).toInt()..(cropSize * 0.36f).toInt() step 2) {
+            for (x in (cropSize * 0.34f).toInt()..(cropSize * 0.66f).toInt() step 2) {
+                val idx = y * cropSize + x
+                if (rawAlpha[idx] > 0.70f) {
+                    val c = pixels[idx]
+                    val lum = 0.299f * ((c ushr 16) and 0xFF) + 0.587f * ((c ushr 8) and 0xFF) + 0.114f * (c and 0xFF)
+                    if (lum < 110f) {
+                        hairLumSum += lum
+                        hairCount++
+                    }
+                }
+            }
+        }
+        val darkHairRef = if (hairCount >= 16) hairLumSum / hairCount else 55f
+
+        for (y in 0 until cropSize) {
+            val ny = y.toFloat() / cropSize.toFloat()
+            val row = y * cropSize
+
+            // Vertical lower-neck feathering starting below chin (~0.81) and finishing cleanly at 0.92
+            // (well above MODNet's 0.975 crop border so zero straight horizontal cutoff lines occur)
+            val verticalNeckFactor = when {
+                ny <= 0.81f -> 1.0f
+                ny >= 0.92f -> 0.0f
+                else -> {
+                    val t = (ny - 0.81f) / 0.11f
+                    (0.5f * (1.0 + cos(Math.PI * t))).toFloat()
+                }
+            }
+
+            // Anatomical lateral half-width containment: full cranial/hair dome above 0.62,
+            // smoothly tapering inward to strict neck width below 0.74 so shoulder wings are deleted.
+            val allowedHalfW = when {
+                ny <= 0.62f -> 0.43f
+                ny <= 0.74f -> {
+                    val t = (ny - 0.62f) / 0.12f
+                    val s = (0.5f * (1.0 - cos(Math.PI * t))).toFloat()
+                    0.43f * (1f - s) + 0.155f * s
+                }
+                else -> {
+                    val t = ((ny - 0.74f) / 0.18f).coerceIn(0f, 1f)
+                    0.155f * (1f - t) + 0.115f * t
+                }
+            }
+            val featherBand = if (ny > 0.70f) 0.032f else 0.045f
+
+            for (x in 0 until cropSize) {
+                val idx = row + x
+                var a = rawAlpha[idx].coerceIn(0f, 1f)
+                if (a <= 0.002f || verticalNeckFactor <= 0.002f) {
+                    out[idx] = 0f
+                    continue
+                }
+
+                val nx = x.toFloat() / cropSize.toFloat()
+                val dx = abs(nx - centerNx)
+
+                val lateralFactor = when {
+                    dx >= allowedHalfW -> 0.0f
+                    dx <= (allowedHalfW - featherBand) -> 1.0f
+                    else -> {
+                        val t = (dx - (allowedHalfW - featherBand)) / featherBand
+                        (0.5f * (1.0 + cos(Math.PI * t))).toFloat()
+                    }
+                }
+                if (lateralFactor <= 0.002f) {
+                    out[idx] = 0f
+                    continue
+                }
+
+                // Softly erode semi-transparent outer ear/hair fringe to prevent halo & earring ghosting
+                if (dx > 0.175f && a < 0.86f && x > 0 && x < cropSize - 1 && y > 0 && y < cropSize - 1) {
+                    var minNb = a
+                    for (dy in -1..1) {
+                        val nRow = (y + dy) * cropSize
+                        for (ox in -1..1) {
+                            val na = rawAlpha[nRow + x + ox]
+                            if (na < minNb) minNb = na
+                        }
+                    }
+                    a = a * 0.45f + minNb * 0.55f
+                }
+
+                // Suppress dangling earrings / earlobe jewelry outliers in the lateral ear-drop zone
+                var earJewelryTrim = 1.0f
+                if (ny in 0.46f..0.78f && dx > 0.185f) {
+                    val c = pixels[idx]
+                    val r = ((c ushr 16) and 0xFF).toFloat()
+                    val g = ((c ushr 8) and 0xFF).toFloat()
+                    val b = (c and 0xFF).toFloat()
+                    val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                    val chromaSpan = max(r, max(g, b)) - min(r, min(g, b))
+                    val isMetallicOrBrightJewelry = (lum > darkHairRef + 46f && chromaSpan < 30f) ||
+                        (lum > 180f && dx > 0.205f) ||
+                        (r > 130f && g > 95f && r > b * 1.42f && dx > 0.20f)
+
+                    if (isSourceMask && ny > 0.55f && dx > 0.195f) {
+                        // Trim dangling source earrings outside the lower cheek/jaw line cleanly
+                        val dangleFade = ((dx - 0.195f) / 0.050f).coerceIn(0f, 1f)
+                        earJewelryTrim = (1.0f - dangleFade * 0.92f).coerceIn(0.08f, 1f)
+                    }
+                    if (isMetallicOrBrightJewelry) {
+                        earJewelryTrim *= if (isSourceMask) 0.12f else 0.30f
+                    }
+                }
+
+                out[idx] = (a * lateralFactor * verticalNeckFactor * earJewelryTrim).coerceIn(0f, 1f)
+            }
+        }
+        return out
+    }
+
+    /**
+     * Cleans disoccluded ear/earring gaps (`targetAlpha > sourceAlpha`) using same-side exterior hair/background
+     * anchors instead of across-head horizontal scanlines that leave gray/silver half-cut earring remnants.
+     */
+    internal fun cleanInpaintedEarSideGaps(
+        inpaintedCrop: Bitmap,
+        alignedTargetCrop: Bitmap,
+        targetHeadAlpha: FloatArray,
+        sourceHeadAlpha: FloatArray,
+        cropSize: Int,
+        centerNx: Float
+    ): Bitmap {
+        val total = cropSize * cropSize
+        val inpPx = IntArray(total)
+        val tgtPx = IntArray(total)
+        inpaintedCrop.getPixels(inpPx, 0, cropSize, 0, 0, cropSize, cropSize)
+        alignedTargetCrop.getPixels(tgtPx, 0, cropSize, 0, 0, cropSize, cropSize)
+
+        val yStart = (cropSize * 0.36f).toInt().coerceIn(0, cropSize - 1)
+        val yEnd = (cropSize * 0.84f).toInt().coerceIn(yStart, cropSize - 1)
+        val centerX = (centerNx * cropSize).toInt().coerceIn(4, cropSize - 5)
+
+        for (y in yStart..yEnd) {
+            val row = y * cropSize
+            // Find clean exterior or solid hair anchor on the LEFT side (never mixing right side!)
+            var leftAnchorColor = tgtPx[row + 2]
+            for (x in (cropSize * 0.06f).toInt().coerceAtLeast(2) until centerX) {
+                val idx = row + x
+                if (targetHeadAlpha[idx] < 0.08f) {
+                    leftAnchorColor = tgtPx[idx]
+                } else {
+                    break
+                }
+            }
+            // Prefer adjacent dark hair over bright background if target hair immediately flanks the ear
+            var leftHairColor = leftAnchorColor
+            var foundLeftHair = false
+            for (x in 4 until centerX) {
+                val idx = row + x
+                val gap = targetHeadAlpha[idx] - sourceHeadAlpha[idx] * 0.85f
+                if (gap <= 0.08f && targetHeadAlpha[idx] > 0.35f) {
+                    val c = tgtPx[idx]
+                    val lum = 0.299f * ((c ushr 16) and 0xFF) + 0.587f * ((c ushr 8) and 0xFF) + 0.114f * (c and 0xFF)
+                    if (lum < 75f) {
+                        leftHairColor = c
+                        foundLeftHair = true
+                    }
+                }
+            }
+
+            var rightAnchorColor = tgtPx[row + cropSize - 3]
+            for (x in (cropSize * 0.94f).toInt().coerceAtMost(cropSize - 3) downTo centerX) {
+                val idx = row + x
+                if (targetHeadAlpha[idx] < 0.08f) {
+                    rightAnchorColor = tgtPx[idx]
+                } else {
+                    break
+                }
+            }
+            var rightHairColor = rightAnchorColor
+            var foundRightHair = false
+            for (x in (cropSize - 5) downTo centerX) {
+                val idx = row + x
+                val gap = targetHeadAlpha[idx] - sourceHeadAlpha[idx] * 0.85f
+                if (gap <= 0.08f && targetHeadAlpha[idx] > 0.35f) {
+                    val c = tgtPx[idx]
+                    val lum = 0.299f * ((c ushr 16) and 0xFF) + 0.587f * ((c ushr 8) and 0xFF) + 0.114f * (c and 0xFF)
+                    if (lum < 75f) {
+                        rightHairColor = c
+                        foundRightHair = true
+                    }
+                }
+            }
+
+            for (x in 2 until cropSize - 2) {
+                val nx = x.toFloat() / cropSize.toFloat()
+                val dx = abs(nx - centerNx)
+                if (dx < 0.155f) continue
+                val idx = row + x
+                val gap = (targetHeadAlpha[idx] - sourceHeadAlpha[idx] * 0.85f).coerceIn(0f, 1f)
+                if (gap <= 0.12f) continue
+
+                val isLeft = x < centerX
+                val refColor = if (isLeft) {
+                    if (foundLeftHair) leftHairColor else leftAnchorColor
+                } else {
+                    if (foundRightHair) rightHairColor else rightAnchorColor
+                }
+                val cur = inpPx[idx]
+                val cr = (cur ushr 16) and 0xFF
+                val cg = (cur ushr 8) and 0xFF
+                val cb = cur and 0xFF
+                val rr = (refColor ushr 16) and 0xFF
+                val rg = (refColor ushr 8) and 0xFF
+                val rb = refColor and 0xFF
+                val diff = abs(cr - rr) + abs(cg - rg) + abs(cb - rb)
+                if (diff > 36) {
+                    val blend = (gap * 0.88f).coerceIn(0.25f, 0.92f)
+                    val inv = 1f - blend
+                    val nr = (cr * inv + rr * blend).toInt().coerceIn(0, 255)
+                    val ng = (cg * inv + rg * blend).toInt().coerceIn(0, 255)
+                    val nb = (cb * inv + rb * blend).toInt().coerceIn(0, 255)
+                    inpPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                }
+            }
+        }
+
+        val out = Bitmap.createBitmap(cropSize, cropSize, Bitmap.Config.ARGB_8888)
+        out.setPixels(inpPx, 0, cropSize, 0, 0, cropSize, cropSize)
+        return out
+    }
+
+    internal fun buildCleanCopyPasteEnvelopeAlpha(
+        sourceHeadAlpha: FloatArray,
+        targetHeadAlpha: FloatArray,
+        cropSize: Int,
+        centerNx: Float
+    ): FloatArray {
+        val total = cropSize * cropSize
+        return FloatArray(total) { i ->
+            val y = i / cropSize
+            val x = i % cropSize
+            val ny = y.toFloat() / cropSize.toFloat()
+            val nx = x.toFloat() / cropSize.toFloat()
+            val dx = abs(nx - centerNx)
+            val sA = sourceHeadAlpha[i].coerceIn(0f, 1f)
+            var tA = targetHeadAlpha[i].coerceIn(0f, 1f) * 0.86f
+            // Below mid-ear, do not stamp inpainted target patches onto side hair/earrings where source is empty
+            if (ny > 0.55f && dx > 0.185f && sA < 0.25f) {
+                val suppress = (((dx - 0.185f) / 0.045f).coerceIn(0f, 1f) *
+                    ((ny - 0.55f) / 0.08f).coerceIn(0f, 1f)).coerceIn(0f, 1f)
+                tA *= (1.0f - suppress * 0.95f)
+            }
+            max(sA, tA).coerceIn(0f, 1f)
+        }
+    }
+
+    internal fun upscaleAlphaBilinear(srcAlpha: FloatArray, srcSize: Int, dstSize: Int): FloatArray {
+        if (srcSize == dstSize) return srcAlpha.copyOf()
+        val out = FloatArray(dstSize * dstSize)
+        val scale = (srcSize - 1).toFloat() / (dstSize - 1).coerceAtLeast(1).toFloat()
+        for (y in 0 until dstSize) {
+            val sy = (y * scale).coerceIn(0f, (srcSize - 1).toFloat())
+            val y0 = sy.toInt().coerceIn(0, (srcSize - 2).coerceAtLeast(0))
+            val y1 = min(y0 + 1, srcSize - 1)
+            val fy = sy - y0
+            val row = y * dstSize
+            val r0 = y0 * srcSize
+            val r1 = y1 * srcSize
+            for (x in 0 until dstSize) {
+                val sx = (x * scale).coerceIn(0f, (srcSize - 1).toFloat())
+                val x0 = sx.toInt().coerceIn(0, (srcSize - 2).coerceAtLeast(0))
+                val x1 = min(x0 + 1, srcSize - 1)
+                val fx = sx - x0
+                val a00 = srcAlpha[r0 + x0]
+                val a10 = srcAlpha[r0 + x1]
+                val a01 = srcAlpha[r1 + x0]
+                val a11 = srcAlpha[r1 + x1]
+                out[row + x] = ((a00 * (1f - fx) + a10 * fx) * (1f - fy) +
+                    (a01 * (1f - fx) + a11 * fx) * fy).coerceIn(0f, 1f)
+            }
+        }
+        return out
+    }
+
+    /**
+     * Final post-swap retouch pass (runs AFTER GFPGAN & blending onto `compositePixels`):
+     * Samples the Target's actual exposed neck skin colour (below the faded seam and above clothing/jewelry),
+     * measures the output face's CIE LAB skin colour, and retouches ONLY facial & upper-neck skin pixels
+     * to match the Target neck's exact colour & warmth while protecting eyes, eyebrows, lips/teeth, and hair.
+     */
+    internal fun applyFinalNeckToFaceColorRetouch(
+        compositePixels: IntArray,
+        targetBitmap: Bitmap,
+        targetWidth: Int,
+        targetHeight: Int,
+        forwardHeadMatrix2x3: FloatArray,
+        headCropSize: Int,
+        envelopeAlpha: FloatArray,
+        skinAndNeckWeight: FloatArray,
+        centerNx: Float,
+        skinToneMode: SkinToneSourceMode = SkinToneSourceMode.TARGET_SCENE,
+        offsetX: Float = 0f,
+        offsetY: Float = 0f,
+        scaleAdjust: Float = 1.0f
+    ) {
+        val inv = FaceAlignment.invertAffine2x3(forwardHeadMatrix2x3)
+        val center = headCropSize * 0.5f
+        val safeScale = scaleAdjust.coerceIn(0.85f, 1.15f)
+        val shiftU = offsetX.coerceIn(-36f, 36f) * (headCropSize / 320f)
+        val shiftV = offsetY.coerceIn(-36f, 36f) * (headCropSize / 320f)
+
+        // Compute target bounding box covering head + lower neck sample band (ny up to 1.12)
+        val corners = arrayOf(
+            0f to 0f,
+            headCropSize.toFloat() to 0f,
+            0f to (headCropSize * 1.15f),
+            headCropSize.toFloat() to (headCropSize * 1.15f)
+        )
+        var minX = targetWidth - 1
+        var maxX = 0
+        var minY = targetHeight - 1
+        var maxY = 0
+        for ((cx, cy) in corners) {
+            val ux = (cx - center) * safeScale + center + shiftU
+            val vy = (cy - center) * safeScale + center + shiftV
+            val tx = (inv[0] * ux + inv[1] * vy + inv[2]).toInt()
+            val ty = (inv[3] * ux + inv[4] * vy + inv[5]).toInt()
+            minX = min(minX, tx)
+            maxX = max(maxX, tx)
+            minY = min(minY, ty)
+            maxY = max(maxY, ty)
+        }
+        minX = (minX - 8).coerceIn(0, targetWidth - 1)
+        maxX = (maxX + 8).coerceIn(0, targetWidth - 1)
+        minY = (minY - 8).coerceIn(0, targetHeight - 1)
+        maxY = (maxY + 8).coerceIn(0, targetHeight - 1)
+
+        val roiW = maxX - minX + 1
+        val roiH = maxY - minY + 1
+        if (roiW <= 4 || roiH <= 4) return
+        val origTargetRoiPx = IntArray(roiW * roiH)
+        targetBitmap.getPixels(origTargetRoiPx, 0, roiW, minX, minY, roiW, roiH)
+
+        applyFinalNeckToFaceColorRetouchRoi(
+            compositePixels = compositePixels,
+            origTargetRoiPx = origTargetRoiPx,
+            minX = minX,
+            maxX = maxX,
+            minY = minY,
+            maxY = maxY,
+            targetWidth = targetWidth,
+            forwardHeadMatrix2x3 = forwardHeadMatrix2x3,
+            headCropSize = headCropSize,
+            envelopeAlpha = envelopeAlpha,
+            skinAndNeckWeight = skinAndNeckWeight,
+            centerNx = centerNx,
+            skinToneMode = skinToneMode,
+            offsetX = offsetX,
+            offsetY = offsetY,
+            scaleAdjust = scaleAdjust
+        )
+    }
+
+    internal fun applyFinalNeckToFaceColorRetouchRoi(
+        compositePixels: IntArray,
+        origTargetRoiPx: IntArray,
+        minX: Int,
+        maxX: Int,
+        minY: Int,
+        maxY: Int,
+        targetWidth: Int,
+        forwardHeadMatrix2x3: FloatArray,
+        headCropSize: Int,
+        envelopeAlpha: FloatArray,
+        skinAndNeckWeight: FloatArray,
+        centerNx: Float,
+        skinToneMode: SkinToneSourceMode = SkinToneSourceMode.TARGET_SCENE,
+        offsetX: Float = 0f,
+        offsetY: Float = 0f,
+        scaleAdjust: Float = 1.0f
+    ) {
+        val m00 = forwardHeadMatrix2x3[0]
+        val m01 = forwardHeadMatrix2x3[1]
+        val m02 = forwardHeadMatrix2x3[2]
+        val m10 = forwardHeadMatrix2x3[3]
+        val m11 = forwardHeadMatrix2x3[4]
+        val m12 = forwardHeadMatrix2x3[5]
+        val center = headCropSize * 0.5f
+        val safeScale = scaleAdjust.coerceIn(0.85f, 1.15f)
+        val shiftU = offsetX.coerceIn(-36f, 36f) * (headCropSize / 320f)
+        val shiftV = offsetY.coerceIn(-36f, 36f) * (headCropSize / 320f)
+        val roiW = maxX - minX + 1
+
+        val neckLabSamples = ArrayList<FloatArray>(512)
+        val tgtFallbackSkinSamples = ArrayList<FloatArray>(512)
+        val faceLabSamples = ArrayList<FloatArray>(512)
+        val labScratch = FloatArray(3)
+
+        val eyeY = 114f / 256f
+        val leftEyeNx = centerNx - (30f / 256f)
+        val rightEyeNx = centerNx + (30f / 256f)
+        val mouthY = 178f / 256f
+        val step = if (roiW > 420) 2 else 1
+
+        for (y in minY..maxY step step) {
+            val baseU = m01 * y + m02
+            val baseV = m11 * y + m12
+            val roiRow = (y - minY) * roiW
+            val outRow = y * targetWidth
+            for (x in minX..maxX step step) {
+                val u = ((m00 * x + baseU) - center - shiftU) / safeScale + center
+                val v = ((m10 * x + baseV) - center - shiftV) / safeScale + center
+                val nx = u / headCropSize.toFloat()
+                val ny = v / headCropSize.toFloat()
+                val dx = abs(nx - centerNx)
+
+                // 1. Sample Target's actual exposed neck skin (ny 0.85..1.08, |nx-cx| <= 0.115)
+                if (ny in 0.85f..1.08f && dx <= 0.115f) {
+                    val tc = origTargetRoiPx[roiRow + (x - minX)]
+                    if (isCleanSkinPixelForLab(tc)) {
+                        rgbToLab((tc ushr 16) and 0xFF, (tc ushr 8) and 0xFF, tc and 0xFF, labScratch)
+                        neckLabSamples.add(labScratch.copyOf())
+                    }
+                } else if (ny in 0.56f..0.78f && dx <= 0.135f) {
+                    val tc = origTargetRoiPx[roiRow + (x - minX)]
+                    if (isCleanSkinPixelForLab(tc)) {
+                        rgbToLab((tc ushr 16) and 0xFF, (tc ushr 8) and 0xFF, tc and 0xFF, labScratch)
+                        tgtFallbackSkinSamples.add(labScratch.copyOf())
+                    }
+                }
+
+                // 2. Sample output face skin (cheeks, forehead, chin, excluding eyes & mouth)
+                if (ny in 0.34f..0.78f && dx <= 0.15f) {
+                    val lEyeD = hypot(((nx - leftEyeNx) / 0.085f).toDouble(), ((ny - eyeY) / 0.055f).toDouble())
+                    val rEyeD = hypot(((nx - rightEyeNx) / 0.085f).toDouble(), ((ny - eyeY) / 0.055f).toDouble())
+                    val mouthD = hypot(((nx - centerNx) / 0.105f).toDouble(), ((ny - mouthY) / 0.055f).toDouble())
+                    if (lEyeD > 1.0 && rEyeD > 1.0 && mouthD > 1.0) {
+                        val fc = compositePixels[outRow + x]
+                        if (isCleanSkinPixelForLab(fc)) {
+                            rgbToLab((fc ushr 16) and 0xFF, (fc ushr 8) and 0xFF, fc and 0xFF, labScratch)
+                            faceLabSamples.add(labScratch.copyOf())
+                        }
+                    }
+                }
+            }
+        }
+
+        val activeNeckSamples = if (neckLabSamples.size >= 24) neckLabSamples else tgtFallbackSkinSamples
+        if (activeNeckSamples.size < 12 || faceLabSamples.size < 16) return
+
+        val neckStats = computeTrimmedLabStats(activeNeckSamples)
+        val faceStats = computeTrimmedLabStats(faceLabSamples)
+
+        val modeStrength = when (skinToneMode) {
+            SkinToneSourceMode.TARGET_SCENE -> 0.94f
+            SkinToneSourceMode.BALANCED_BLEND -> 0.62f
+            SkinToneSourceMode.SOURCE_IDENTITY -> 0.35f
+        }
+        val dL = (neckStats[0] - faceStats[0]).coerceIn(-26f, 26f)
+        val da = (neckStats[1] - faceStats[1]).coerceIn(-14f, 14f)
+        val db = (neckStats[2] - faceStats[2]).coerceIn(-18f, 18f)
+        val lScale = (neckStats[3].coerceAtLeast(3.5f) / faceStats[3].coerceAtLeast(3.5f)).coerceIn(0.84f, 1.18f)
+        val aScale = (neckStats[4].coerceAtLeast(2.0f) / faceStats[4].coerceAtLeast(2.0f)).coerceIn(0.85f, 1.15f)
+        val bScale = (neckStats[5].coerceAtLeast(2.5f) / faceStats[5].coerceAtLeast(2.5f)).coerceIn(0.85f, 1.18f)
+
+        val rgbOut = IntArray(3)
+        for (y in minY..maxY) {
+            val baseU = m01 * y + m02
+            val baseV = m11 * y + m12
+            val outRow = y * targetWidth
+            for (x in minX..maxX) {
+                val u = ((m00 * x + baseU) - center - shiftU) / safeScale + center
+                val v = ((m10 * x + baseV) - center - shiftV) / safeScale + center
+                if (u < 1f || u >= headCropSize - 2f || v < 1f || v >= headCropSize - 2f) continue
+
+                val ny = v / headCropSize.toFloat()
+                if (ny < 0.16f || ny > 0.91f) continue
+
+                val x0 = u.toInt().coerceIn(0, headCropSize - 2)
+                val y0 = v.toInt().coerceIn(0, headCropSize - 2)
+                val fx = u - x0
+                val fy = v - y0
+                val envA = (
+                    envelopeAlpha[y0 * headCropSize + x0] * (1f - fx) * (1f - fy) +
+                        envelopeAlpha[y0 * headCropSize + x0 + 1] * fx * (1f - fy) +
+                        envelopeAlpha[(y0 + 1) * headCropSize + x0] * (1f - fx) * fy +
+                        envelopeAlpha[(y0 + 1) * headCropSize + x0 + 1] * fx * fy
+                    ).coerceIn(0f, 1f)
+                if (envA <= 0.05f) continue
+
+                val c = compositePixels[outRow + x]
+                val r = (c ushr 16) and 0xFF
+                val g = (c ushr 8) and 0xFF
+                val b = c and 0xFF
+                val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                // Never tint black/dark hair or clipped highlights
+                if (lum < 34f || lum > 250f) continue
+
+                val maskSkinW = (
+                    skinAndNeckWeight[y0 * headCropSize + x0] * (1f - fx) * (1f - fy) +
+                        skinAndNeckWeight[y0 * headCropSize + x0 + 1] * fx * (1f - fy) +
+                        skinAndNeckWeight[(y0 + 1) * headCropSize + x0] * (1f - fx) * fy +
+                        skinAndNeckWeight[(y0 + 1) * headCropSize + x0 + 1] * fx * fy
+                    ).coerceIn(0f, 1f)
+
+                val nx = u / headCropSize.toFloat()
+                val fDx = (nx - centerNx) / 0.205f
+                val fDy = (ny - 0.56f) / 0.27f
+                val faceOval = (1.0f - (fDx * fDx + fDy * fDy)).coerceIn(0f, 1f)
+                val chromaSkinGate = computeSkinChromaLikelihood(r.toFloat(), g.toFloat(), b.toFloat())
+                val skinW = max(maskSkinW, faceOval * chromaSkinGate) * chromaSkinGate
+                if (skinW <= 0.04f) continue
+
+                // Protect Eyes + Brows + Mouth/Lips + Teeth
+                val lEyeDx = (nx - leftEyeNx) / 0.082f
+                val rEyeDx = (nx - rightEyeNx) / 0.082f
+                val eyeDy = (ny - (eyeY - 0.012f)) / 0.058f
+                val eyeProt = (1.0f - min(lEyeDx * lEyeDx + eyeDy * eyeDy, rEyeDx * rEyeDx + eyeDy * eyeDy)).coerceIn(0f, 1f)
+
+                val mDx = (nx - centerNx) / 0.098f
+                val mDy = (ny - mouthY) / 0.050f
+                val mouthProt = (1.0f - (mDx * mDx + mDy * mDy)).coerceIn(0f, 1f)
+
+                val retouchW = (envA * skinW * modeStrength * (1.0f - 0.94f * eyeProt) * (1.0f - 0.88f * mouthProt))
+                    .coerceIn(0f, 0.94f)
+                if (retouchW <= 0.02f) continue
+
+                rgbToLab(r, g, b, labScratch)
+                val targetL = (faceStats[0] + (labScratch[0] - faceStats[0]) * (0.55f + 0.45f * lScale) + dL * 0.92f)
+                    .coerceIn(2f, 98f)
+                val targetA = (faceStats[1] + (labScratch[1] - faceStats[1]) * (0.60f + 0.40f * aScale) + da * 0.95f)
+                    .coerceIn(-80f, 80f)
+                val targetB = (faceStats[2] + (labScratch[2] - faceStats[2]) * (0.60f + 0.40f * bScale) + db * 0.95f)
+                    .coerceIn(-80f, 80f)
+
+                val blendL = labScratch[0] * (1f - retouchW) + targetL * retouchW
+                val blendA = labScratch[1] * (1f - retouchW) + targetA * retouchW
+                val blendB = labScratch[2] * (1f - retouchW) + targetB * retouchW
+                labToRgb(blendL, blendA, blendB, rgbOut)
+                compositePixels[outRow + x] = (0xFF shl 24) or (rgbOut[0] shl 16) or (rgbOut[1] shl 8) or rgbOut[2]
+            }
+        }
+    }
+
+    private fun isCleanSkinPixelForLab(argb: Int): Boolean {
+        val r = (argb ushr 16) and 0xFF
+        val g = (argb ushr 8) and 0xFF
+        val b = argb and 0xFF
+        val lum = 0.299f * r + 0.587f * g + 0.114f * b
+        if (lum !in 38f..242f) return false
+        // Exclude green/blue clothing, bright gold jewelry, and near-achromatic dark hair
+        if (r < g - 6 || r < b + 6) return false
+        if (r > 195 && g > 160 && (r - b) > 95) return false
+        return (r - b) in 7..118 && (g - b) >= -8
+    }
+
+    private fun computeSkinChromaLikelihood(r: Float, g: Float, b: Float): Float {
+        val lum = 0.299f * r + 0.587f * g + 0.114f * b
+        if (lum < 34f || lum > 250f) return 0f
+        if (r < b - 2f || r < g - 10f) return 0f
+        val warmth = (r - b).coerceAtLeast(0f)
+        val lumOk = ((lum - 34f) / 28f).coerceIn(0f, 1f)
+        val warmOk = (warmth / 16f).coerceIn(0.15f, 1f)
+        val notTooRed = if (r - g > 68f) 0.25f else 1.0f
+        return (lumOk * warmOk * notTooRed).coerceIn(0f, 1f)
+    }
+
+    private fun computeTrimmedLabStats(samples: List<FloatArray>): FloatArray {
+        val sortedByL = samples.sortedBy { it[0] }
+        val trim = (sortedByL.size * 0.15f).toInt().coerceAtMost((sortedByL.size - 4).coerceAtLeast(0) / 2)
+        val sub = sortedByL.subList(trim, (sortedByL.size - trim).coerceAtLeast(trim + 1))
+        val n = sub.size.coerceAtLeast(1)
+        var sL = 0.0
+        var sA = 0.0
+        var sB = 0.0
+        for (p in sub) {
+            sL += p[0]
+            sA += p[1]
+            sB += p[2]
+        }
+        val mL = (sL / n).toFloat()
+        val mA = (sA / n).toFloat()
+        val mB = (sB / n).toFloat()
+        var vL = 0.0
+        var vA = 0.0
+        var vB = 0.0
+        for (p in sub) {
+            vL += (p[0] - mL) * (p[0] - mL)
+            vA += (p[1] - mA) * (p[1] - mA)
+            vB += (p[2] - mB) * (p[2] - mB)
+        }
+        return floatArrayOf(
+            mL,
+            mA,
+            mB,
+            sqrt(vL / n).toFloat(),
+            sqrt(vA / n).toFloat(),
+            sqrt(vB / n).toFloat()
+        )
+    }
+
+    internal fun rgbToLab(r8: Int, g8: Int, b8: Int, outLab: FloatArray) {
+        fun toLinear(v: Int): Double {
+            val c = v / 255.0
+            return if (c <= 0.04045) c / 12.92 else ((c + 0.055) / 1.055).pow(2.4)
+        }
+        val r = toLinear(r8)
+        val g = toLinear(g8)
+        val b = toLinear(b8)
+
+        val x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047
+        val y = (0.2126729 * r + 0.7151522 * g + 0.0721750 * b)
+        val z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883
+
+        fun f(t: Double): Double = if (t > 0.008856) cbrt(t) else (7.787 * t + 16.0 / 116.0)
+        val fx = f(x)
+        val fy = f(y)
+        val fz = f(z)
+        outLab[0] = (116.0 * fy - 16.0).toFloat()
+        outLab[1] = (500.0 * (fx - fy)).toFloat()
+        outLab[2] = (200.0 * (fy - fz)).toFloat()
+    }
+
+    internal fun labToRgb(l: Float, a: Float, b: Float, outRgb: IntArray) {
+        val fy = (l + 16.0) / 116.0
+        val fx = fy + a / 500.0
+        val fz = fy - b / 200.0
+
+        fun fInv(t: Double): Double = if (t > 0.206893) t * t * t else (t - 16.0 / 116.0) / 7.787
+        val x = 0.95047 * fInv(fx)
+        val y = fInv(fy)
+        val z = 1.08883 * fInv(fz)
+
+        val rLin = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
+        val gLin = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
+        val bLin = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
+
+        fun toSrgb(lin: Double): Int {
+            val clamped = lin.coerceIn(0.0, 1.0)
+            val srgb = if (clamped <= 0.0031308) {
+                12.92 * clamped
+            } else {
+                1.055 * clamped.pow(1.0 / 2.4) - 0.055
+            }
+            return (srgb * 255.0 + 0.5).toInt().coerceIn(0, 255)
+        }
+        outRgb[0] = toSrgb(rLin)
+        outRgb[1] = toSrgb(gLin)
+        outRgb[2] = toSrgb(bLin)
     }
 }
