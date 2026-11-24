@@ -158,6 +158,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
         headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
+        enableNextGenSwapStack: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
@@ -587,6 +588,7 @@ class OnnxRuntimeModelService(
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
         headPipelineMode: HeadReplacementPipelineMode,
+        enableNextGenSwapStack: Boolean,
         isCancelled: () -> Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -615,6 +617,7 @@ class OnnxRuntimeModelService(
             autoBodyAgeMatch = autoBodyAgeMatch,
             faceAgingFactor = faceAgingFactor,
             headPipelineMode = headPipelineMode,
+            enableNextGenSwapStack = enableNextGenSwapStack,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedSegformerSession = null,

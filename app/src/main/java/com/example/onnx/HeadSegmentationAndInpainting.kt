@@ -1228,6 +1228,113 @@ object HeadSegmentationAndInpainting {
     }
 
     /**
+     * Runs dedicated `face_occluder.onnx` or `dfl_xseg.onnx` (typically 256x256 RGB NCHW or NHWC ->
+     * 1-channel foreground occlusion mask in [0, 1]) ONLY for Option B+C and Option D.
+     * Option A & B continue using [computeFaceOcclusionGate512] untouched.
+     */
+    fun computeXsegOccluderGate512(
+        ortEnv: OrtEnvironment?,
+        alignedTarget512: Bitmap,
+        occluderFile: File?,
+        preferHardwareAccel: Boolean = false
+    ): FloatArray? {
+        if (ortEnv == null || occluderFile == null || !occluderFile.exists() || occluderFile.length() <= 1024L) {
+            return null
+        }
+        return runCatching {
+            val session = OnnxProtobufInspector.getOrCreateCachedSession(
+                ortEnv = ortEnv,
+                file = occluderFile,
+                preferHardwareAcceleration = preferHardwareAccel
+            ) ?: return@runCatching null
+
+            val inputEntry = session.inputInfo.entries.firstOrNull() ?: return@runCatching null
+            val inputName = inputEntry.key
+            val inInfo = inputEntry.value.info as? ai.onnxruntime.TensorInfo
+            val inShape = inInfo?.shape ?: longArrayOf(1L, 3L, 256L, 256L)
+            val isNhwcIn = inShape.size == 4 && inShape[3] == 3L && inShape[1] != 3L
+            val rawH = if (inShape.size == 4) (if (isNhwcIn) inShape[1] else inShape[2]) else 256L
+            val rawW = if (inShape.size == 4) (if (isNhwcIn) inShape[2] else inShape[3]) else 256L
+            val modelH = if (rawH > 0L) rawH.toInt().coerceIn(64, 512) else 256
+            val modelW = if (rawW > 0L) rawW.toInt().coerceIn(64, 512) else 256
+
+            val scaled = if (alignedTarget512.width == modelW && alignedTarget512.height == modelH) {
+                alignedTarget512
+            } else {
+                Bitmap.createScaledBitmap(alignedTarget512, modelW, modelH, true)
+            }
+            val hw = modelW * modelH
+            val pixels = IntArray(hw)
+            scaled.getPixels(pixels, 0, modelW, 0, 0, modelW, modelH)
+            if (scaled !== alignedTarget512) scaled.recycle()
+
+            val floatInput = NextGenBcdHelper.buildXsegRgbInputFloats(
+                pixels = pixels,
+                width = modelW,
+                height = modelH,
+                isNhwc = isNhwcIn
+            )
+            val tensorShape = if (isNhwcIn) {
+                longArrayOf(1L, modelH.toLong(), modelW.toLong(), 3L)
+            } else {
+                longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())
+            }
+
+            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floatInput), tensorShape).use { inTensor ->
+                session.run(mapOf(inputName to inTensor)).use { results ->
+                    val outTensor = results[0] as OnnxTensor
+                    val outShape = outTensor.info.shape
+                    val outBuf = outTensor.floatBuffer
+                    val remaining = outBuf.remaining()
+                    if (remaining <= 0) return@runCatching null
+                    val outFloats = FloatArray(remaining)
+                    outBuf.get(outFloats)
+
+                    var maskH = modelH
+                    var maskW = modelW
+                    var channels = 1
+                    var isNhwcOut = false
+                    when (outShape.size) {
+                        4 -> {
+                            val d1 = outShape[1].toInt()
+                            val d2 = outShape[2].toInt()
+                            val d3 = outShape[3].toInt()
+                            if (d3 in 1..2 && d1 > 16 && d2 > 16) {
+                                isNhwcOut = true
+                                maskH = d1
+                                maskW = d2
+                                channels = d3
+                            } else if (d1 in 1..2 && d2 > 16 && d3 > 16) {
+                                isNhwcOut = false
+                                channels = d1
+                                maskH = d2
+                                maskW = d3
+                            }
+                        }
+                        3 -> {
+                            val d1 = outShape[1].toInt()
+                            val d2 = outShape[2].toInt()
+                            if (d1 > 16 && d2 > 16) {
+                                maskH = d1
+                                maskW = d2
+                                channels = 1
+                            }
+                        }
+                    }
+
+                    NextGenBcdHelper.upscaleXsegMaskTo512(
+                        outFloats = outFloats,
+                        maskH = maskH,
+                        maskW = maskW,
+                        channels = channels,
+                        isNhwc = isNhwcOut
+                    )
+                }
+            }
+        }.getOrNull()
+    }
+
+    /**
      * Applies DSLR Portrait Mode Background Bokeh Blur to [bitmap] in-place while keeping all
      * detected subjects (faces, hair crowns, necks, and shoulders/torsos) razor-sharp.
      */

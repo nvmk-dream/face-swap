@@ -38,6 +38,9 @@ import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.OnnxRuntimeModelService
 import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.InstalledSdInpaintPack
+import com.example.onnx.NextGenBcdModelManager
+import com.example.onnx.NextGenBcdModelsState
+import com.example.onnx.NextGenBcdSlot
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
@@ -190,6 +193,7 @@ data class FaceSwapUiState(
     val installedSdInpaintPacks: List<SdInpaintPackType> = emptyList(),
     val installedSdPackDetails: List<InstalledSdInpaintPack> = emptyList(),
     val clipTokenizerStatus: ClipTokenizerStatus = ClipTokenizerStatus(),
+    val nextGenBcdState: NextGenBcdModelsState = NextGenBcdModelsState(),
     val isLamaInpaintReady: Boolean = false,
     val inpaintModelLabel: String = "Coming Soon",
     val statusBannerMessage: String? = null,
@@ -661,7 +665,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     memoryServiceState = it.memoryServiceState.copy(isLoading = true)
                 )
             }
-            val (inspections, memState, packDetails, tokStatusAndLama) = withContext(Dispatchers.IO) {
+            val (inspections, memState, packDetails, tokStatusAndExtras) = withContext(Dispatchers.IO) {
                 val ctx = getApplication<Application>()
                 val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                 val mem = modelService.loadModelsIntoMemory(
@@ -672,9 +676,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(ctx)
                 val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
                 val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
-                Quadruple(insp, mem, details, tokStatus to hasLama)
+                val nextGen = NextGenBcdModelManager.inspectAllSlots(ctx)
+                Quadruple(insp, mem, details, Triple(tokStatus, hasLama, nextGen))
             }
-            val (tokStatus, lamaReady) = tokStatusAndLama
+            val (tokStatus, lamaReady, nextGenState) = tokStatusAndExtras
             val sdPackTypes = packDetails.map { it.packType }
             val lamaFile = OnnxProtobufInspector.resolveModelFile(getApplication(), ModelSlot.INPAINTING)
             val resolvedOption = if (_uiState.value.inpaintModelOption == InpaintModelOption.AUTO) {
@@ -696,6 +701,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     installedSdInpaintPacks = sdPackTypes,
                     installedSdPackDetails = packDetails,
                     clipTokenizerStatus = tokStatus,
+                    nextGenBcdState = nextGenState,
                     isLamaInpaintReady = lamaReady,
                     inpaintModelOption = resolvedOption,
                     inpaintModelLabel = label,
@@ -842,7 +848,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 onSuccess = { report ->
                     val importedSlots = report.importedSlots
                     val ctx = getApplication<Application>()
-                    val (inspections, memState, packDetails, tokAndLama) = withContext(Dispatchers.IO) {
+                    val (inspections, memState, packDetails, tokAndLamaNextGen) = withContext(Dispatchers.IO) {
                         OnnxProtobufInspector.clearCachedSessions()
                         val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                         val mem = modelService.loadModelsIntoMemory(
@@ -852,9 +858,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         val details = SdInpaintPackManager.discoverInstalledPacks(ctx)
                         val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(ctx)
                         val lama = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
-                        Quadruple(insp, mem, details, tokStatus to lama)
+                        val nextGen = NextGenBcdModelManager.inspectAllSlots(ctx)
+                        Quadruple(insp, mem, details, Triple(tokStatus, lama, nextGen))
                     }
-                    val (tokStatus, lamaFile) = tokAndLama
+                    val (tokStatus, lamaFile, nextGenState) = tokAndLamaNextGen
                     val sdPackTypes = packDetails.map { it.packType }
                     val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
                     val defaultOpt = SdInpaintPackManager.determineDefaultModelOption(ctx, if (hasLama) lamaFile else null)
@@ -863,6 +870,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     val importedNames = buildList {
                         importedSlots.forEach { s ->
                             add(OnnxProtobufInspector.resolveModelFile(ctx, s).name)
+                        }
+                        report.importedNextGenBcdSlots.forEach { ngSlot ->
+                            val ngFileName = NextGenBcdModelManager.resolveActiveFile(ctx, ngSlot)?.name ?: ngSlot.canonicalHint
+                            add("$ngFileName (Opt B+C/D)")
                         }
                         val reportedPacks = if (report.importedSdPacks.isNotEmpty()) report.importedSdPacks else sdPackTypes
                         reportedPacks.forEach { packType ->
@@ -880,6 +891,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                             installedSdInpaintPacks = sdPackTypes,
                             installedSdPackDetails = packDetails,
                             clipTokenizerStatus = tokStatus,
+                            nextGenBcdState = nextGenState,
                             isLamaInpaintReady = hasLama,
                             inpaintModelOption = defaultOpt,
                             inpaintModelLabel = label,
@@ -914,6 +926,69 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
             )
+        }
+    }
+
+    fun importNextGenBcdModel(uri: Uri, slot: NextGenBcdSlot) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isInspectingModels = true,
+                    statusBannerMessage = "Uploading ${slot.canonicalHint} for Option B+C & D...",
+                    errorBannerMessage = null
+                )
+            }
+            val ctx = getApplication<Application>()
+            val importRes = withContext(Dispatchers.IO) {
+                NextGenBcdModelManager.importSingleModelFromUri(ctx, uri, slot)
+            }
+            val nextGenState = withContext(Dispatchers.IO) {
+                NextGenBcdModelManager.inspectAllSlots(ctx)
+            }
+            importRes.fold(
+                onSuccess = { importedFile ->
+                    _uiState.update {
+                        it.copy(
+                            nextGenBcdState = nextGenState,
+                            isInspectingModels = false,
+                            statusBannerMessage = "✓ ${importedFile.name} (${formatBytes(importedFile.length())}) uploaded (Option B+C & D only • A & B untouched).",
+                            errorBannerMessage = null
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            nextGenBcdState = nextGenState,
+                            isInspectingModels = false,
+                            statusBannerMessage = null,
+                            errorBannerMessage = "Upload failed (${slot.canonicalHint}): ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun deleteNextGenBcdModel(slot: NextGenBcdSlot) {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val removed = withContext(Dispatchers.IO) {
+                NextGenBcdModelManager.deleteSlotModel(ctx, slot)
+            }
+            val nextGenState = withContext(Dispatchers.IO) {
+                NextGenBcdModelManager.inspectAllSlots(ctx)
+            }
+            _uiState.update {
+                it.copy(
+                    nextGenBcdState = nextGenState,
+                    statusBannerMessage = if (removed) {
+                        "Cleared ${slot.title} — Option B+C & D will safely use default HyperSwap/GFPGAN."
+                    } else {
+                        "No model file to clear in ${slot.title}."
+                    }
+                )
+            }
         }
     }
 
@@ -1638,6 +1713,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                     autoBodyAgeMatch = state.autoBodyAgeMatch,
                                     faceAgingFactor = state.faceAgingFactor,
                                     headPipelineMode = state.headPipelineMode,
+                                    enableNextGenSwapStack = true,
                                     isCancelled = { jobCancelToken.get() },
                                     onProgress = { progress ->
                                         if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@replaceFullHead

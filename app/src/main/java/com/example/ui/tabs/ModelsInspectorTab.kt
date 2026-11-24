@@ -51,6 +51,9 @@ import com.example.onnx.GhostComponentFeasibility
 import com.example.onnx.InstalledSdInpaintPack
 import com.example.onnx.ModelRequirementLevel
 import com.example.onnx.ModelSlot
+import com.example.onnx.NextGenBcdModelsState
+import com.example.onnx.NextGenBcdSlot
+import com.example.onnx.NextGenBcdSlotStatus
 import com.example.onnx.OnnxModelInspection
 import com.example.onnx.OnnxProtobufInspector
 import com.example.ui.theme.AmberWarning
@@ -70,6 +73,7 @@ fun ModelsInspectorTab(
     segformerAutoSelectedForAccessory: Boolean = false,
     sdPackDetails: List<InstalledSdInpaintPack> = emptyList(),
     clipTokenizerStatus: ClipTokenizerStatus = ClipTokenizerStatus(),
+    nextGenBcdState: NextGenBcdModelsState = NextGenBcdModelsState(),
     onImportModelForSlot: (ModelSlot) -> Unit,
     onRefreshModels: () -> Unit,
     onImportAllFromFolder: () -> Unit = {},
@@ -78,6 +82,8 @@ fun ModelsInspectorTab(
     onUploadRealVisFp16Folder: () -> Unit = {},
     onUploadSd15Fp16Folder: () -> Unit = {},
     onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
+    onUploadNextGenBcdModel: (NextGenBcdSlot) -> Unit = {},
+    onDeleteNextGenBcdModel: (NextGenBcdSlot) -> Unit = {},
     onPreloadMemoryModels: () -> Unit = {},
     onReleaseMemoryModels: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -348,6 +354,7 @@ fun ModelsInspectorTab(
                                 "├── re_aging/       (face_reaging.onnx — FRAN U-Net / CV Fallback)\n" +
                                 "├── face_mesh/      (facemesh-v2-v1.onnx — 468-Pt 3D Mesh / PnP-106)\n" +
                                 "├── head_pose/      (6DRepNet360_Slim.onnx / SixDRepNet.onnx — 6D Pitch/Yaw/Roll)\n" +
+                                "├── nextgen_bcd/    (Option B+C & D only: ReSwapper256/SimSwap512, CodeFormer, XSeg)\n" +
                                 "└── enhancement/    (gfpgan_1.4.onnx / gfpgan-v1.4-w16-v1.onnx)",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface
@@ -472,7 +479,16 @@ fun ModelsInspectorTab(
                 onImportSdFolder = onImportAllFromFolder
             )
 
-            // 3. Installed vs Missing Model Slots
+            // 3b. Option B+C & Option D Next-Gen ONNX Models (ReSwapper/SimSwap + CodeFormer + XSeg Occluder)
+            NextGenBcdModelsCard(
+                nextGenBcdState = nextGenBcdState,
+                isBusy = isInspecting,
+                onUploadSlot = onUploadNextGenBcdModel,
+                onDeleteSlot = onDeleteNextGenBcdModel,
+                onImportFolder = onImportAllFromFolder
+            )
+
+            // 4. Installed vs Missing Model Slots
             Text(
                 text = "On-Device ONNX Model Slots • ஒவ்வொரு மாடலின் பணி (தமிழில்)",
                 style = MaterialTheme.typography.titleMedium,
@@ -1238,5 +1254,256 @@ private fun TokenizerFileBadge(
             color = fg,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
         )
+    }
+}
+
+@Composable
+internal fun NextGenBcdModelsCard(
+    nextGenBcdState: NextGenBcdModelsState,
+    isBusy: Boolean,
+    onUploadSlot: (NextGenBcdSlot) -> Unit,
+    onDeleteSlot: (NextGenBcdSlot) -> Unit,
+    onImportFolder: () -> Unit
+) {
+    val installedCount = nextGenBcdState.installedCount
+    val accent = if (installedCount > 0) Color(0xFF0284C7) else RoyalViolet
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("nextgen_bcd_models_card"),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.4.dp, accent.copy(alpha = 0.65f)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xF5FFFFFF))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (installedCount > 0) Icons.Default.CheckCircle else Icons.Default.UploadFile,
+                        contentDescription = "Option B+C & D Next-Gen ONNX Models",
+                        tint = accent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Text(
+                        text = "Option B+C & D Next-Gen ONNX Models",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF0F172A)
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (installedCount == 3) Color(0xFFDCFCE7) else Color(0xFFE0F2FE)
+                ) {
+                    Text(
+                        text = "$installedCount/3 Active",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (installedCount == 3) Color(0xFF065F46) else Color(0xFF0369A1),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFFEFF6FF))
+                    .border(1.dp, Color(0xFF93C5FD), RoundedCornerShape(10.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Option B+C & Option D-ல் மட்டும் (Option A & B மாறாது)",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1D4ED8)
+                )
+                Text(
+                    text = "இங்கு upload செய்யும் மாடல்கள் Option B+C (Head + HD Inner Swap) மற்றும் Option D (Craniofacial Pro)-ல் மட்டுமே தானாகப் பயன்படுத்தப்படும். Option A மற்றும் Option B முன்போல HyperSwap + GFPGAN உடன் பாதுகாப்பாக இயங்கும்.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF1E293B)
+                )
+            }
+
+            NextGenBcdSlotRow(
+                status = nextGenBcdState.swapper,
+                isBusy = isBusy,
+                uploadTag = "models_upload_nextgen_swapper_button",
+                clearTag = "models_clear_nextgen_swapper_button",
+                onUpload = { onUploadSlot(NextGenBcdSlot.NEXTGEN_SWAPPER) },
+                onClear = { onDeleteSlot(NextGenBcdSlot.NEXTGEN_SWAPPER) }
+            )
+
+            NextGenBcdSlotRow(
+                status = nextGenBcdState.codeformer,
+                isBusy = isBusy,
+                uploadTag = "models_upload_codeformer_button",
+                clearTag = "models_clear_codeformer_button",
+                onUpload = { onUploadSlot(NextGenBcdSlot.CODEFORMER) },
+                onClear = { onDeleteSlot(NextGenBcdSlot.CODEFORMER) }
+            )
+
+            NextGenBcdSlotRow(
+                status = nextGenBcdState.occluder,
+                isBusy = isBusy,
+                uploadTag = "models_upload_xseg_occluder_button",
+                clearTag = "models_clear_xseg_occluder_button",
+                onUpload = { onUploadSlot(NextGenBcdSlot.XSEG_OCCLUDER) },
+                onClear = { onDeleteSlot(NextGenBcdSlot.XSEG_OCCLUDER) }
+            )
+
+            OutlinedButton(
+                onClick = onImportFolder,
+                enabled = !isBusy,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("models_import_nextgen_folder_button"),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Folder,
+                    contentDescription = "Auto-Scan Folder for Next-Gen B+C/D Models",
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Auto-Import Next-Gen ONNX from Folder",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NextGenBcdSlotRow(
+    status: NextGenBcdSlotStatus,
+    isBusy: Boolean,
+    uploadTag: String,
+    clearTag: String,
+    onUpload: () -> Unit,
+    onClear: () -> Unit
+) {
+    val slot = status.slot
+    val accent = Color(slot.accentHex)
+    val installed = status.isInstalled
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (installed) Color(0xFFF0FDF4) else Color(0xFFF8FAFC))
+            .border(
+                width = 1.dp,
+                color = if (installed) Color(0xFF4ADE80) else accent.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = slot.title,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF0F172A),
+                modifier = Modifier.weight(1f)
+            )
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = if (installed) Color(0xFFDCFCE7) else Color(0xFFE2E8F0)
+            ) {
+                Text(
+                    text = if (installed) "✓ Installed" else "Optional",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (installed) Color(0xFF065F46) else Color(0xFF475569),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
+        }
+        Text(
+            text = if (installed) {
+                "File: ${status.installedFileName ?: slot.canonicalHint} • ${status.detailBadge}"
+            } else {
+                "Expected: ${slot.canonicalHint}"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (installed) Color(0xFF047857) else accent
+        )
+        Text(
+            text = slot.tamilRoleSummary,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF334155)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = onUpload,
+                enabled = !isBusy,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag(uploadTag),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FileOpen,
+                    contentDescription = "Upload ${slot.canonicalHint}",
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (installed) "Replace .onnx" else "Upload .onnx",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            if (installed) {
+                OutlinedButton(
+                    onClick = onClear,
+                    enabled = !isBusy,
+                    border = BorderStroke(1.dp, Color(0xFFDC2626)),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag(clearTag),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Clear ${slot.title}",
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Clear",
+                        color = Color(0xFFDC2626),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
     }
 }

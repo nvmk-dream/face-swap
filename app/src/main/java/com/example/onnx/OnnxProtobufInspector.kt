@@ -292,7 +292,8 @@ object OnnxProtobufInspector {
         "re_aging",
         "face_mesh",
         "head_pose",
-        "head_swap"
+        "head_swap",
+        "nextgen_bcd"
     )
 
     /**
@@ -504,6 +505,8 @@ object OnnxProtobufInspector {
         // black blocks & red overflows or stall/spike 2x RAM on large SD UNet/VAE graphs.
         return lower.contains("hyperswap") ||
             lower.contains("inswapper") ||
+            lower.contains("reswapper") ||
+            lower.contains("simswap") ||
             lower.contains("w600k") ||
             lower.contains("arcface") ||
             lower.contains("gfpgan") ||
@@ -936,14 +939,13 @@ object OnnxProtobufInspector {
                 ModelSlot.RECOGNIZER
             lower.contains("inswapper") || lower.contains("hyperswap") ->
                 ModelSlot.SWAPPER
-            lower.contains("segformer") || lower.contains("bisenet") || lower.contains("face_parsing") ||
-                lower.contains("face_occluder") || lower.contains("dfl_xseg") ->
+            lower.contains("segformer") || lower.contains("bisenet") || lower.contains("face_parsing") ->
                 ModelSlot.SEGMENTATION
             lower.contains("modnet") || lower.contains("stylematte") ->
                 ModelSlot.MATTING
             lower.contains("lama") ->
                 ModelSlot.INPAINTING
-            lower.contains("gfpgan") || lower.contains("codeformer") ->
+            lower.contains("gfpgan") ->
                 ModelSlot.ENHANCEMENT
             lower.contains("mivolo") || lower.contains("age_est") || lower.contains("age_onnx") ->
                 ModelSlot.AGE_ESTIMATOR
@@ -975,8 +977,6 @@ object OnnxProtobufInspector {
         if (!lower.endsWith(".onnx")) return false
         return lower.contains("1k3d68") ||
             lower.contains("2d106det") ||
-            lower.contains("face_occluder") ||
-            lower.contains("dfl_xseg") ||
             lower.contains("bisenet")
     }
 
@@ -1012,7 +1012,8 @@ object OnnxProtobufInspector {
     data class FolderAutoImportReport(
         val importedSlots: List<ModelSlot>,
         val importedSdPacks: List<SdInpaintPackType>,
-        val skippedAuxiliaryCount: Int = 0
+        val skippedAuxiliaryCount: Int = 0,
+        val importedNextGenBcdSlots: List<NextGenBcdSlot> = emptyList()
     )
 
     private fun findCompanionDataEntry(
@@ -1069,6 +1070,7 @@ object OnnxProtobufInspector {
             val rootDocId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
             val rawDiscoveredOnnx = mutableListOf<DiscoveredDocEntry>()
             val rawAuxiliaryOnnx = mutableListOf<Triple<String, String, Long>>() // (docId, displayName, size)
+            val rawNextGenBcdCandidates = mutableListOf<NextGenBcdModelManager.ScannedCandidate>()
             val dataFilesByName = mutableMapOf<String, Pair<String, Long>>() // lowercase name -> (docId, size)
 
             fun scanDocumentDirectory(parentDocId: String, parentPathHint: String, depth: Int) {
@@ -1133,6 +1135,26 @@ object OnnxProtobufInspector {
                                     }
                                     if (isAuxiliary3DOrOcclusionModel(displayName)) {
                                         rawAuxiliaryOnnx.add(Triple(docId, displayName, docSize))
+                                    }
+                                    val nextGenSlot = NextGenBcdHelper.classifySlotForFileName(displayName)
+                                    if (nextGenSlot != null) {
+                                        val pri = when (nextGenSlot) {
+                                            NextGenBcdSlot.NEXTGEN_SWAPPER ->
+                                                NextGenBcdHelper.computeSwapperCandidatePriority(displayName, docSize, false)
+                                            NextGenBcdSlot.XSEG_OCCLUDER ->
+                                                NextGenBcdHelper.computeOccluderCandidatePriority(displayName, docSize, false)
+                                            NextGenBcdSlot.CODEFORMER ->
+                                                if (docSize >= 8L * 1024L * 1024L) 1100 else 100
+                                        }
+                                        rawNextGenBcdCandidates.add(
+                                            NextGenBcdModelManager.ScannedCandidate(
+                                                docId = docId,
+                                                displayName = displayName,
+                                                sizeBytes = docSize,
+                                                slot = nextGenSlot,
+                                                priority = pri
+                                            )
+                                        )
                                     }
                                 }
                             }
@@ -1340,14 +1362,38 @@ object OnnxProtobufInspector {
                 )
             }.getOrDefault(emptyList())
 
-            if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty() || importedSdPacks.isNotEmpty()) {
+            val importedNextGenBcdSlots = runCatching {
+                val resolvedCandidates = rawNextGenBcdCandidates.map { cand ->
+                    val hasCompanion = findCompanionDataEntry(cand.displayName, dataFilesByName) != null
+                    if (!hasCompanion) cand else {
+                        val updatedPri = when (cand.slot) {
+                            NextGenBcdSlot.NEXTGEN_SWAPPER ->
+                                NextGenBcdHelper.computeSwapperCandidatePriority(cand.displayName, cand.sizeBytes, true)
+                            NextGenBcdSlot.XSEG_OCCLUDER ->
+                                NextGenBcdHelper.computeOccluderCandidatePriority(cand.displayName, cand.sizeBytes, true)
+                            NextGenBcdSlot.CODEFORMER -> 1100
+                        }
+                        cand.copy(priority = updatedPri)
+                    }
+                }
+                NextGenBcdModelManager.importFromTreeScan(
+                    context = context,
+                    treeUri = treeUri,
+                    discovered = resolvedCandidates,
+                    dataFilesByName = dataFilesByName,
+                    onProgress = onProgress
+                )
+            }.getOrDefault(emptyList())
+
+            if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty() || importedSdPacks.isNotEmpty() || importedNextGenBcdSlots.isNotEmpty()) {
                 saveLinkedModelsFolderUri(context, treeUri)
             }
             Result.success(
                 FolderAutoImportReport(
                     importedSlots = importedSlots,
                     importedSdPacks = importedSdPacks,
-                    skippedAuxiliaryCount = skippedAux
+                    skippedAuxiliaryCount = skippedAux,
+                    importedNextGenBcdSlots = importedNextGenBcdSlots
                 )
             )
         } catch (oom: OutOfMemoryError) {

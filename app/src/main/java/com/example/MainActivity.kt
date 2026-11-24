@@ -73,6 +73,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.provider.MediaStore
 import com.example.onnx.ModelSlot
+import com.example.onnx.NextGenBcdSlot
 import com.example.ui.AppTab
 import com.example.ui.FaceSwapViewModel
 import com.example.ui.StudioSubPage
@@ -110,6 +111,7 @@ fun FaceSwapStudioApp(
     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
 
     var pendingImportSlot by remember { mutableStateOf(ModelSlot.DETECTOR) }
+    var pendingNextGenSlot by remember { mutableStateOf(NextGenBcdSlot.NEXTGEN_SWAPPER) }
     var zoomViewerState by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -197,6 +199,20 @@ fun FaceSwapStudioApp(
                 )
             }
             viewModel.importOnnxModel(uri, pendingImportSlot)
+        }
+    }
+
+    val nextGenBcdDocumentPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            viewModel.importNextGenBcdModel(uri, pendingNextGenSlot)
         }
     }
 
@@ -788,6 +804,7 @@ fun FaceSwapStudioApp(
                     segformerAutoSelectedForAccessory = uiState.segformerAutoSelectedForAccessory,
                     sdPackDetails = uiState.installedSdPackDetails,
                     clipTokenizerStatus = uiState.clipTokenizerStatus,
+                    nextGenBcdState = uiState.nextGenBcdState,
                     onImportModelForSlot = { slot ->
                         pendingImportSlot = slot
                         onnxDocumentPicker.launch(arrayOf("*/*"))
@@ -810,6 +827,11 @@ fun FaceSwapStudioApp(
                         sd15Fp16FolderTreePicker.launch(null)
                     },
                     onDeleteSdInpaintPack = viewModel::deleteSdInpaintPack,
+                    onUploadNextGenBcdModel = { slot ->
+                        pendingNextGenSlot = slot
+                        nextGenBcdDocumentPicker.launch(arrayOf("*/*"))
+                    },
+                    onDeleteNextGenBcdModel = viewModel::deleteNextGenBcdModel,
                     onPreloadMemoryModels = viewModel::preloadModelsIntoMemory,
                     onReleaseMemoryModels = viewModel::releaseModelsFromMemory
                 )

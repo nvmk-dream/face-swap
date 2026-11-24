@@ -125,6 +125,7 @@ object CleanEraseHeadReplacementEngine {
         preloadedEmap512x512: FloatArray? = null,
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
+        enableNextGenSwapStack: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -174,6 +175,7 @@ object CleanEraseHeadReplacementEngine {
                 preloadedEmap512x512 = preloadedEmap512x512,
                 autoBodyAgeMatch = autoBodyAgeMatch,
                 faceAgingFactor = faceAgingFactor,
+                enableNextGenSwapStack = enableNextGenSwapStack,
                 isCancelled = isCancelled,
                 onProgress = onProgress
             )
@@ -216,6 +218,7 @@ object CleanEraseHeadReplacementEngine {
         preloadedEmap512x512: FloatArray?,
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
+        enableNextGenSwapStack: Boolean,
         isCancelled: () -> Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -1086,6 +1089,7 @@ object CleanEraseHeadReplacementEngine {
                 faceAgingFactor = faceAgingFactor,
                 swapStrategyOption = FaceSwapStrategyOption.OPTION_A_MASK_FIDELITY,
                 precomputedTargetDepthMap = targetDepthMap,
+                enableNextGenSwapStack = enableNextGenSwapStack,
                 isCancelled = isCancelled,
                 onProgress = { sub ->
                     if (ortEnv != null) {
