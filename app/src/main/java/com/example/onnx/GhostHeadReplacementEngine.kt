@@ -217,11 +217,19 @@ object GhostHeadReplacementEngine {
             yawRatio = srcHeadPose.yawRatio
         )
         val canonicalCenterNx = (canonicalSrcTemplate[2].x / headCropSize.toFloat()).coerceIn(0.38f, 0.62f)
+        val srcBoundsMask = computeCopyPasteInBoundsMask(
+            forwardHeadMatrix2x3 = srcHeadMatrix,
+            srcWidth = sourceBitmap.width,
+            srcHeight = sourceBitmap.height,
+            cropSize = headCropSize,
+            featherPx = 14f
+        )
         val cleanedSrcAlpha = sanitizeCopyPasteHeadAlpha(
             rawAlpha = rawSrcMasks.fullHeadAlpha,
             cropBitmap = alignedSourceHead,
             cropSize = headCropSize,
             centerNx = canonicalCenterNx,
+            inBoundsMask = srcBoundsMask,
             isSourceMask = true
         )
         val srcMasks = rawSrcMasks.copy(fullHeadAlpha = cleanedSrcAlpha)
@@ -304,34 +312,37 @@ object GhostHeadReplacementEngine {
                 preferHardwareAccel = preferHardwareAccel,
                 preloadedSegformerSession = preloadedSegformerSession
             )
+            val tgtBoundsMask = computeCopyPasteInBoundsMask(
+                forwardHeadMatrix2x3 = tgtHeadMatrix,
+                srcWidth = targetW,
+                srcHeight = targetH,
+                cropSize = headCropSize,
+                featherPx = 14f
+            )
             val cleanedTgtAlpha = sanitizeCopyPasteHeadAlpha(
                 rawAlpha = rawTgtMasks.fullHeadAlpha,
                 cropBitmap = alignedTargetHead,
                 cropSize = headCropSize,
                 centerNx = canonicalCenterNx,
+                inBoundsMask = tgtBoundsMask,
                 isSourceMask = false
             )
             val tgtMasks = rawTgtMasks.copy(fullHeadAlpha = cleanedTgtAlpha)
 
-            // 5a. Inpaint disoccluded background where target's old hair/ears extended beyond the new source head
-            val rawInpaintedTargetCrop = HeadSegmentationAndInpainting.inpaintTargetBackgroundGap(
-                ortEnv = ortEnv,
-                targetAlignedCrop = alignedTargetHead,
-                targetHeadAlpha = tgtMasks.fullHeadAlpha,
-                sourceHeadAlpha = srcMasks.fullHeadAlpha,
-                lamaModelFile = if (lamaFile.exists()) lamaFile else null,
-                preferHardwareAccel = preferHardwareAccel
-            )
-            val inpaintedTargetCrop = cleanInpaintedEarSideGaps(
-                inpaintedCrop = rawInpaintedTargetCrop,
-                alignedTargetCrop = alignedTargetHead,
-                targetHeadAlpha = tgtMasks.fullHeadAlpha,
-                sourceHeadAlpha = srcMasks.fullHeadAlpha,
-                cropSize = headCropSize,
-                centerNx = canonicalCenterNx
-            )
-            if (inpaintedTargetCrop !== rawInpaintedTargetCrop) {
-                rawInpaintedTargetCrop.recycle()
+            // 5a. Only run neural LaMa disocclusion inpainting when lama_fp32.onnx is installed;
+            // never paint horizontal scanline stripes over Target's natural outer hair.
+            val hasNeuralLama = ortEnv != null && lamaFile.exists() && lamaFile.length() > 1024L
+            val inpaintedTargetCrop = if (hasNeuralLama) {
+                HeadSegmentationAndInpainting.inpaintTargetBackgroundGap(
+                    ortEnv = ortEnv,
+                    targetAlignedCrop = alignedTargetHead,
+                    targetHeadAlpha = tgtMasks.fullHeadAlpha,
+                    sourceHeadAlpha = srcMasks.fullHeadAlpha,
+                    lamaModelFile = lamaFile,
+                    preferHardwareAccel = preferHardwareAccel
+                )
+            } else {
+                alignedTargetHead.copy(Bitmap.Config.ARGB_8888, true)
             }
 
             // 5b. Adapt skin & neck lighting/warmth according to SkinToneSourceMode without recoloring source hair
@@ -442,12 +453,13 @@ object GhostHeadReplacementEngine {
                 rawEnhancedHeadCrop
             }
 
-            // Paste the full head + inpainted disocclusion envelope back onto the full-resolution target photo
+            // Paste the full head (plus neural LaMa disocclusion envelope if installed) back onto target
             val baseEnvelopeAlpha = buildCleanCopyPasteEnvelopeAlpha(
                 sourceHeadAlpha = srcMasks.fullHeadAlpha,
                 targetHeadAlpha = tgtMasks.fullHeadAlpha,
                 cropSize = headCropSize,
-                centerNx = canonicalCenterNx
+                centerNx = canonicalCenterNx,
+                hasNeuralInpaint = hasNeuralLama
             )
             val warpSize = enhancedHeadCrop.width
             val warpScale = warpSize.toFloat() / headCropSize.toFloat()
@@ -470,8 +482,8 @@ object GhostHeadReplacementEngine {
                 forwardHeadMatrix2x3 = warpMatrix2x3,
                 envelopeAlpha = warpEnvelopeAlpha,
                 blendStrength = blendStrength,
-                offsetX = offsetX * warpScale,
-                offsetY = offsetY * warpScale,
+                offsetX = offsetX,
+                offsetY = offsetY,
                 scaleAdjust = scaleAdjust
             )
 
@@ -1107,17 +1119,62 @@ object GhostHeadReplacementEngine {
     }
 
     /**
+     * Computes an inverse-warped in-bounds visibility mask in `[0, 1]` for `cropSize x cropSize`,
+     * fading clamped border extrapolations (such as top hair square horns on tight crops) to `0.0f`.
+     */
+    internal fun computeCopyPasteInBoundsMask(
+        forwardHeadMatrix2x3: FloatArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        cropSize: Int,
+        featherPx: Float = 14f
+    ): FloatArray {
+        val inv = FaceAlignment.invertAffine2x3(forwardHeadMatrix2x3)
+        val i00 = inv[0]
+        val i01 = inv[1]
+        val i02 = inv[2]
+        val i10 = inv[3]
+        val i11 = inv[4]
+        val i12 = inv[5]
+        val maxX = (srcWidth - 1).toFloat()
+        val maxY = (srcHeight - 1).toFloat()
+        val safeFeather = featherPx.coerceAtLeast(1f)
+        val out = FloatArray(cropSize * cropSize)
+        for (dy in 0 until cropSize) {
+            val row = dy * cropSize
+            val baseX = i01 * dy + i02
+            val baseY = i11 * dy + i12
+            for (dx in 0 until cropSize) {
+                val sx = i00 * dx + baseX
+                val sy = i10 * dx + baseY
+                val dist = min(min(sx, maxX - sx), min(sy, maxY - sy))
+                out[row + dx] = when {
+                    dist <= 0f -> 0f
+                    dist >= safeFeather -> 1f
+                    else -> {
+                        val t = dist / safeFeather
+                        (0.5f * (1.0 - cos(Math.PI * t))).toFloat()
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /**
      * LEGACY_COPY_PASTE-only mask cleanup:
-     * 1. Deletes sideways-flaring MODNet shoulder/chest wings below the jawline (`ny > 0.62`)
-     *    and tapers the lower neck smoothly before the bottom crop boundary (`ny in 0.81..0.92`).
-     * 2. Suppresses ear-side dangling earring/halo fringes (`ny in 0.48..0.78`, lateral zone)
-     *    and applies a 1px outer-fringe erosion on semi-transparent boundary pixels.
+     * 1. Enforces out-of-bounds (`inBoundsMask`) fade so clamped square top/side corners vanish.
+     * 2. Guarantees a solid `1.0f` interior facial core so bangs/shadows never ghost over eyes/cheeks.
+     * 3. Softly feathers outer crown & temple hair into Target hair (no helmet/headband seams).
+     * 4. Protects the full smiling chin down to `ny = 0.855` while deleting lower shoulder wings and
+     *    fading lower neck smoothly across `ny = 0.855..0.945` + suppressing dangling earrings smoothly.
      */
     internal fun sanitizeCopyPasteHeadAlpha(
         rawAlpha: FloatArray,
         cropBitmap: Bitmap,
         cropSize: Int,
         centerNx: Float,
+        inBoundsMask: FloatArray? = null,
         isSourceMask: Boolean
     ): FloatArray {
         val pixels = IntArray(cropSize * cropSize)
@@ -1127,6 +1184,7 @@ object GhostHeadReplacementEngine {
             pixels = pixels,
             cropSize = cropSize,
             centerNx = centerNx,
+            inBoundsMask = inBoundsMask,
             isSourceMask = isSourceMask
         )
     }
@@ -1136,18 +1194,19 @@ object GhostHeadReplacementEngine {
         pixels: IntArray,
         cropSize: Int,
         centerNx: Float,
+        inBoundsMask: FloatArray? = null,
         isSourceMask: Boolean
     ): FloatArray {
         val total = cropSize * cropSize
         val out = FloatArray(total)
 
-        // Sample interior hair/skin brightness near temples to detect metallic/bright dangling earrings
+        // Sample interior hair brightness near crown to detect metallic/bright dangling earrings
         var hairLumSum = 0f
         var hairCount = 0
         for (y in (cropSize * 0.18f).toInt()..(cropSize * 0.36f).toInt() step 2) {
             for (x in (cropSize * 0.34f).toInt()..(cropSize * 0.66f).toInt() step 2) {
                 val idx = y * cropSize + x
-                if (rawAlpha[idx] > 0.70f) {
+                if (rawAlpha[idx] > 0.70f && (inBoundsMask == null || inBoundsMask[idx] > 0.75f)) {
                     val c = pixels[idx]
                     val lum = 0.299f * ((c ushr 16) and 0xFF) + 0.587f * ((c ushr 8) and 0xFF) + 0.114f * (c and 0xFF)
                     if (lum < 110f) {
@@ -1163,37 +1222,41 @@ object GhostHeadReplacementEngine {
             val ny = y.toFloat() / cropSize.toFloat()
             val row = y * cropSize
 
-            // Vertical lower-neck feathering starting below chin (~0.81) and finishing cleanly at 0.92
-            // (well above MODNet's 0.975 crop border so zero straight horizontal cutoff lines occur)
+            // Vertical lower-neck feathering starting well below smiling chin (~0.855) and finishing cleanly at 0.945
             val verticalNeckFactor = when {
-                ny <= 0.81f -> 1.0f
-                ny >= 0.92f -> 0.0f
+                ny <= 0.855f -> 1.0f
+                ny >= 0.945f -> 0.0f
                 else -> {
-                    val t = (ny - 0.81f) / 0.11f
+                    val t = (ny - 0.855f) / 0.09f
                     (0.5f * (1.0 + cos(Math.PI * t))).toFloat()
                 }
             }
 
-            // Anatomical lateral half-width containment: full cranial/hair dome above 0.62,
-            // smoothly tapering inward to strict neck width below 0.74 so shoulder wings are deleted.
+            // Anatomical lateral half-width containment: full cranial dome above 0.64, smooth jaw curve
+            // preserving smiling cheeks/chin through 0.855, then strict neck width below to delete shoulder wings.
             val allowedHalfW = when {
-                ny <= 0.62f -> 0.43f
-                ny <= 0.74f -> {
-                    val t = (ny - 0.62f) / 0.12f
+                ny <= 0.64f -> 0.43f
+                ny <= 0.77f -> {
+                    val t = (ny - 0.64f) / 0.13f
                     val s = (0.5f * (1.0 - cos(Math.PI * t))).toFloat()
-                    0.43f * (1f - s) + 0.155f * s
+                    0.43f * (1f - s) + 0.215f * s
+                }
+                ny <= 0.855f -> {
+                    val t = (ny - 0.77f) / 0.085f
+                    val s = (0.5f * (1.0 - cos(Math.PI * t))).toFloat()
+                    0.215f * (1f - s) + 0.165f * s
                 }
                 else -> {
-                    val t = ((ny - 0.74f) / 0.18f).coerceIn(0f, 1f)
-                    0.155f * (1f - t) + 0.115f * t
+                    val t = ((ny - 0.855f) / 0.09f).coerceIn(0f, 1f)
+                    0.165f * (1f - t) + 0.130f * t
                 }
             }
-            val featherBand = if (ny > 0.70f) 0.032f else 0.045f
+            val featherBand = if (ny > 0.72f) 0.048f else 0.055f
 
             for (x in 0 until cropSize) {
                 val idx = row + x
-                var a = rawAlpha[idx].coerceIn(0f, 1f)
-                if (a <= 0.002f || verticalNeckFactor <= 0.002f) {
+                val boundsF = inBoundsMask?.get(idx)?.coerceIn(0f, 1f) ?: 1f
+                if (boundsF <= 0.002f || verticalNeckFactor <= 0.002f) {
                     out[idx] = 0f
                     continue
                 }
@@ -1214,8 +1277,38 @@ object GhostHeadReplacementEngine {
                     continue
                 }
 
+                // Interior facial core floor (forehead, eyes, nose, cheeks, mouth, chin) so MODNet hair/shadow
+                // dips never make the swapped face translucent
+                val coreDist = hypot(((nx - centerNx) / 0.162f).toDouble(), ((ny - 0.555f) / 0.260f).toDouble()).toFloat()
+                val faceCoreFloor = when {
+                    coreDist <= 0.85f -> 1.0f
+                    coreDist >= 1.05f -> 0.0f
+                    else -> {
+                        val t = (coreDist - 0.85f) / 0.20f
+                        (0.5f * (1.0 + cos(Math.PI * t))).toFloat()
+                    }
+                }
+
+                var a = max(rawAlpha[idx].coerceIn(0f, 1f), faceCoreFloor)
+                if (a <= 0.002f) {
+                    out[idx] = 0f
+                    continue
+                }
+
+                // Smooth outer hair/crown transition on Source so cropped top/temple hair blends organically into Target hair
+                var hairCrownFeather = 1.0f
+                if (isSourceMask && ny < 0.76f && coreDist > 0.92f) {
+                    val crownR = hypot(((nx - centerNx) / 0.305f).toDouble(), ((ny - 0.455f) / 0.335f).toDouble()).toFloat()
+                    if (crownR > 0.78f) {
+                        val t = ((crownR - 0.78f) / 0.28f).coerceIn(0f, 1f)
+                        val domeFade = (0.5f * (1.0 + cos(Math.PI * t))).toFloat()
+                        val outsideFaceT = ((coreDist - 0.92f) / 0.22f).coerceIn(0f, 1f)
+                        hairCrownFeather = 1.0f * (1f - outsideFaceT) + domeFade * outsideFaceT
+                    }
+                }
+
                 // Softly erode semi-transparent outer ear/hair fringe to prevent halo & earring ghosting
-                if (dx > 0.175f && a < 0.86f && x > 0 && x < cropSize - 1 && y > 0 && y < cropSize - 1) {
+                if (dx > 0.185f && a < 0.86f && x > 0 && x < cropSize - 1 && y > 0 && y < cropSize - 1) {
                     var minNb = a
                     for (dy in -1..1) {
                         val nRow = (y + dy) * cropSize
@@ -1227,9 +1320,10 @@ object GhostHeadReplacementEngine {
                     a = a * 0.45f + minNb * 0.55f
                 }
 
-                // Suppress dangling earrings / earlobe jewelry outliers in the lateral ear-drop zone
+                // Smoothly suppress dangling earrings / earlobe jewelry outliers in the lateral ear-drop zone (no step edge!)
                 var earJewelryTrim = 1.0f
-                if (ny in 0.46f..0.78f && dx > 0.185f) {
+                if (ny in 0.48f..0.80f && dx > 0.185f) {
+                    val nyRamp = ((ny - 0.48f) / 0.10f).coerceIn(0f, 1f) * ((0.80f - ny) / 0.08f).coerceIn(0f, 1f)
                     val c = pixels[idx]
                     val r = ((c ushr 16) and 0xFF).toFloat()
                     val g = ((c ushr 8) and 0xFF).toFloat()
@@ -1240,131 +1334,20 @@ object GhostHeadReplacementEngine {
                         (lum > 180f && dx > 0.205f) ||
                         (r > 130f && g > 95f && r > b * 1.42f && dx > 0.20f)
 
-                    if (isSourceMask && ny > 0.55f && dx > 0.195f) {
-                        // Trim dangling source earrings outside the lower cheek/jaw line cleanly
-                        val dangleFade = ((dx - 0.195f) / 0.050f).coerceIn(0f, 1f)
+                    if (isSourceMask && ny > 0.50f && dx > 0.195f) {
+                        val dangleFade = ((dx - 0.195f) / 0.055f).coerceIn(0f, 1f) * nyRamp
                         earJewelryTrim = (1.0f - dangleFade * 0.92f).coerceIn(0.08f, 1f)
                     }
                     if (isMetallicOrBrightJewelry) {
-                        earJewelryTrim *= if (isSourceMask) 0.12f else 0.30f
+                        val jewelWeight = if (isSourceMask) 0.88f else 0.70f
+                        earJewelryTrim *= (1.0f - jewelWeight * nyRamp).coerceIn(0.12f, 1f)
                     }
                 }
 
-                out[idx] = (a * lateralFactor * verticalNeckFactor * earJewelryTrim).coerceIn(0f, 1f)
+                out[idx] = (a * boundsF * lateralFactor * verticalNeckFactor * hairCrownFeather * earJewelryTrim)
+                    .coerceIn(0f, 1f)
             }
         }
-        return out
-    }
-
-    /**
-     * Cleans disoccluded ear/earring gaps (`targetAlpha > sourceAlpha`) using same-side exterior hair/background
-     * anchors instead of across-head horizontal scanlines that leave gray/silver half-cut earring remnants.
-     */
-    internal fun cleanInpaintedEarSideGaps(
-        inpaintedCrop: Bitmap,
-        alignedTargetCrop: Bitmap,
-        targetHeadAlpha: FloatArray,
-        sourceHeadAlpha: FloatArray,
-        cropSize: Int,
-        centerNx: Float
-    ): Bitmap {
-        val total = cropSize * cropSize
-        val inpPx = IntArray(total)
-        val tgtPx = IntArray(total)
-        inpaintedCrop.getPixels(inpPx, 0, cropSize, 0, 0, cropSize, cropSize)
-        alignedTargetCrop.getPixels(tgtPx, 0, cropSize, 0, 0, cropSize, cropSize)
-
-        val yStart = (cropSize * 0.36f).toInt().coerceIn(0, cropSize - 1)
-        val yEnd = (cropSize * 0.84f).toInt().coerceIn(yStart, cropSize - 1)
-        val centerX = (centerNx * cropSize).toInt().coerceIn(4, cropSize - 5)
-
-        for (y in yStart..yEnd) {
-            val row = y * cropSize
-            // Find clean exterior or solid hair anchor on the LEFT side (never mixing right side!)
-            var leftAnchorColor = tgtPx[row + 2]
-            for (x in (cropSize * 0.06f).toInt().coerceAtLeast(2) until centerX) {
-                val idx = row + x
-                if (targetHeadAlpha[idx] < 0.08f) {
-                    leftAnchorColor = tgtPx[idx]
-                } else {
-                    break
-                }
-            }
-            // Prefer adjacent dark hair over bright background if target hair immediately flanks the ear
-            var leftHairColor = leftAnchorColor
-            var foundLeftHair = false
-            for (x in 4 until centerX) {
-                val idx = row + x
-                val gap = targetHeadAlpha[idx] - sourceHeadAlpha[idx] * 0.85f
-                if (gap <= 0.08f && targetHeadAlpha[idx] > 0.35f) {
-                    val c = tgtPx[idx]
-                    val lum = 0.299f * ((c ushr 16) and 0xFF) + 0.587f * ((c ushr 8) and 0xFF) + 0.114f * (c and 0xFF)
-                    if (lum < 75f) {
-                        leftHairColor = c
-                        foundLeftHair = true
-                    }
-                }
-            }
-
-            var rightAnchorColor = tgtPx[row + cropSize - 3]
-            for (x in (cropSize * 0.94f).toInt().coerceAtMost(cropSize - 3) downTo centerX) {
-                val idx = row + x
-                if (targetHeadAlpha[idx] < 0.08f) {
-                    rightAnchorColor = tgtPx[idx]
-                } else {
-                    break
-                }
-            }
-            var rightHairColor = rightAnchorColor
-            var foundRightHair = false
-            for (x in (cropSize - 5) downTo centerX) {
-                val idx = row + x
-                val gap = targetHeadAlpha[idx] - sourceHeadAlpha[idx] * 0.85f
-                if (gap <= 0.08f && targetHeadAlpha[idx] > 0.35f) {
-                    val c = tgtPx[idx]
-                    val lum = 0.299f * ((c ushr 16) and 0xFF) + 0.587f * ((c ushr 8) and 0xFF) + 0.114f * (c and 0xFF)
-                    if (lum < 75f) {
-                        rightHairColor = c
-                        foundRightHair = true
-                    }
-                }
-            }
-
-            for (x in 2 until cropSize - 2) {
-                val nx = x.toFloat() / cropSize.toFloat()
-                val dx = abs(nx - centerNx)
-                if (dx < 0.155f) continue
-                val idx = row + x
-                val gap = (targetHeadAlpha[idx] - sourceHeadAlpha[idx] * 0.85f).coerceIn(0f, 1f)
-                if (gap <= 0.12f) continue
-
-                val isLeft = x < centerX
-                val refColor = if (isLeft) {
-                    if (foundLeftHair) leftHairColor else leftAnchorColor
-                } else {
-                    if (foundRightHair) rightHairColor else rightAnchorColor
-                }
-                val cur = inpPx[idx]
-                val cr = (cur ushr 16) and 0xFF
-                val cg = (cur ushr 8) and 0xFF
-                val cb = cur and 0xFF
-                val rr = (refColor ushr 16) and 0xFF
-                val rg = (refColor ushr 8) and 0xFF
-                val rb = refColor and 0xFF
-                val diff = abs(cr - rr) + abs(cg - rg) + abs(cb - rb)
-                if (diff > 36) {
-                    val blend = (gap * 0.88f).coerceIn(0.25f, 0.92f)
-                    val inv = 1f - blend
-                    val nr = (cr * inv + rr * blend).toInt().coerceIn(0, 255)
-                    val ng = (cg * inv + rg * blend).toInt().coerceIn(0, 255)
-                    val nb = (cb * inv + rb * blend).toInt().coerceIn(0, 255)
-                    inpPx[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-                }
-            }
-        }
-
-        val out = Bitmap.createBitmap(cropSize, cropSize, Bitmap.Config.ARGB_8888)
-        out.setPixels(inpPx, 0, cropSize, 0, 0, cropSize, cropSize)
         return out
     }
 
@@ -1372,9 +1355,13 @@ object GhostHeadReplacementEngine {
         sourceHeadAlpha: FloatArray,
         targetHeadAlpha: FloatArray,
         cropSize: Int,
-        centerNx: Float
+        centerNx: Float,
+        hasNeuralInpaint: Boolean = false
     ): FloatArray {
         val total = cropSize * cropSize
+        if (!hasNeuralInpaint) {
+            return FloatArray(total) { i -> sourceHeadAlpha[i].coerceIn(0f, 1f) }
+        }
         return FloatArray(total) { i ->
             val y = i / cropSize
             val x = i % cropSize
@@ -1383,10 +1370,9 @@ object GhostHeadReplacementEngine {
             val dx = abs(nx - centerNx)
             val sA = sourceHeadAlpha[i].coerceIn(0f, 1f)
             var tA = targetHeadAlpha[i].coerceIn(0f, 1f) * 0.86f
-            // Below mid-ear, do not stamp inpainted target patches onto side hair/earrings where source is empty
-            if (ny > 0.55f && dx > 0.185f && sA < 0.25f) {
-                val suppress = (((dx - 0.185f) / 0.045f).coerceIn(0f, 1f) *
-                    ((ny - 0.55f) / 0.08f).coerceIn(0f, 1f)).coerceIn(0f, 1f)
+            if (ny > 0.50f && dx > 0.185f && sA < 0.25f) {
+                val suppress = (((dx - 0.185f) / 0.055f).coerceIn(0f, 1f) *
+                    ((ny - 0.50f) / 0.12f).coerceIn(0f, 1f)).coerceIn(0f, 1f)
                 tA *= (1.0f - suppress * 0.95f)
             }
             max(sA, tA).coerceIn(0f, 1f)
@@ -1553,8 +1539,8 @@ object GhostHeadReplacementEngine {
                 val ny = v / headCropSize.toFloat()
                 val dx = abs(nx - centerNx)
 
-                // 1. Sample Target's actual exposed neck skin (ny 0.85..1.08, |nx-cx| <= 0.115)
-                if (ny in 0.85f..1.08f && dx <= 0.115f) {
+                // 1. Sample Target's actual exposed neck skin (ny 0.88..1.14, |nx-cx| <= 0.125)
+                if (ny in 0.88f..1.14f && dx <= 0.125f) {
                     val tc = origTargetRoiPx[roiRow + (x - minX)]
                     if (isCleanSkinPixelForLab(tc)) {
                         rgbToLab((tc ushr 16) and 0xFF, (tc ushr 8) and 0xFF, tc and 0xFF, labScratch)
@@ -1569,7 +1555,7 @@ object GhostHeadReplacementEngine {
                 }
 
                 // 2. Sample output face skin (cheeks, forehead, chin, excluding eyes & mouth)
-                if (ny in 0.34f..0.78f && dx <= 0.15f) {
+                if (ny in 0.34f..0.80f && dx <= 0.15f) {
                     val lEyeD = hypot(((nx - leftEyeNx) / 0.085f).toDouble(), ((ny - eyeY) / 0.055f).toDouble())
                     val rEyeD = hypot(((nx - rightEyeNx) / 0.085f).toDouble(), ((ny - eyeY) / 0.055f).toDouble())
                     val mouthD = hypot(((nx - centerNx) / 0.105f).toDouble(), ((ny - mouthY) / 0.055f).toDouble())
@@ -1595,7 +1581,7 @@ object GhostHeadReplacementEngine {
             SkinToneSourceMode.BALANCED_BLEND -> 0.62f
             SkinToneSourceMode.SOURCE_IDENTITY -> 0.35f
         }
-        val dL = (neckStats[0] - faceStats[0]).coerceIn(-26f, 26f)
+        val dL = (neckStats[0] - faceStats[0]).coerceIn(-30f, 30f)
         val da = (neckStats[1] - faceStats[1]).coerceIn(-14f, 14f)
         val db = (neckStats[2] - faceStats[2]).coerceIn(-18f, 18f)
         val lScale = (neckStats[3].coerceAtLeast(3.5f) / faceStats[3].coerceAtLeast(3.5f)).coerceIn(0.84f, 1.18f)
@@ -1613,7 +1599,7 @@ object GhostHeadReplacementEngine {
                 if (u < 1f || u >= headCropSize - 2f || v < 1f || v >= headCropSize - 2f) continue
 
                 val ny = v / headCropSize.toFloat()
-                if (ny < 0.16f || ny > 0.91f) continue
+                if (ny < 0.16f || ny > 0.935f) continue
 
                 val x0 = u.toInt().coerceIn(0, headCropSize - 2)
                 val y0 = v.toInt().coerceIn(0, headCropSize - 2)
@@ -1643,11 +1629,11 @@ object GhostHeadReplacementEngine {
                     ).coerceIn(0f, 1f)
 
                 val nx = u / headCropSize.toFloat()
-                val fDx = (nx - centerNx) / 0.205f
-                val fDy = (ny - 0.56f) / 0.27f
+                val fDx = (nx - centerNx) / 0.215f
+                val fDy = (ny - 0.57f) / 0.31f
                 val faceOval = (1.0f - (fDx * fDx + fDy * fDy)).coerceIn(0f, 1f)
                 val chromaSkinGate = computeSkinChromaLikelihood(r.toFloat(), g.toFloat(), b.toFloat())
-                val skinW = max(maskSkinW, faceOval * chromaSkinGate) * chromaSkinGate
+                val skinW = max(maskSkinW, faceOval) * chromaSkinGate
                 if (skinW <= 0.04f) continue
 
                 // Protect Eyes + Brows + Mouth/Lips + Teeth
@@ -1665,7 +1651,7 @@ object GhostHeadReplacementEngine {
                 if (retouchW <= 0.02f) continue
 
                 rgbToLab(r, g, b, labScratch)
-                val targetL = (faceStats[0] + (labScratch[0] - faceStats[0]) * (0.55f + 0.45f * lScale) + dL * 0.92f)
+                val targetL = (faceStats[0] + (labScratch[0] - faceStats[0]) * (0.55f + 0.45f * lScale) + dL * 0.96f)
                     .coerceIn(2f, 98f)
                 val targetA = (faceStats[1] + (labScratch[1] - faceStats[1]) * (0.60f + 0.40f * aScale) + da * 0.95f)
                     .coerceIn(-80f, 80f)

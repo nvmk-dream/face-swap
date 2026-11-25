@@ -14,7 +14,7 @@ class GhostCopyPasteRetouchTest {
     }
 
     @Test
-    fun `sanitizeCopyPasteHeadAlphaPixels deletes sideways shoulder wings and horizontal neck bar`() {
+    fun `sanitizeCopyPasteHeadAlphaPixels deletes sideways shoulder wings and horizontal neck bar while preserving chin`() {
         val size = 256
         val total = size * size
         val rawAlpha = FloatArray(total)
@@ -44,23 +44,25 @@ class GhostCopyPasteRetouchTest {
             isSourceMask = true
         )
 
-        // Core face center must remain solid 1.0
+        // Core face & smiling chin (ny=0.83) must remain intact so no double-chin ring appears
         val faceIdx = (size * 0.55f).toInt() * size + (size * 0.50f).toInt()
+        val chinIdx = (size * 0.83f).toInt() * size + (size * 0.50f).toInt()
         assertTrue("Face core must stay solid", cleaned[faceIdx] > 0.95f)
+        assertTrue("Chin must stay intact (no double-chin cut)", cleaned[chinIdx] > 0.90f)
 
-        // Left & right sideways shoulder wings (ny=0.84, nx=0.22 and nx=0.78) must be deleted (0.0)
-        val leftWingIdx = (size * 0.84f).toInt() * size + (size * 0.22f).toInt()
-        val rightWingIdx = (size * 0.84f).toInt() * size + (size * 0.78f).toInt()
+        // Left & right sideways shoulder wings (ny=0.86, nx=0.22 and nx=0.78) must be deleted (0.0)
+        val leftWingIdx = (size * 0.86f).toInt() * size + (size * 0.22f).toInt()
+        val rightWingIdx = (size * 0.86f).toInt() * size + (size * 0.78f).toInt()
         assertEquals(0f, cleaned[leftWingIdx], 0.001f)
         assertEquals(0f, cleaned[rightWingIdx], 0.001f)
 
-        // Bottom horizontal crop edge (ny=0.94) must be completely faded to 0.0 (no horizontal bar)
-        val bottomNeckIdx = (size * 0.94f).toInt() * size + (size * 0.50f).toInt()
+        // Bottom horizontal crop edge (ny=0.955) must be completely faded to 0.0 (no horizontal bar)
+        val bottomNeckIdx = (size * 0.955f).toInt() * size + (size * 0.50f).toInt()
         assertEquals(0f, cleaned[bottomNeckIdx], 0.001f)
     }
 
     @Test
-    fun `sanitizeCopyPasteHeadAlphaPixels and envelope suppress lateral ghost earrings`() {
+    fun `sanitizeCopyPasteHeadAlphaPixels and envelope suppress lateral ghost earrings without stamping temple blocks`() {
         val size = 256
         val total = size * size
         val rawSrcAlpha = FloatArray(total)
@@ -68,17 +70,19 @@ class GhostCopyPasteRetouchTest {
         val srcPixels = IntArray(total) { argb(24, 22, 22) } // dark hair background
         val tgtPixels = IntArray(total) { argb(24, 22, 22) }
 
-        // Place bright metallic dangling earrings on left & right lateral ear-drop zones (ny=0.66, nx=0.25 / 0.75)
         for (y in (size * 0.25f).toInt()..(size * 0.78f).toInt()) {
             val ny = y.toFloat() / size
             for (x in (size * 0.22f).toInt()..(size * 0.78f).toInt()) {
                 val nx = x.toFloat() / size
                 val i = y * size + x
-                rawSrcAlpha[i] = 1.0f
-                rawTgtAlpha[i] = 1.0f
+                if (abs(nx - 0.50f) < 0.22f) {
+                    rawSrcAlpha[i] = 1.0f
+                }
+                rawTgtAlpha[i] = 1.0f // Wider target side hair / temples
                 if (ny in 0.58f..0.72f && (abs(nx - 0.25f) < 0.03f || abs(nx - 0.75f) < 0.03f)) {
                     srcPixels[i] = argb(225, 225, 228) // silver earring in source
-                    tgtPixels[i] = argb(220, 220, 224) // silver earring in target
+                    tgtPixels[i] = argb(220, 220, 224)
+                    rawSrcAlpha[i] = 1.0f
                 }
             }
         }
@@ -101,14 +105,57 @@ class GhostCopyPasteRetouchTest {
             sourceHeadAlpha = cleanSrc,
             targetHeadAlpha = cleanTgt,
             cropSize = size,
-            centerNx = 0.50f
+            centerNx = 0.50f,
+            hasNeuralInpaint = false
         )
 
         val leftEarringIdx = (size * 0.65f).toInt() * size + (size * 0.25f).toInt()
         val rightEarringIdx = (size * 0.65f).toInt() * size + (size * 0.75f).toInt()
-        assertTrue("Left dangling source earring must be suppressed", cleanSrc[leftEarringIdx] < 0.08f)
-        assertTrue("Right dangling source earring must be suppressed", cleanSrc[rightEarringIdx] < 0.08f)
-        assertTrue("Envelope must not stamp lateral lower-ear ghost patch", env[rightEarringIdx] < 0.15f)
+        val templeSideHairIdx = (size * 0.45f).toInt() * size + (size * 0.20f).toInt()
+        assertTrue("Left dangling source earring must be suppressed", cleanSrc[leftEarringIdx] < 0.12f)
+        assertTrue("Right dangling source earring must be suppressed", cleanSrc[rightEarringIdx] < 0.12f)
+        assertEquals("Envelope must not stamp outer temple blocks when LaMa is absent", 0f, env[templeSideHairIdx], 0.001f)
+    }
+
+    @Test
+    fun `computeCopyPasteInBoundsMask eliminates clamped top hair horns and faceCoreFloor prevents face ghosting`() {
+        val size = 256
+        val total = size * size
+        // Matrix shifting source top y=0 down to crop y=45 (so crop y=0..44 are out-of-bounds clamped pixels)
+        val forwardMatrix = floatArrayOf(1f, 0f, 0f, 0f, 1f, 45f)
+        val inBoundsMask = GhostHeadReplacementEngine.computeCopyPasteInBoundsMask(
+            forwardHeadMatrix2x3 = forwardMatrix,
+            srcWidth = 256,
+            srcHeight = 256,
+            cropSize = size,
+            featherPx = 14f
+        )
+
+        val rawAlpha = FloatArray(total) { 1.0f }
+        // Simulate MODNet bangs/shadow dropout across eye & cheek interior (dropping rawAlpha to 0.15)
+        for (y in (size * 0.35f).toInt()..(size * 0.72f).toInt()) {
+            for (x in (size * 0.38f).toInt()..(size * 0.62f).toInt()) {
+                rawAlpha[y * size + x] = 0.15f
+            }
+        }
+        val pixels = IntArray(total) { argb(190, 145, 115) }
+
+        val cleaned = GhostHeadReplacementEngine.sanitizeCopyPasteHeadAlphaPixels(
+            rawAlpha = rawAlpha,
+            pixels = pixels,
+            cropSize = size,
+            centerNx = 0.50f,
+            inBoundsMask = inBoundsMask,
+            isSourceMask = true
+        )
+
+        // Clamped out-of-bounds top corner (y=20) must be completely transparent (0.0 -> no square horn)
+        val topHornIdx = 20 * size + (size * 0.36f).toInt()
+        assertEquals(0f, cleaned[topHornIdx], 0.001f)
+
+        // Inner eye/cheek pixel must remain solid 1.0 despite MODNet bangs dropout
+        val eyeCheekIdx = (size * 0.48f).toInt() * size + (size * 0.45f).toInt()
+        assertEquals(1.0f, cleaned[eyeCheekIdx], 0.001f)
     }
 
     @Test
@@ -138,7 +185,7 @@ class GhostCopyPasteRetouchTest {
                 } else if (ny in 0.41f..0.48f && (abs(nx - 0.383f) < 0.03f || abs(nx - 0.617f) < 0.03f)) {
                     compositePixels[i] = eyeWhiteColor
                     skinWeight[i] = 0.9f
-                } else if (ny <= 0.85f && abs(nx - 0.50f) < 0.18f) {
+                } else if (ny <= 0.87f && abs(nx - 0.50f) < 0.18f) {
                     compositePixels[i] = brightFaceColor
                     skinWeight[i] = 1.0f
                 } else {
