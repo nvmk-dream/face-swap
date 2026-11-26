@@ -212,7 +212,7 @@ class FaceFusionOptionDRobolectricTest {
         assertEquals("simswap_512_unofficial.onnx", FaceFusionOptionDEngine.resolveSwapperFile(context, OptionDSwapperChoice.SIMSWAP_512).name)
         assertEquals("reswapper_256.onnx", FaceFusionOptionDEngine.resolveSwapperFile(context, OptionDSwapperChoice.RESWAPPER_256).name)
         assertEquals("inswapper_128.onnx", FaceFusionOptionDEngine.resolveSwapperFile(context, OptionDSwapperChoice.INSWAPPER_128).name)
-        assertEquals("simswap_512_unofficial.onnx", FaceFusionOptionDEngine.resolveSwapperFile(context, OptionDSwapperChoice.AUTO).name)
+        assertEquals("hyperswap_1b_256.onnx", FaceFusionOptionDEngine.resolveSwapperFile(context, OptionDSwapperChoice.AUTO).name)
 
         assertEquals("codeformer.onnx", FaceFusionOptionDEngine.resolveEnhancerFile(context, OptionDEnhancerChoice.CODEFORMER)?.name)
         assertEquals("gpen_bfr_512.onnx", FaceFusionOptionDEngine.resolveEnhancerFile(context, OptionDEnhancerChoice.GPEN_BFR)?.name)
@@ -286,15 +286,21 @@ class FaceFusionOptionDRobolectricTest {
     fun `option D controls card is hidden in Option A B BC and visible only in Option D`() {
         val vm = FaceSwapViewModel(context.applicationContext as Application)
 
-        // Verify setters
+        // Verify setters & improved Option D defaults
+        assertEquals(0.80f, vm.uiState.value.optionDCodeformerFidelity, 0.001f)
+        assertTrue(vm.uiState.value.optionDPixelBoostEnabled)
+        assertEquals(0.85f, vm.uiState.value.optionDSwapperWeight, 0.001f)
+
         vm.setOptionDSwapperChoice(OptionDSwapperChoice.RESWAPPER_256)
         vm.setOptionDEnhancerChoice(OptionDEnhancerChoice.CODEFORMER)
         vm.setOptionDCodeformerFidelity(0.85f)
-        vm.setOptionDPixelBoostEnabled(true)
+        vm.setOptionDPixelBoostEnabled(false)
+        vm.setOptionDSwapperWeight(0.95f)
         assertEquals(OptionDSwapperChoice.RESWAPPER_256, vm.uiState.value.optionDSwapperChoice)
         assertEquals(OptionDEnhancerChoice.CODEFORMER, vm.uiState.value.optionDEnhancerChoice)
         assertEquals(0.85f, vm.uiState.value.optionDCodeformerFidelity, 0.001f)
-        assertTrue(vm.uiState.value.optionDPixelBoostEnabled)
+        assertFalse(vm.uiState.value.optionDPixelBoostEnabled)
+        assertEquals(0.95f, vm.uiState.value.optionDSwapperWeight, 0.001f)
 
         // Default is Option B -> Option D FaceFusion controls card must NOT exist
         var activeState = FaceSwapUiState(
@@ -360,6 +366,9 @@ class FaceFusionOptionDRobolectricTest {
                     },
                     onOptionDPixelBoostChanged = {
                         currentConfig = currentConfig.copy(pixelBoostEnabled = it)
+                    },
+                    onOptionDSwapperWeightChanged = {
+                        currentConfig = currentConfig.copy(swapperWeight = it)
                     }
                 )
             }
@@ -370,11 +379,12 @@ class FaceFusionOptionDRobolectricTest {
         composeTestRule.onNodeWithTag("option_d_swapper_simswap_512").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("option_d_enhancer_codeformer").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("option_d_pixel_boost_switch").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("option_d_swapper_weight_slider").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("option_d_codeformer_fidelity_slider").performScrollTo().assertIsDisplayed()
 
         composeTestRule.waitForIdle()
         assertEquals(OptionDSwapperChoice.SIMSWAP_512, currentConfig.swapperChoice)
         assertEquals(OptionDEnhancerChoice.CODEFORMER, currentConfig.enhancerChoice)
-        assertTrue(currentConfig.pixelBoostEnabled)
+        assertFalse(currentConfig.pixelBoostEnabled)
     }
 }

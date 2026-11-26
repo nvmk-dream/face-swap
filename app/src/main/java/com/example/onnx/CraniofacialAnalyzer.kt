@@ -281,12 +281,15 @@ object CraniofacialAnalyzer {
             return SkinRef(r, g, b, lum)
         }
 
-        fun scanHorizontalSpan(px: IntArray, rowY: Int, minOffsetRatio: Float, maxOffsetRatio: Float): Float {
+        fun scanHorizontalSpan(px: IntArray, rowY: Int, minOffsetRatio: Float, maxOffsetRatio: Float): Pair<Float, Boolean> {
             val ref = sampleInnerCheekRef(px)
-            if (ref.lum < 22f) return eyeDist * (minOffsetRatio + 0.35f)
+            if (ref.lum < 22f) return eyeDist * (minOffsetRatio + 0.35f) to false
+            val refWarmth = ref.r - ref.b
+            val refChroma = max(ref.r, max(ref.g, ref.b)) - min(ref.r, min(ref.g, ref.b))
             val y = rowY.coerceIn(16, size - 17)
             val minOff = (eyeDist * minOffsetRatio).toInt().coerceAtLeast(16)
             val maxOff = (eyeDist * maxOffsetRatio).toInt().coerceAtLeast(minOff + 8)
+            var hitBorder = false
 
             fun scanDir(step: Int): Int {
                 var lastSkin = minOff
@@ -294,34 +297,47 @@ object CraniofacialAnalyzer {
                 var d = minOff
                 while (d <= maxOff) {
                     val xx = cx + step * d
-                    if (xx < 8 || xx >= size - 8) break
+                    if (xx < 8 || xx >= size - 8) {
+                        hitBorder = true
+                        break
+                    }
                     val pc = px[y * size + xx]
                     val r = ((pc ushr 16) and 0xFF).toFloat()
                     val g = ((pc ushr 8) and 0xFF).toFloat()
                     val b = (pc and 0xFF).toFloat()
                     val lum = 0.299f * r + 0.587f * g + 0.114f * b
                     val diff = abs(r - ref.r) + abs(g - ref.g) + abs(b - ref.b)
+                    val warmth = r - b
+                    val chroma = max(r, max(g, b)) - min(r, min(g, b))
                     val isDarkHairOrBg = lum < 64f && ref.lum > 84f
                     val isDeepJawCrease = lum < ref.lum * 0.58f && diff > 52f
-                    val isSkinLike = !isDarkHairOrBg && !isDeepJawCrease && diff < 126f && r >= b - 10f
+                    // Reject grey/white/cool studio backgrounds (e.g. passport backdrop R≈G≈B)
+                    // where luminance resembles skin but warmth & skin chroma vanish.
+                    val isNeutralOrCoolBg = (refWarmth >= 18f && warmth < max(8f, refWarmth * 0.28f)) ||
+                        (refChroma >= 22f && chroma < refChroma * 0.32f && diff > 36f) ||
+                        (g > r + 6f)
+                    val isSkinLike = !isDarkHairOrBg && !isDeepJawCrease && !isNeutralOrCoolBg &&
+                        diff < 118f && r >= b - 8f
                     if (isSkinLike) {
                         lastSkin = d
                         missRun = 0
                     } else {
                         missRun++
-                        if (missRun >= 4) break
+                        if (missRun >= 3) break
                     }
                     d++
                 }
                 return lastSkin
             }
-            return (scanDir(-1) + scanDir(1)).toFloat()
+            return (scanDir(-1) + scanDir(1)).toFloat() to hitBorder
         }
 
         val chinStartY = (mouthMidY + eyeDist * 0.14f).toInt().coerceIn(24, size - 48)
         fun estimateChinDrop(px: IntArray): Float {
             val ref = sampleInnerCheekRef(px)
             if (ref.lum < 22f) return eyeDist * 0.52f
+            val refWarmth = ref.r - ref.b
+            val refChroma = max(ref.r, max(ref.g, ref.b)) - min(ref.r, min(ref.g, ref.b))
             val xOffsets = intArrayOf(-((eyeDist * 0.10f).toInt()), 0, (eyeDist * 0.10f).toInt())
             var accDepth = 0f
             for (xo in xOffsets) {
@@ -338,13 +354,17 @@ object CraniofacialAnalyzer {
                     val b = (pc and 0xFF).toFloat()
                     val lum = 0.299f * r + 0.587f * g + 0.114f * b
                     val diff = abs(r - ref.r) + abs(g - ref.g) + abs(b - ref.b)
-                    val isNeckShadowOrEdge = lum < ref.lum * 0.65f || diff > 118f
+                    val warmth = r - b
+                    val chroma = max(r, max(g, b)) - min(r, min(g, b))
+                    val isNeutralOrCoolBg = (refWarmth >= 18f && warmth < max(8f, refWarmth * 0.28f)) ||
+                        (refChroma >= 22f && chroma < refChroma * 0.32f && diff > 36f)
+                    val isNeckShadowOrEdge = lum < ref.lum * 0.65f || diff > 114f || isNeutralOrCoolBg
                     if (!isNeckShadowOrEdge) {
                         depth = dy
                         missRun = 0
                     } else {
                         missRun++
-                        if (missRun >= 5) break
+                        if (missRun >= 4) break
                     }
                 }
                 accDepth += depth.toFloat()
@@ -357,29 +377,36 @@ object CraniofacialAnalyzer {
         val rowJawBoneB = (mouthMidY + eyeDist * 0.04f).toInt()
         val rowLowerJawC = (mouthMidY + eyeDist * 0.28f).toInt()
 
-        val srcSpanD = scanHorizontalSpan(srcPx512, rowUpperJawD, 0.52f, 1.46f)
-        val tgtSpanD = scanHorizontalSpan(tgtPx512, rowUpperJawD, 0.52f, 1.46f).coerceAtLeast(16f)
+        val (srcSpanD, srcBorderD) = scanHorizontalSpan(srcPx512, rowUpperJawD, 0.52f, 1.48f)
+        val (tgtSpanD, _) = scanHorizontalSpan(tgtPx512, rowUpperJawD, 0.52f, 1.48f)
 
-        val srcSpanB = scanHorizontalSpan(srcPx512, rowJawBoneB, 0.44f, 1.42f)
-        val tgtSpanB = scanHorizontalSpan(tgtPx512, rowJawBoneB, 0.44f, 1.42f).coerceAtLeast(16f)
+        val (srcSpanB, srcBorderB) = scanHorizontalSpan(srcPx512, rowJawBoneB, 0.44f, 1.44f)
+        val (tgtSpanB, _) = scanHorizontalSpan(tgtPx512, rowJawBoneB, 0.44f, 1.44f)
 
-        val srcSpanC = scanHorizontalSpan(srcPx512, rowLowerJawC, 0.30f, 1.32f)
-        val tgtSpanC = scanHorizontalSpan(tgtPx512, rowLowerJawC, 0.30f, 1.32f).coerceAtLeast(16f)
+        val (srcSpanC, srcBorderC) = scanHorizontalSpan(srcPx512, rowLowerJawC, 0.30f, 1.34f)
+        val (tgtSpanC, _) = scanHorizontalSpan(tgtPx512, rowLowerJawC, 0.30f, 1.34f)
 
         val srcChinA = estimateChinDrop(srcPx512)
         val tgtChinA = estimateChinDrop(tgtPx512).coerceAtLeast(16f)
 
-        val srcDiagA = hypot((srcSpanB * 0.5f).toDouble(), srcChinA.toDouble()).toFloat()
-        val tgtDiagA = hypot((tgtSpanB * 0.5f).toDouble(), tgtChinA.toDouble()).toFloat().coerceAtLeast(16f)
+        val safeTgtD = tgtSpanD.coerceAtLeast(16f)
+        val safeTgtB = tgtSpanB.coerceAtLeast(16f)
+        val safeTgtC = tgtSpanC.coerceAtLeast(16f)
 
-        val pixelScaleD = (srcSpanD / tgtSpanD).coerceIn(0.80f, 1.28f)
-        val pixelScaleB = (srcSpanB / tgtSpanB).coerceIn(0.78f, 1.32f)
-        val pixelScaleC = (srcSpanC / tgtSpanC).coerceIn(0.76f, 1.34f)
+        val srcDiagA = hypot((srcSpanB * 0.5f).toDouble(), srcChinA.toDouble()).toFloat()
+        val tgtDiagA = hypot((safeTgtB * 0.5f).toDouble(), tgtChinA.toDouble()).toFloat().coerceAtLeast(16f)
+
+        val rawPixelD = (srcSpanD / safeTgtD).coerceIn(0.80f, 1.28f)
+        val rawPixelB = (srcSpanB / safeTgtB).coerceIn(0.78f, 1.32f)
+        val rawPixelC = (srcSpanC / safeTgtC).coerceIn(0.76f, 1.34f)
+        val pixelScaleD = if (srcBorderD) max(rawPixelD, baseRatios.upperJawMaxillaScale) else rawPixelD
+        val pixelScaleB = if (srcBorderB) max(rawPixelB, baseRatios.sourceJawToTargetJawScale) else rawPixelB
+        val pixelScaleC = if (srcBorderC) max(rawPixelC, baseRatios.lowerJawBodyScale) else rawPixelC
         val pixelScaleA = ((srcChinA / tgtChinA) * 0.62f + (srcDiagA / tgtDiagA) * 0.38f).coerceIn(0.84f, 1.26f)
 
-        val finalD = (pixelScaleD * 0.76f + baseRatios.upperJawMaxillaScale * 0.24f).coerceIn(0.80f, 1.28f)
-        val finalB = (pixelScaleB * 0.76f + baseRatios.sourceJawToTargetJawScale * 0.24f).coerceIn(0.78f, 1.32f)
-        val finalC = (pixelScaleC * 0.76f + baseRatios.lowerJawBodyScale * 0.24f).coerceIn(0.76f, 1.34f)
+        val finalD = (pixelScaleD * 0.78f + baseRatios.upperJawMaxillaScale * 0.22f).coerceIn(0.80f, 1.28f)
+        val finalB = (pixelScaleB * 0.78f + baseRatios.sourceJawToTargetJawScale * 0.22f).coerceIn(0.78f, 1.32f)
+        val finalC = (pixelScaleC * 0.78f + baseRatios.lowerJawBodyScale * 0.22f).coerceIn(0.76f, 1.34f)
         val finalA = (pixelScaleA * 0.74f + baseRatios.sourceChinToTargetChinScale * 0.26f).coerceIn(0.84f, 1.26f)
 
         return baseRatios.copy(

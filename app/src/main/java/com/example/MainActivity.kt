@@ -675,6 +675,7 @@ fun FaceSwapStudioApp(
                     onOptionDEnhancerChoiceChanged = viewModel::setOptionDEnhancerChoice,
                     onOptionDCodeformerFidelityChanged = viewModel::setOptionDCodeformerFidelity,
                     onOptionDPixelBoostChanged = viewModel::setOptionDPixelBoostEnabled,
+                    onOptionDSwapperWeightChanged = viewModel::setOptionDSwapperWeight,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
                     onImportModelForSlot = { slot ->
                         pendingImportSlot = slot

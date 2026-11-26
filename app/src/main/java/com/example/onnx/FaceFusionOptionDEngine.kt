@@ -47,8 +47,9 @@ enum class OptionDEnhancerChoice(
 data class OptionDFaceFusionConfig(
     val swapperChoice: OptionDSwapperChoice = OptionDSwapperChoice.AUTO,
     val enhancerChoice: OptionDEnhancerChoice = OptionDEnhancerChoice.AUTO,
-    val codeformerFidelity: Float = 0.60f,
-    val pixelBoostEnabled: Boolean = false
+    val codeformerFidelity: Float = 0.80f,
+    val pixelBoostEnabled: Boolean = true,
+    val swapperWeight: Float = 0.85f
 )
 
 /**
@@ -167,16 +168,16 @@ object FaceFusionOptionDEngine {
                 .maxByOrNull { it.length() }
             if (matched != null) return matched
         }
-        // AUTO in Option D prioritizes SimSwap 512 > HyperSwap 256 > ReSwapper 256 > InSwapper 128
+        // AUTO in Option D prioritizes HyperSwap 1b/1c/1a 256 (strongest Source eye/brow/cheek likeness + Pixel Boost) > SimSwap 512 > ReSwapper 256 > InSwapper 128
         val autoOrder = installed.maxByOrNull { file ->
             val l = file.name.lowercase()
             val completeBonus = if (file.length() >= 8L * 1024L * 1024L) 1000 else 0
             val modelScore = when {
-                l.contains("simswap_unofficial_512") || l.contains("simswap_512") -> 95
-                l.contains("hyperswap_1b") -> 90
-                l.contains("hyperswap_1c") -> 88
-                l.contains("hyperswap_1a") -> 86
-                l.contains("hyperswap") -> 84
+                l.contains("hyperswap_1b") -> 96
+                l.contains("hyperswap_1c") -> 93
+                l.contains("hyperswap_1a") -> 91
+                l.contains("hyperswap") -> 90
+                l.contains("simswap_unofficial_512") || l.contains("simswap_512") -> 88
                 l.contains("reswapper_256") -> 82
                 l.contains("simswap_256") -> 80
                 l.contains("blendswap") || l.contains("ghost_") || l.contains("uniface") -> 75
@@ -286,6 +287,28 @@ object FaceFusionOptionDEngine {
         return lower.contains("inswapper")
     }
 
+    /**
+     * FaceFusion `balance_source_embedding`: maps `swapperWeight` in `[0, 1]` to `targetCoeff` in `[+0.35, -0.35]`,
+     * returning `l2Normalize(l2Normalize(source) + targetCoeff * l2Normalize(target))`.
+     * At 0.50 -> pure Source embedding; >0.50 -> repels Target facial dominance to increase Source likeness.
+     */
+    internal fun balanceSourceEmbedding(
+        sourceNormed512: FloatArray,
+        targetNormed512: FloatArray?,
+        swapperWeight: Float
+    ): FloatArray {
+        val srcNorm = ArcFaceRecognizer.l2Normalize(sourceNormed512)
+        if (targetNormed512 == null || sourceNormed512.size != 512 || targetNormed512.size != 512) {
+            return srcNorm
+        }
+        val w = swapperWeight.coerceIn(0f, 1f)
+        if (abs(w - 0.5f) < 1e-4f) return srcNorm
+        val targetCoeff = 0.35f - 0.70f * w
+        val tgtNorm = ArcFaceRecognizer.l2Normalize(targetNormed512)
+        val mixed = FloatArray(512) { idx -> srcNorm[idx] + targetCoeff * tgtNorm[idx] }
+        return ArcFaceRecognizer.l2Normalize(mixed)
+    }
+
     fun runOptionDSwapCrop(
         context: Context,
         ortEnv: OrtEnvironment?,
@@ -297,6 +320,8 @@ object FaceFusionOptionDEngine {
         config: OptionDFaceFusionConfig,
         preferHardwareAccel: Boolean = false,
         preloadedSwapSession: OrtSession? = null,
+        targetEmbedding: SourceEmbeddingResult? = null,
+        emap512x512: FloatArray? = null,
         isCancelled: () -> Boolean = { false }
     ): OptionDSwapCropResult {
         if (isCancelled()) throw CancellationException("Face swap cancelled by user.")
@@ -406,18 +431,28 @@ object FaceFusionOptionDEngine {
         }
 
         var usedCrossfaceConverter = false
+        val balancedApplied = targetEmbedding != null && abs(config.swapperWeight - 0.5f) > 0.01f
         val sourceVec = when {
             isEmapProjectionRequired(swapFile) -> {
-                InSwapperEngine.resolveSwapperSourceVector(
-                    context = context,
-                    activeSwapFile = swapFile,
-                    isHyperSwap256 = false,
-                    sourceEmbedding = sourceEmbedding
+                val balancedArc = balanceSourceEmbedding(
+                    sourceEmbedding.rawNormedEmbedding512,
+                    targetEmbedding?.rawNormedEmbedding512,
+                    config.swapperWeight
                 )
+                if (emap512x512 != null && emap512x512.size == 512 * 512) {
+                    ArcFaceRecognizer.projectWithEmap(balancedArc, emap512x512)
+                } else {
+                    InSwapperEngine.resolveSwapperSourceVector(
+                        context = context,
+                        activeSwapFile = swapFile,
+                        isHyperSwap256 = false,
+                        sourceEmbedding = sourceEmbedding
+                    )
+                }
             }
             simSwapAlign -> {
                 val crossfaceFile = resolveSimSwapEmbeddingConverterFile(context)
-                val converted = if (crossfaceFile != null) {
+                val convertedSrc = if (crossfaceFile != null) {
                     runSimSwapEmbeddingConverter(
                         ortEnv = ortEnv,
                         converterFile = crossfaceFile,
@@ -425,18 +460,38 @@ object FaceFusionOptionDEngine {
                         preferHardwareAccel = preferHardwareAccel
                     )
                 } else null
-                if (converted != null) {
+                if (convertedSrc != null) {
                     usedCrossfaceConverter = true
-                    converted
+                    val convertedTgt = if (crossfaceFile != null && balancedApplied && targetEmbedding != null) {
+                        runSimSwapEmbeddingConverter(
+                            ortEnv = ortEnv,
+                            converterFile = crossfaceFile,
+                            unnormedEmbedding512 = targetEmbedding.unnormedEmbedding512,
+                            preferHardwareAccel = preferHardwareAccel
+                        )
+                    } else null
+                    balanceSourceEmbedding(convertedSrc, convertedTgt, config.swapperWeight)
                 } else {
-                    sourceEmbedding.rawNormedEmbedding512
+                    balanceSourceEmbedding(
+                        sourceEmbedding.rawNormedEmbedding512,
+                        targetEmbedding?.rawNormedEmbedding512,
+                        config.swapperWeight
+                    )
                 }
             }
-            else -> sourceEmbedding.rawNormedEmbedding512
+            else -> balanceSourceEmbedding(
+                sourceEmbedding.rawNormedEmbedding512,
+                targetEmbedding?.rawNormedEmbedding512,
+                config.swapperWeight
+            )
         }
-        val crossfaceTag = if (simSwapAlign) {
-            if (usedCrossfaceConverter) " + crossface_simswap" else " (direct L2)"
-        } else ""
+        val weightTag = if (balancedApplied) " w=${"%.2f".format(config.swapperWeight)}" else ""
+        val crossfaceTag = buildString {
+            if (simSwapAlign) {
+                append(if (usedCrossfaceConverter) " + crossface_simswap" else " (direct L2)")
+            }
+            append(weightTag)
+        }
 
         val sourceTensor = if (sourceInputType == OnnxJavaType.FLOAT16) {
             val sHalf = ShortArray(512) { idx -> DepthEstimationEngine.floatToFloat16(sourceVec[idx]) }
@@ -1100,21 +1155,22 @@ object FaceFusionOptionDEngine {
             scaled.getPixels(pixels, 0, modelSize, 0, 0, modelSize, modelSize)
             if (scaled !== alignedTarget512) scaled.recycle()
 
+            // FaceFusion face_masker.py: face_occluder.onnx & xseg_1/2/3.onnx consume BGR [0..1]
             val inFloats = FloatArray(3 * hw)
             if (isNhwc) {
                 for (i in 0 until hw) {
                     val c = pixels[i]
                     val b = i * 3
-                    inFloats[b] = ((c ushr 16) and 0xFF) / 255.0f
+                    inFloats[b] = (c and 0xFF) / 255.0f
                     inFloats[b + 1] = ((c ushr 8) and 0xFF) / 255.0f
-                    inFloats[b + 2] = (c and 0xFF) / 255.0f
+                    inFloats[b + 2] = ((c ushr 16) and 0xFF) / 255.0f
                 }
             } else {
                 for (i in 0 until hw) {
                     val c = pixels[i]
-                    inFloats[i] = ((c ushr 16) and 0xFF) / 255.0f
+                    inFloats[i] = (c and 0xFF) / 255.0f
                     inFloats[hw + i] = ((c ushr 8) and 0xFF) / 255.0f
-                    inFloats[2 * hw + i] = (c and 0xFF) / 255.0f
+                    inFloats[2 * hw + i] = ((c ushr 16) and 0xFF) / 255.0f
                 }
             }
             val shape = if (isNhwc) {
@@ -1249,7 +1305,9 @@ object FaceFusionOptionDEngine {
                             cnt++
                         }
                     }
-                    smoothed[row + x] = (sum / cnt.coerceAtLeast(1)).coerceIn(0f, 1f)
+                    // FaceFusion face_masker.py: (GaussianBlur(prob, 5).clip(0.5, 1.0) - 0.5) * 2.0
+                    val blurred = (sum / cnt.coerceAtLeast(1)).coerceIn(0f, 1f)
+                    smoothed[row + x] = ((blurred.coerceIn(0.5f, 1.0f) - 0.5f) * 2.0f).coerceIn(0f, 1f)
                 }
             }
             smoothed

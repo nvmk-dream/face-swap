@@ -441,19 +441,36 @@ object InSwapperEngine {
 
                     val isNeuralFaceRun: Boolean
                     val rawSwappedCrop = if (isOptionDFaceFusion) {
-                        val optDRes = FaceFusionOptionDEngine.runOptionDSwapCrop(
-                            context = context,
-                            ortEnv = ortEnv,
-                            sourceBitmap = sourceBitmap,
-                            sourceFace = sourceFace,
-                            targetBitmap = targetBitmap,
-                            targetFace = targetFace,
-                            sourceEmbedding = sourceEmbedding,
-                            config = optionDConfig,
-                            preferHardwareAccel = preferHardwareAccel,
-                            preloadedSwapSession = swapSession,
-                            isCancelled = isCancelled
-                        )
+                        val optDTargetEmbedding = runCatching {
+                            ArcFaceRecognizer.extractSourceLatentEmbedding(
+                                ortEnv = ortEnv,
+                                sourceBitmap = targetBitmap,
+                                sourceLandmarks5 = targetFace.landmarks5,
+                                arcFaceModelFile = if (recFile.exists()) recFile else null,
+                                emap512x512 = null,
+                                allowTwoModelFallbackForTesting = allowTwoModelFallbackForTesting || !recFile.exists(),
+                                preloadedArcFaceSession = preloadedArcFaceSession
+                            )
+                        }.getOrNull()
+                        val optDRes = try {
+                            FaceFusionOptionDEngine.runOptionDSwapCrop(
+                                context = context,
+                                ortEnv = ortEnv,
+                                sourceBitmap = sourceBitmap,
+                                sourceFace = sourceFace,
+                                targetBitmap = targetBitmap,
+                                targetFace = targetFace,
+                                sourceEmbedding = sourceEmbedding,
+                                config = optionDConfig,
+                                preferHardwareAccel = preferHardwareAccel,
+                                preloadedSwapSession = swapSession,
+                                targetEmbedding = optDTargetEmbedding,
+                                emap512x512 = emap512x512,
+                                isCancelled = isCancelled
+                            )
+                        } finally {
+                            optDTargetEmbedding?.aligned112Crop?.recycle()
+                        }
                         isNeuralFaceRun = optDRes.usedNeuralSwap
                         if (optDRes.usedNeuralSwap) usedNeuralSwapEngine = true
                         if (optDRes.usedPixelBoost) usedOptionDPixelBoost = true

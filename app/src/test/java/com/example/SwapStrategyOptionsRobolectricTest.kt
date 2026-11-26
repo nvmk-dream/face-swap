@@ -452,4 +452,57 @@ class SwapStrategyOptionsRobolectricTest {
         assertTrue("Expected Option D warp to expand lower jaw C outward (red > 150), got $afterOuterR", afterOuterR > 150)
         assertEquals(cornerBefore, warpPx[4 * 512 + 4])
     }
+
+    @Test
+    fun `option D rejects grey passport background and retains fuller cheeks over target warm cheek shadows`() {
+        val geom512 = FaceBlender.computeWarpedGeometry(
+            forwardMatrix128 = null,
+            targetLandmarks5 = null,
+            scale = 4.0f
+        )
+        val total = 512 * 512
+        // Target sits on light-grey passport backdrop (176, 178, 176) which previously fooled R>=B-10 into inflating tgtSpan!
+        val srcPx512 = IntArray(total) { Color.rgb(30, 120, 60) }
+        val tgtPx512 = IntArray(total) { Color.rgb(176, 178, 176) }
+
+        val eyeMidX = (geom512.leftEye.x + geom512.rightEye.x) * 0.5f
+        val eyeMidY = (geom512.leftEye.y + geom512.rightEye.y) * 0.5f
+        val mouthMidX = (geom512.leftMouth.x + geom512.rightMouth.x) * 0.5f
+        val mouthMidY = (geom512.leftMouth.y + geom512.rightMouth.y) * 0.5f
+        val cx = (eyeMidX * 0.38f + geom512.nose.x * 0.32f + mouthMidX * 0.30f)
+        val cy = (eyeMidY * 0.32f + geom512.nose.y * 0.30f + mouthMidY * 0.38f)
+
+        for (y in 0 until 512) {
+            for (x in 0 until 512) {
+                val dx = abs(x - cx)
+                val dy = y - cy
+                val tgtHalfW = if (dy < 0f) 124f else (124f * (1f - (dy / 225f).coerceIn(0f, 0.72f))).coerceAtLeast(36f)
+                if (dy in -145f..150f && dx <= tgtHalfW) {
+                    tgtPx512[y * 512 + x] = Color.rgb(198, 154, 122)
+                }
+                val srcHalfW = if (dy < 0f) 154f else (154f * (1f - 0.32f * (dy / 210f).coerceIn(0f, 1f))).coerceAtLeast(88f)
+                if (dy in -155f..185f && dx <= srcHalfW) {
+                    srcPx512[y * 512 + x] = Color.rgb(228, 182, 152)
+                }
+            }
+        }
+
+        val (srcBmp, srcFace) = makePortrait(faceRadiusX = 110f, faceRadiusY = 130f, skinColor = Color.rgb(228, 182, 152))
+        val (tgtBmp, tgtFace) = makePortrait(
+            faceRadiusX = 78f,
+            faceRadiusY = 98f,
+            skinColor = Color.rgb(198, 154, 122),
+            bgColor = Color.rgb(176, 178, 176)
+        )
+        val baseReport = CraniofacialAnalyzer.analyzePair(srcFace, srcBmp, tgtFace, tgtBmp)
+        val ratios = CraniofacialAnalyzer.computeMandibularFitRatios512(
+            srcPx512 = srcPx512,
+            tgtPx512 = tgtPx512,
+            geom512 = geom512,
+            baseRatios = baseReport.optionDFitRatios
+        )
+        assertTrue("Grey passport bg must not deflate D UpperJaw (${ratios.upperJawMaxillaScale})", ratios.upperJawMaxillaScale > 1.05f)
+        assertTrue("Grey passport bg must not deflate B JawBone (${ratios.jawBoneBigonialScale})", ratios.jawBoneBigonialScale > 1.08f)
+        assertTrue("Grey passport bg must not deflate C LowerJaw (${ratios.lowerJawBodyScale})", ratios.lowerJawBodyScale > 1.08f)
+    }
 }

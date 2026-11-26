@@ -193,6 +193,13 @@ object FaceAlignment {
         return estimateNormForPoints(srcPoints, dstPoints)
     }
 
+    fun estimateSimilarityMatrix(srcPoints: List<PointF>, dstPoints: List<PointF>): FloatArray {
+        require(srcPoints.size >= 5 && dstPoints.size >= 5) {
+            "At least 5 facial landmarks are required for alignment."
+        }
+        return estimateNormForPoints(srcPoints, dstPoints.take(5).toTypedArray())
+    }
+
     /**
      * FaceFusion `ffhq_512` similarity alignment used by `codeformer.onnx`, `gfpgan_1.4.onnx`,
      * `gpen_bfr_512.onnx`, and `restoreformer_plus_plus.onnx`.

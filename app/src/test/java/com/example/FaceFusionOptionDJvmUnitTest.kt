@@ -114,4 +114,30 @@ class FaceFusionOptionDJvmUnitTest {
         assertTrue(FaceFusionOptionDEngine.isFileMatchingEnhancerChoice(File("gfpgan_1.4.onnx"), OptionDEnhancerChoice.GFPGAN))
         assertFalse(FaceFusionOptionDEngine.isFileMatchingEnhancerChoice(File("codeformer.onnx"), OptionDEnhancerChoice.GFPGAN))
     }
+
+    @Test
+    fun balanceSourceEmbedding_appliesTargetRepulsionAndPreservesUnitNorm() {
+        val cfg = com.example.onnx.OptionDFaceFusionConfig()
+        assertTrue(cfg.pixelBoostEnabled)
+        assertEquals(0.80f, cfg.codeformerFidelity, 0.001f)
+        assertEquals(0.85f, cfg.swapperWeight, 0.001f)
+
+        val src = FloatArray(512) { idx -> if (idx == 0) 1.0f else 0.0f }
+        val tgt = FloatArray(512) { idx -> if (idx == 1) 1.0f else 0.0f }
+
+        // w = 0.50 -> coeff = 0.0 -> pure normalized source
+        val pure = FaceFusionOptionDEngine.balanceSourceEmbedding(src, tgt, swapperWeight = 0.50f)
+        assertEquals(1.0f, pure[0], 1e-4f)
+        assertEquals(0.0f, pure[1], 1e-4f)
+
+        // w = 1.00 -> coeff = -0.35 -> repels target component (dim[1] < 0) & stays unit norm
+        val repelled = FaceFusionOptionDEngine.balanceSourceEmbedding(src, tgt, swapperWeight = 1.0f)
+        assertTrue(repelled[1] < -0.30f)
+        val norm = com.example.onnx.ArcFaceRecognizer.computeL2Norm(repelled)
+        assertEquals(1.0f, norm, 1e-4f)
+
+        // w = 0.00 -> coeff = +0.35 -> blends positively toward target component
+        val softened = FaceFusionOptionDEngine.balanceSourceEmbedding(src, tgt, swapperWeight = 0.0f)
+        assertTrue(softened[1] > 0.30f)
+    }
 }

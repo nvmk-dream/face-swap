@@ -231,6 +231,7 @@ fun StudioFrontPage(
     onOptionDEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit = {},
     onOptionDCodeformerFidelityChanged: (Float) -> Unit = {},
     onOptionDPixelBoostChanged: (Boolean) -> Unit = {},
+    onOptionDSwapperWeightChanged: (Float) -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     onViewStepFullScreen: (Bitmap, String) -> Unit = { bmp, _ -> onViewResultFullScreen(bmp) },
@@ -287,7 +288,8 @@ fun StudioFrontPage(
                 onOptionDSwapperChoiceChanged = onOptionDSwapperChoiceChanged,
                 onOptionDEnhancerChoiceChanged = onOptionDEnhancerChoiceChanged,
                 onOptionDCodeformerFidelityChanged = onOptionDCodeformerFidelityChanged,
-                onOptionDPixelBoostChanged = onOptionDPixelBoostChanged
+                onOptionDPixelBoostChanged = onOptionDPixelBoostChanged,
+                onOptionDSwapperWeightChanged = onOptionDSwapperWeightChanged
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Output 1 & 2 Steps + Download + Save to Gallery + Completed Footer)
@@ -773,7 +775,8 @@ private fun FrontMainWorkspaceCard(
     onOptionDSwapperChoiceChanged: (OptionDSwapperChoice) -> Unit = {},
     onOptionDEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit = {},
     onOptionDCodeformerFidelityChanged: (Float) -> Unit = {},
-    onOptionDPixelBoostChanged: (Boolean) -> Unit = {}
+    onOptionDPixelBoostChanged: (Boolean) -> Unit = {},
+    onOptionDSwapperWeightChanged: (Float) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -1086,7 +1089,8 @@ private fun FrontMainWorkspaceCard(
                             onSwapperChoiceChanged = onOptionDSwapperChoiceChanged,
                             onEnhancerChoiceChanged = onOptionDEnhancerChoiceChanged,
                             onCodeformerFidelityChanged = onOptionDCodeformerFidelityChanged,
-                            onPixelBoostChanged = onOptionDPixelBoostChanged
+                            onPixelBoostChanged = onOptionDPixelBoostChanged,
+                            onSwapperWeightChanged = onOptionDSwapperWeightChanged
                         )
                     }
                 }
@@ -2339,7 +2343,8 @@ internal fun OptionDFaceFusionControlsCard(
     onSwapperChoiceChanged: (OptionDSwapperChoice) -> Unit,
     onEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit,
     onCodeformerFidelityChanged: (Float) -> Unit,
-    onPixelBoostChanged: (Boolean) -> Unit
+    onPixelBoostChanged: (Boolean) -> Unit,
+    onSwapperWeightChanged: (Float) -> Unit = {}
 ) {
     Surface(
         shape = RoundedCornerShape(14.dp),
@@ -2368,7 +2373,7 @@ internal fun OptionDFaceFusionControlsCard(
                         fontSize = 12.5.sp
                     )
                     Text(
-                        text = "SimSwap 512 / ReSwapper 256 / CodeFormer (w) / GPEN / XSeg — Option D-ல் மட்டும்",
+                        text = "HyperSwap / SimSwap 512 / CodeFormer (w) / Face Occluder — Option D-ல் மட்டும்",
                         color = Color(0xFF475569),
                         fontSize = 10.sp,
                         maxLines = 2,
@@ -2503,6 +2508,48 @@ internal fun OptionDFaceFusionControlsCard(
                         modifier = Modifier.testTag("option_d_pixel_boost_switch")
                     )
                 }
+            }
+
+            // Face Swapper Identity Weight slider (FaceFusion balance_source_embedding)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Source Identity Weight",
+                        color = Color(0xFF0F172A),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = "%.2f".format(uiState.optionDSwapperWeight),
+                        color = Color(0xFF0369A1),
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.testTag("option_d_swapper_weight_value")
+                    )
+                }
+                Slider(
+                    value = uiState.optionDSwapperWeight,
+                    onValueChange = onSwapperWeightChanged,
+                    valueRange = 0.0f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF0284C7),
+                        activeTrackColor = Color(0xFF0284C7)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .semantics { contentDescription = "Source identity swapper weight" }
+                        .testTag("option_d_swapper_weight_slider")
+                )
+                Text(
+                    text = "0.50 = Standard Source • 0.85–1.00 = Strong Source Likeness (Target Repulsion)",
+                    color = Color(0xFF64748B),
+                    fontSize = 9.sp
+                )
             }
 
             // Enhancer selector

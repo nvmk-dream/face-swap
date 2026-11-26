@@ -192,6 +192,8 @@ object FaceBlender {
             val refLum = 0.299f * refR + 0.587f * refG + 0.114f * refB
             if (refLum < 22f) return eyeDist * 1.15f
 
+            val refWarmth = refR - refB
+            val refChroma = max(refR, max(refG, refB)) - min(refR, min(refG, refB))
             val maxSearch = (eyeDist * 1.48f).toInt().coerceAtLeast(32)
             fun scanDir(step: Int): Int {
                 var lastSkinOffset = (eyeDist * 0.52f).toInt()
@@ -206,14 +208,19 @@ object FaceBlender {
                     val b = (pc and 0xFF).toFloat()
                     val lum = 0.299f * r + 0.587f * g + 0.114f * b
                     val diff = abs(r - refR) + abs(g - refG) + abs(b - refB)
+                    val warmth = r - b
+                    val chroma = max(r, max(g, b)) - min(r, min(g, b))
                     val isDarkHairOrBg = lum < 56f && refLum > 78f
-                    val isSkinLike = !isDarkHairOrBg && diff < 135f && r >= b - 8f
+                    val isNeutralOrCoolBg = (refWarmth >= 18f && warmth < max(8f, refWarmth * 0.28f)) ||
+                        (refChroma >= 22f && chroma < refChroma * 0.32f && diff > 36f) ||
+                        (g > r + 6f)
+                    val isSkinLike = !isDarkHairOrBg && !isNeutralOrCoolBg && diff < 125f && r >= b - 8f
                     if (isSkinLike) {
                         lastSkinOffset = d
                         missRun = 0
                     } else {
                         missRun++
-                        if (missRun >= 5) break
+                        if (missRun >= 4) break
                     }
                     d++
                 }
@@ -401,17 +408,17 @@ object FaceBlender {
                 val u = localX * invRx
                 val v = localY * (if (localY < 0f) invRyTop else invRyBot)
                 val rSq = u * u + v * v
-                if (rSq <= 0.0576f || rSq >= 0.9801f) continue
+                if (rSq <= 0.0441f || rSq >= 0.9801f) continue
                 val r = sqrt(rSq)
 
-                // Flat-top plateau envelope: 0 inside eyes/nose (r <= 0.24), full 1.0 across jawline D/B/C/A (r in 0.56..0.86),
+                // Flat-top plateau envelope: 0 inside eyes/nose (r <= 0.21), full 1.0 across mid-cheeks & jawline D/B/C/A (r in 0.48..0.88),
                 // smooth cosine taper down to 0 at r = 0.99 so outer hair & corners stay artifact-free.
-                val tUp = ((r - 0.24f) / 0.32f).coerceIn(0f, 1f)
+                val tUp = ((r - 0.21f) / 0.27f).coerceIn(0f, 1f)
                 val upWeight = tUp * tUp * (3f - 2f * tUp)
-                val downWeight = if (r <= 0.86f) {
+                val downWeight = if (r <= 0.88f) {
                     1.0f
                 } else {
-                    val tDn = ((r - 0.86f) / 0.13f).coerceIn(0f, 1f)
+                    val tDn = ((r - 0.88f) / 0.11f).coerceIn(0f, 1f)
                     (0.5f * (1.0f + cos(Math.PI * tDn))).toFloat()
                 }
                 val ringBell = upWeight * downWeight
@@ -1483,12 +1490,24 @@ object FaceBlender {
         var maskGenMs = (System.currentTimeMillis() - tMask0).coerceAtLeast(0L)
 
         val alignedSource512 = if (sourceBitmap != null && sourceLandmarks5 != null && sourceLandmarks5.size >= 5) {
-            FaceAlignment.warpSourceToTargetPose(
-                sourceBitmap = sourceBitmap,
-                sourceLandmarks5 = sourceLandmarks5,
-                targetLandmarks5 = targetLandmarks5,
-                dstSize = HD_SIZE
-            )
+            if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
+                val dst5Points = listOf(
+                    geom512.leftEye,
+                    geom512.rightEye,
+                    geom512.nose,
+                    geom512.leftMouth,
+                    geom512.rightMouth
+                )
+                val srcToTgtMat = FaceAlignment.estimateSimilarityMatrix(sourceLandmarks5, dst5Points)
+                FaceAlignment.warpAffineCrop(sourceBitmap, srcToTgtMat, HD_SIZE)
+            } else {
+                FaceAlignment.warpSourceToTargetPose(
+                    sourceBitmap = sourceBitmap,
+                    sourceLandmarks5 = sourceLandmarks5,
+                    targetLandmarks5 = targetLandmarks5,
+                    dstSize = HD_SIZE
+                )
+            }
         } else null
         val srcGeom512 = if (alignedSource512 != null) geom512 else null
 
@@ -1580,7 +1599,11 @@ object FaceBlender {
                     (0.10f + 0.20f * clampedEnhance).coerceIn(0f, 0.30f)
                 }
             } else if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT && activeSwapCrop.width >= 256) {
-                (0.12f + 0.24f * clampedEnhance).coerceIn(0f, 0.36f)
+                if (isNeuralSwap) {
+                    (0.06f + 0.16f * clampedEnhance).coerceIn(0f, 0.22f)
+                } else {
+                    (0.12f + 0.24f * clampedEnhance).coerceIn(0f, 0.36f)
+                }
             } else if (activeSwapCrop.width >= 256) {
                 (0.06f + 0.16f * clampedEnhance).coerceIn(0f, 0.22f)
             } else {
@@ -1631,6 +1654,9 @@ object FaceBlender {
             }
         }
 
+        val isOptionDFaceFusion = !identityPreservationMode &&
+            (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT)
+
         // 1. Unified 512x512 Skin-Tone & Scene Illumination Harmonization (Mean + Contrast Transfer)
         //    Run BEFORE Upper-Lip Guard & HD feature sharpening so swapPx512 and tgtPx512 share the exact same skin tone!
         if (enableColorTransfer) {
@@ -1641,8 +1667,8 @@ object FaceBlender {
                 geom512 = geom512,
                 skinToneMode = skinToneMode,
                 isCleanIdentityOptionB = isCleanIdentityOptionB && isNeuralSwap,
-                sampleTargetNeck = (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT &&
-                    skinToneMode == SkinToneSourceMode.TARGET_SCENE)
+                sampleTargetNeck = (isOptionDFaceFusion && skinToneMode == SkinToneSourceMode.TARGET_SCENE),
+                isOptionDFaceFusion = isOptionDFaceFusion
             )
         }
 
@@ -1659,15 +1685,20 @@ object FaceBlender {
         var hadDonorMoustache = false
         var upperLipGuardMs = 1L
         val useCleanOptionBNeuralPath = isCleanIdentityOptionB && isNeuralSwap
+        val useCleanOptionDNeuralPath = isOptionDFaceFusion && isNeuralSwap
 
-        if (!identityPreservationMode && useCleanOptionBNeuralPath) {
-            // Clean 5-step DeepSwapper pipeline: preserve 100% of neural swapper Source eye/brow/nose/lip geometry.
+        if (!identityPreservationMode && (useCleanOptionBNeuralPath || useCleanOptionDNeuralPath)) {
+            // Clean DeepSwapper / FaceFusion Option D neural pipeline: preserve 100% of neural swapper Source eye/brow/nose/lip/cheek geometry.
             // Only apply light high-frequency sharpness and out-of-gamut neon-red/black safety healing.
             if (clampedEnhance > 0.05f) {
                 enhanceAnatomicalFeatures512(
                     swapPx512 = swapPx512,
                     geom512 = geom512,
-                    strength = (0.24f + 0.34f * clampedEnhance).coerceIn(0.20f, 0.58f)
+                    strength = if (useCleanOptionDNeuralPath) {
+                        (0.26f + 0.34f * clampedEnhance).coerceIn(0.22f, 0.60f)
+                    } else {
+                        (0.24f + 0.34f * clampedEnhance).coerceIn(0.20f, 0.58f)
+                    }
                 )
             }
             if (ageMatchPlan != null && ageMatchPlan.shouldApplyReAging) {
@@ -1830,7 +1861,7 @@ object FaceBlender {
             // 6. Face Reaction Synthesis & Protruding Tongue Negative Artifact Suppression
             when (faceReactionMode) {
                 FaceReactionSourceMode.TARGET_REACTION -> {
-                    if (!useCleanOptionBNeuralPath) {
+                    if (!useCleanOptionBNeuralPath && !useCleanOptionDNeuralPath) {
                         if (!isNeuralSwap) {
                             preserveTargetMouthTeethAndTongue512(
                                 swapPx512 = swapPx512,
@@ -1970,7 +2001,16 @@ object FaceBlender {
         }
 
         var guard2Elapsed = 0L
-        if (!identityPreservationMode && !useCleanOptionBNeuralPath) {
+        if (!identityPreservationMode && useCleanOptionDNeuralPath) {
+            // Strictly fuse only the outermost perimeter ring (m < 0.38f) for Option D neural swaps
+            // so widened D/B/C/A cheeks & jawline stay 100% Source without LCM pulling them back to Target.
+            applyMultiBandBoundaryAndJawlineFusion512(
+                swapPx512 = swapPx512,
+                tgtPx512 = tgtPx512,
+                mask512 = mask512,
+                maxMaskForFusion = 0.38f
+            )
+        } else if (!identityPreservationMode && !useCleanOptionBNeuralPath) {
             // 8. 2-Band Multi-Band Boundary Fusion
             applyMultiBandBoundaryAndJawlineFusion512(
                 swapPx512 = swapPx512,
@@ -2476,7 +2516,8 @@ object FaceBlender {
     private fun applyMultiBandBoundaryAndJawlineFusion512(
         swapPx512: IntArray,
         tgtPx512: IntArray,
-        mask512: FloatArray
+        mask512: FloatArray,
+        maxMaskForFusion: Float = 0.78f
     ) {
         val origSwap = swapPx512.copyOf()
         val step1 = 10
@@ -2491,9 +2532,9 @@ object FaceBlender {
             for (x in step2 until HD_SIZE - step2) {
                 val idx = row + x
                 val m = mask512[idx]
-                // Skip both outside mask (m <= 0.01f) and inner facial region (m >= 0.78f: eyes, nose, cheeks, philtrum, lips)
-                // so Target's skin/lighting never pulls the inner face back toward Target identity
-                if (m <= 0.01f || m >= 0.78f) continue
+                // Skip both outside mask (m <= 0.01f) and inner facial region (m >= maxMaskForFusion)
+                // so Target's skin/lighting never pulls the inner face or cheeks back toward Target identity
+                if (m <= 0.01f || m >= maxMaskForFusion) continue
 
                 val boundaryWeight = ((1.0f - m) * regionBoost).coerceIn(0f, 0.56f)
                 val sLow1 = compute5PointLowPassRGB512(origSwap, x, y, step1)
@@ -2549,7 +2590,8 @@ object FaceBlender {
         geom512: WarpedFaceGeometry,
         skinToneMode: SkinToneSourceMode,
         isCleanIdentityOptionB: Boolean = false,
-        sampleTargetNeck: Boolean = false
+        sampleTargetNeck: Boolean = false,
+        isOptionDFaceFusion: Boolean = false
     ) {
         var sRMean = 0.0
         var sGMean = 0.0
@@ -2734,11 +2776,15 @@ object FaceBlender {
         }
 
         val (goalRStd, goalGStd, goalBStd) = when (skinToneMode) {
-            SkinToneSourceMode.TARGET_SCENE -> Triple(
-                0.85 * tRStd + 0.15 * sRStd,
-                0.85 * tGStd + 0.15 * sGStd,
-                0.85 * tBStd + 0.15 * sBStd
-            )
+            SkinToneSourceMode.TARGET_SCENE -> {
+                val tW = if (isOptionDFaceFusion) 0.68 else 0.85
+                val sW = 1.0 - tW
+                Triple(
+                    tW * tRStd + sW * sRStd,
+                    tW * tGStd + sW * sGStd,
+                    tW * tBStd + sW * sBStd
+                )
+            }
             SkinToneSourceMode.SOURCE_IDENTITY -> Triple(
                 0.78 * dRStd + 0.22 * tRStd,
                 0.78 * dGStd + 0.22 * tGStd,
@@ -2751,12 +2797,14 @@ object FaceBlender {
             )
         }
 
-        val scaleR = (goalRStd / sRStd).toFloat().coerceIn(0.82f, 1.18f)
-        val scaleG = (goalGStd / sGStd).toFloat().coerceIn(0.82f, 1.18f)
-        val scaleB = (goalBStd / sBStd).toFloat().coerceIn(0.82f, 1.18f)
+        val scaleMin = if (isOptionDFaceFusion) 0.86f else 0.82f
+        val scaleMax = if (isOptionDFaceFusion) 1.14f else 1.18f
+        val scaleR = (goalRStd / sRStd).toFloat().coerceIn(scaleMin, scaleMax)
+        val scaleG = (goalGStd / sGStd).toFloat().coerceIn(scaleMin, scaleMax)
+        val scaleB = (goalBStd / sBStd).toFloat().coerceIn(scaleMin, scaleMax)
 
         val strength = when (skinToneMode) {
-            SkinToneSourceMode.TARGET_SCENE -> 0.88f
+            SkinToneSourceMode.TARGET_SCENE -> if (isOptionDFaceFusion) 0.80f else 0.88f
             SkinToneSourceMode.SOURCE_IDENTITY -> if (isCleanIdentityOptionB) 0.38f else 0.52f
             SkinToneSourceMode.BALANCED_BLEND -> if (isCleanIdentityOptionB) 0.68f else 0.76f
         }
@@ -3069,10 +3117,15 @@ object FaceBlender {
         } else {
             (chinDist * shapeChinBoost).coerceIn(150f, 194f)
         }
-        val innerCoreRatio = if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
-            0.84f
-        } else {
-            0.76f
+        val optionDJawFuller = swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT &&
+            ((optionDFit?.upperJawMaxillaScale ?: 1f) > 1.02f ||
+                (optionDFit?.lowerJawBodyScale ?: 1f) > 1.02f ||
+                (optionDFit?.jawBoneBigonialScale ?: 1f) > 1.02f ||
+                (optionDFit?.mandibularLengthScale ?: 1f) > 1.02f)
+        val innerCoreRatio = when {
+            optionDJawFuller -> 0.88f
+            swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT -> 0.86f
+            else -> 0.76f
         }
         val borderMargin = if (isCleanOptionB) 24 else 20
 
@@ -3081,11 +3134,6 @@ object FaceBlender {
         val mouthCoreRx = max(mouthW * 0.68f, geom512.eyeDist * 0.56f)
         val mouthCoreRy = geom512.eyeDist * 0.34f
         val mouthCoreCy = geom512.nose.y * 0.22f + mouthMidY * 0.78f
-
-        val optionDJawFuller = swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT &&
-            ((optionDFit?.lowerJawBodyScale ?: 1f) > 1.02f ||
-                (optionDFit?.jawBoneBigonialScale ?: 1f) > 1.02f ||
-                (optionDFit?.mandibularLengthScale ?: 1f) > 1.02f)
 
         for (y in 0 until HD_SIZE) {
             val row = y * HD_SIZE
@@ -3176,8 +3224,16 @@ object FaceBlender {
                     val tLum = 0.299f * tR + 0.587f * tG + 0.114f * tB
                     val sLum = 0.299f * sR + 0.587f * sG + 0.114f * sB
 
-                    // Protect Target hair & dark temple/cheek hairline overlapping forehead or outer cheek
-                    if (tLum < 92f && sLum > tLum + 14f) {
+                    // Protect Target hair overlapping forehead/temples, while in Option D cheek/jaw zone
+                    // never mistake Target's warm cheek-hollow contour shadow for dark hair.
+                    val allowHairKeepHere = if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT &&
+                        localY >= -0.15f * radiusYTop
+                    ) {
+                        tLum < 52f || ((tR - tB) < 14 && tLum < 84f)
+                    } else {
+                        true
+                    }
+                    if (allowHairKeepHere && tLum < 92f && sLum > tLum + 14f) {
                         val hairDarkness = ((92f - tLum) / 56f).coerceIn(0f, 1f)
                         val lumGap = ((sLum - tLum - 14f) / 42f).coerceIn(0f, 1f)
                         val hairKeep = (hairDarkness * lumGap * perimWeight * 1.15f).coerceIn(0f, 0.94f)

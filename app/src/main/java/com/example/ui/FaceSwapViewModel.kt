@@ -115,8 +115,9 @@ data class FaceSwapUiState(
     val pendingStrategyPopupOption: FaceSwapStrategyOption? = null,
     val optionDSwapperChoice: OptionDSwapperChoice = OptionDSwapperChoice.AUTO,
     val optionDEnhancerChoice: OptionDEnhancerChoice = OptionDEnhancerChoice.AUTO,
-    val optionDCodeformerFidelity: Float = 0.60f,
-    val optionDPixelBoostEnabled: Boolean = false,
+    val optionDCodeformerFidelity: Float = 0.80f,
+    val optionDPixelBoostEnabled: Boolean = true,
+    val optionDSwapperWeight: Float = 0.85f,
     val installedOptionDSwappers: List<String> = emptyList(),
     val installedOptionDEnhancers: List<String> = emptyList(),
     val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
@@ -519,6 +520,10 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
 
     fun setOptionDPixelBoostEnabled(enabled: Boolean) {
         _uiState.update { it.copy(optionDPixelBoostEnabled = enabled) }
+    }
+
+    fun setOptionDSwapperWeight(weight: Float) {
+        _uiState.update { it.copy(optionDSwapperWeight = weight.coerceIn(0.0f, 1.0f)) }
     }
 
     fun setQualityLevel(level: ProcessingQualityLevel) {
@@ -1570,7 +1575,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                             swapperChoice = state.optionDSwapperChoice,
                                             enhancerChoice = state.optionDEnhancerChoice,
                                             codeformerFidelity = state.optionDCodeformerFidelity,
-                                            pixelBoostEnabled = state.optionDPixelBoostEnabled
+                                            pixelBoostEnabled = state.optionDPixelBoostEnabled,
+                                            swapperWeight = state.optionDSwapperWeight
                                         )
                                     } else {
                                         OptionDFaceFusionConfig()
