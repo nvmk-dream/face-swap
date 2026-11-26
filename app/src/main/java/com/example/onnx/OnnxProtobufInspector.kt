@@ -228,6 +228,22 @@ enum class ModelSlot(
         expectedOutputSignature = "output: FLOAT[1, 3] (or [1, 6] 6D rotation / [1, 3, 3] matrix / yaw,pitch,roll)",
         licenseSummary = "MIT License (thohemp/6DRepNet)",
         downloadSourceUrl = "https://github.com/PINTO0309/PINTO_model_zoo (6DRepNet360_Slim / SixDRepNet)"
+    ),
+    FACE_OCCLUDER(
+        id = "face_occluder",
+        subdirectory = "occlusion",
+        canonicalFileName = "face_occluder.onnx",
+        displayName = "face_occluder.onnx / XSeg (FaceFusion Occlusion Mask)",
+        categoryTitle = "models/occlusion/",
+        approximateSizeLabel = "~5–12 MB",
+        requirementLevel = ModelRequirementLevel.OPTIONAL_HEAD_SWAP,
+        tamilTitle = "13. FaceFusion Occluder / XSeg (கை, முடி, கண்ணாடி தடுப்பு)",
+        tamilRoleSummary = "Option D FaceFusion முறையில் 256×256 முகத் தடுப்பு (XSeg / face_occluder.onnx / dfl_xseg.onnx) மூலம் கை, முடி, கண்ணாடி மற்றும் ஆபரணங்களைப் பாதுகாத்து முகத்தை மட்டும் இயற்கையாக ஒட்டுகிறது.",
+        roleSummary = "Optional FaceFusion 256x256 foreground occluder (face_occluder.onnx / dfl_xseg.onnx / xseg_1/2/3.onnx) active in Option D.",
+        expectedInputSignature = "in_face: FLOAT[1, 256, 256, 3] (or [1, 3, 256, 256] RGB [0..1])",
+        expectedOutputSignature = "out_mask: FLOAT[1, 256, 256, 1] (or [1, 1, 256, 256] Occlusion mask)",
+        licenseSummary = "FaceFusion / DeepFaceLab XSeg — Non-Commercial Research Only",
+        downloadSourceUrl = "https://huggingface.co/facefusion/models-3.0.0"
     )
 }
 
@@ -267,7 +283,8 @@ data class OnnxModelInspection(
     val runtimeInputs: List<TensorDescriptor>,
     val runtimeOutputs: List<TensorDescriptor>,
     val hasEmbeddedEmap512x512: Boolean,
-    val verificationNote: String
+    val verificationNote: String,
+    val installedVariants: List<String> = emptyList()
 )
 
 object OnnxProtobufInspector {
@@ -292,8 +309,8 @@ object OnnxProtobufInspector {
         "re_aging",
         "face_mesh",
         "head_pose",
-        "head_swap",
-        "nextgen_bcd"
+        "occlusion",
+        "head_swap"
     )
 
     /**
@@ -418,26 +435,85 @@ object OnnxProtobufInspector {
      * (`face_swap/`, `head_replacement/`, `detection/`, `recognition/`, `segmentation/`, `matting/`, `inpainting/`, `enhancement/`)
      * and the root `filesDir/models/<canonicalFileName>` so models placed in any folder are immediately recognized.
      */
+    fun listSlotVariantFiles(context: Context, slot: ModelSlot): List<File> {
+        if (slot == ModelSlot.DEPTH) {
+            return DepthEstimationEngine.resolveDepthCandidates(context).map { it.file }
+        }
+        val root = getModelsRootDir(context)
+        val seenPaths = HashSet<String>()
+        val found = mutableListOf<File>()
+        fun addIfMatch(file: File) {
+            if (!file.isFile || file.length() <= 1024L || !file.name.endsWith(".onnx", ignoreCase = true)) return
+            val key = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+            if (seenPaths.add(key)) {
+                found.add(file)
+            }
+        }
+
+        val primaryDir = File(root, slot.subdirectory)
+        primaryDir.listFiles()
+            ?.sortedBy { it.name.lowercase() }
+            ?.forEach(::addIfMatch)
+
+        if (slot == ModelSlot.FACE_OCCLUDER) {
+            // Also pick up legacy occluder/xseg files previously placed in segmentation/
+            File(root, ModelSlot.SEGMENTATION.subdirectory).listFiles()
+                ?.filter {
+                    val l = it.name.lowercase()
+                    l.contains("occluder") || l.contains("xseg")
+                }
+                ?.sortedBy { it.name.lowercase() }
+                ?.forEach(::addIfMatch)
+        }
+
+        if (slot == ModelSlot.SWAPPER || slot == ModelSlot.ENHANCEMENT || slot == ModelSlot.FACE_OCCLUDER) {
+            for (sub in SUBDIRECTORIES) {
+                if (sub == slot.subdirectory) continue
+                File(root, sub).listFiles()
+                    ?.filter { matchSlotForFileName(it.name, sub) == slot }
+                    ?.sortedBy { it.name.lowercase() }
+                    ?.forEach(::addIfMatch)
+            }
+            root.listFiles()
+                ?.filter { matchSlotForFileName(it.name, "") == slot }
+                ?.sortedBy { it.name.lowercase() }
+                ?.forEach(::addIfMatch)
+        }
+        return found
+    }
+
     fun resolveModelFile(context: Context, slot: ModelSlot): File {
         if (slot == ModelSlot.DEPTH) {
             return DepthEstimationEngine.resolvePrimaryDepthFile(context)
         }
         val root = getModelsRootDir(context)
         val primaryFile = File(File(root, slot.subdirectory), slot.canonicalFileName)
-        if (slot != ModelSlot.SWAPPER && primaryFile.exists() && primaryFile.length() > 1024L) {
+        if (slot != ModelSlot.SWAPPER && slot != ModelSlot.FACE_OCCLUDER &&
+            primaryFile.exists() && primaryFile.length() > 1024L
+        ) {
             return primaryFile
         }
-        val candidateNames = if (slot == ModelSlot.SWAPPER) {
-            // Prioritize hyperswap_1b_256.onnx first, then other valid swapper models if user imported them
-            listOf(
+        val candidateNames = when (slot) {
+            ModelSlot.SWAPPER -> listOf(
+                // Prioritize hyperswap_1b_256.onnx first for Options A, B, B+C
                 "hyperswap_1b_256.onnx",
                 "hyperswap_1a_256.onnx",
                 "hyperswap_1c_256.onnx",
                 "inswapper_128_fp16.onnx",
                 "inswapper_128.onnx"
             )
-        } else {
-            listOf(slot.canonicalFileName)
+            ModelSlot.ENHANCEMENT -> listOf(
+                "gfpgan_1.4.onnx",
+                "gfpgan-v1.4-w16-v1.onnx"
+            )
+            ModelSlot.FACE_OCCLUDER -> listOf(
+                "face_occluder.onnx",
+                "xseg_3.onnx",
+                "xseg_2.onnx",
+                "xseg_1.onnx",
+                "dfl_xseg.onnx"
+            )
+            else -> listOf(slot.canonicalFileName)
         }
         if (slot == ModelSlot.SWAPPER) {
             // Pass 1: Prefer complete swapper models (either self-contained >= 8MB or with companion .data weights)
@@ -454,7 +530,7 @@ object OnnxProtobufInspector {
                 }
             }
         }
-        // Pass 2: Any existing model file > 1 KB
+        // Pass 2: Any existing canonical candidate file > 1 KB
         for (fileName in candidateNames) {
             for (sub in SUBDIRECTORIES) {
                 val candidate = File(File(root, sub), fileName)
@@ -466,6 +542,10 @@ object OnnxProtobufInspector {
             if (legacyRootFile.exists() && legacyRootFile.length() > 1024L) {
                 return legacyRootFile
             }
+        }
+        if (slot == ModelSlot.SWAPPER || slot == ModelSlot.ENHANCEMENT || slot == ModelSlot.FACE_OCCLUDER) {
+            val fallbackVariant = listSlotVariantFiles(context, slot).firstOrNull()
+            if (fallbackVariant != null) return fallbackVariant
         }
         return primaryFile
     }
@@ -505,12 +585,17 @@ object OnnxProtobufInspector {
         // black blocks & red overflows or stall/spike 2x RAM on large SD UNet/VAE graphs.
         return lower.contains("hyperswap") ||
             lower.contains("inswapper") ||
-            lower.contains("reswapper") ||
             lower.contains("simswap") ||
+            lower.contains("reswapper") ||
+            lower.contains("blendswap") ||
+            lower.contains("ghost_") ||
+            lower.contains("uniface") ||
             lower.contains("w600k") ||
             lower.contains("arcface") ||
             lower.contains("gfpgan") ||
             lower.contains("codeformer") ||
+            lower.contains("gpen") ||
+            lower.contains("restoreformer") ||
             lower.contains("lama") ||
             lower.contains("segformer") ||
             lower.contains("bisenet") ||
@@ -937,15 +1022,23 @@ object OnnxProtobufInspector {
                 ModelSlot.DETECTOR
             lower.contains("w600k") || lower.contains("arcface") || lower.contains("backbone50") ->
                 ModelSlot.RECOGNIZER
-            lower.contains("inswapper") || lower.contains("hyperswap") ->
+            lower.contains("inswapper") || lower.contains("hyperswap") ||
+                lower.contains("simswap") || lower.contains("reswapper") ||
+                lower.contains("blendswap") || lower.contains("uniface") ||
+                lower.contains("ghost_1_") || lower.contains("ghost_2_") || lower.contains("ghost_3_") ->
                 ModelSlot.SWAPPER
+            lower.contains("face_occluder") || lower.contains("dfl_xseg") ||
+                lower.contains("xseg_1") || lower.contains("xseg_2") || lower.contains("xseg_3") ||
+                (lower.contains("xseg") && !lower.contains("segformer")) ->
+                ModelSlot.FACE_OCCLUDER
             lower.contains("segformer") || lower.contains("bisenet") || lower.contains("face_parsing") ->
                 ModelSlot.SEGMENTATION
             lower.contains("modnet") || lower.contains("stylematte") ->
                 ModelSlot.MATTING
             lower.contains("lama") ->
                 ModelSlot.INPAINTING
-            lower.contains("gfpgan") ->
+            lower.contains("gfpgan") || lower.contains("codeformer") ||
+                lower.contains("gpen") || lower.contains("restoreformer") ->
                 ModelSlot.ENHANCEMENT
             lower.contains("mivolo") || lower.contains("age_est") || lower.contains("age_onnx") ->
                 ModelSlot.AGE_ESTIMATOR
@@ -954,8 +1047,7 @@ object OnnxProtobufInspector {
                 lower.contains("fran") ||
                 ((lower == "unet.onnx" || lower == "unet_fp16.onnx") &&
                     !parentPathHint.lowercase().let { p ->
-                        p.contains("sd") || p.contains("inpaint") || p.contains("realvis") ||
-                            p.contains("realistic_vision") || p.contains("realistic-vision")
+                        p.contains("sd") || p.contains("inpaint") || p.contains("realvis")
                     }) ->
                 ModelSlot.FACE_REAGING
             lower.contains("facemesh") || lower.contains("face_mesh") || lower.contains("face-mesh") ||
@@ -980,6 +1072,29 @@ object OnnxProtobufInspector {
             lower.contains("bisenet")
     }
 
+    private fun sanitizeImportedFileName(rawName: String?, fallback: String): String {
+        val base = rawName?.trim()?.substringAfterLast('/')?.substringAfterLast('\\')
+            ?.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            .orEmpty()
+        return if (base.isNotBlank() && base.endsWith(".onnx", ignoreCase = true) && base.length > 5) {
+            base
+        } else {
+            fallback
+        }
+    }
+
+    private fun computeSwapTargetFileName(displayName: String, fallback: String): String {
+        val lower = displayName.trim().lowercase()
+        return when {
+            lower.contains("hyperswap_1b") -> "hyperswap_1b_256.onnx"
+            lower.contains("hyperswap_1a") -> "hyperswap_1a_256.onnx"
+            lower.contains("hyperswap_1c") -> "hyperswap_1c_256.onnx"
+            lower.contains("inswapper_128_fp16") -> "inswapper_128_fp16.onnx"
+            lower.contains("inswapper") -> "inswapper_128.onnx"
+            else -> sanitizeImportedFileName(displayName, fallback)
+        }
+    }
+
     private data class DiscoveredDocEntry(
         val docId: String,
         val displayName: String,
@@ -1000,6 +1115,10 @@ object OnnxProtobufInspector {
             lower.contains("hyperswap_1c") -> 90
             lower.contains("hyperswap_1a") -> 85
             lower.contains("hyperswap") -> 80
+            lower.contains("simswap_unofficial_512") || lower.contains("simswap_512") -> 78
+            lower.contains("reswapper_256") -> 76
+            lower.contains("simswap_256") -> 74
+            lower.contains("blendswap") || lower.contains("ghost_") -> 72
             lower.contains("inswapper_128_fp16") -> 70
             lower.contains("inswapper_128") -> 60
             else -> 50
@@ -1009,37 +1128,10 @@ object OnnxProtobufInspector {
         return if (isComplete) baseScore + 1000 else baseScore
     }
 
-    data class FolderAutoImportReport(
-        val importedSlots: List<ModelSlot>,
-        val importedSdPacks: List<SdInpaintPackType>,
-        val skippedAuxiliaryCount: Int = 0,
-        val importedNextGenBcdSlots: List<NextGenBcdSlot> = emptyList()
-    )
-
-    private fun findCompanionDataEntry(
-        displayName: String,
-        dataFilesByName: Map<String, Pair<String, Long>>
-    ): Pair<String, Pair<String, Long>>? {
-        val lower = displayName.trim().lowercase()
-        val stem = lower.removeSuffix(".onnx")
-        val candidateNames = listOf(
-            "$lower.data",
-            "${lower}_data",
-            "${stem}.onnx.data",
-            "${stem}.onnx_data",
-            "${stem}.data"
-        )
-        for (name in candidateNames) {
-            val found = dataFilesByName[name]
-            if (found != null) return name to found
-        }
-        return null
-    }
-
     /**
      * Scans a user-selected directory (SAF DocumentTree Uri) for all `.onnx` model files
-     * (and any companion `.onnx.data` / `.onnx_data` external weight files) plus SD 1.5 Inpaint packs,
-     * automatically matching and importing them in priority order without exhausting RAM or disk space.
+     * (and any companion `.onnx.data` external weight files), automatically matching and
+     * importing them in priority order without exhausting RAM or disk space.
      */
     fun importAllModelsFromTreeUri(
         context: Context,
@@ -1047,20 +1139,6 @@ object OnnxProtobufInspector {
         onlyMissing: Boolean = false,
         onProgress: (String) -> Unit = {}
     ): Result<List<ModelSlot>> {
-        return importAllModelsDetailedFromTreeUri(
-            context = context,
-            treeUri = treeUri,
-            onlyMissing = onlyMissing,
-            onProgress = onProgress
-        ).map { it.importedSlots }
-    }
-
-    fun importAllModelsDetailedFromTreeUri(
-        context: Context,
-        treeUri: Uri,
-        onlyMissing: Boolean = false,
-        onProgress: (String) -> Unit = {}
-    ): Result<FolderAutoImportReport> {
         return try {
             // Release any active native ONNX sessions before copying large model files
             clearCachedSessions()
@@ -1070,11 +1148,10 @@ object OnnxProtobufInspector {
             val rootDocId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
             val rawDiscoveredOnnx = mutableListOf<DiscoveredDocEntry>()
             val rawAuxiliaryOnnx = mutableListOf<Triple<String, String, Long>>() // (docId, displayName, size)
-            val rawNextGenBcdCandidates = mutableListOf<NextGenBcdModelManager.ScannedCandidate>()
             val dataFilesByName = mutableMapOf<String, Pair<String, Long>>() // lowercase name -> (docId, size)
 
             fun scanDocumentDirectory(parentDocId: String, parentPathHint: String, depth: Int) {
-                if (depth > 6) return
+                if (depth > 4) return
                 val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(
                     treeUri,
                     parentDocId
@@ -1106,18 +1183,11 @@ object OnnxProtobufInspector {
                             val docSize = if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else 0L
 
                             if (mimeType == android.provider.DocumentsContract.Document.MIME_TYPE_DIR) {
-                                val dirLower = displayName.trim().lowercase()
-                                if (dirLower == "safety_checker" || dirLower == "feature_extractor") {
-                                    continue
-                                }
                                 val nextHint = if (parentPathHint.isEmpty()) displayName else "$parentPathHint/$displayName"
                                 scanDocumentDirectory(docId, nextHint, depth + 1)
                             } else {
                                 val lowerName = displayName.trim().lowercase()
-                                if (lowerName.endsWith(".onnx.data") ||
-                                    lowerName.endsWith(".data") ||
-                                    lowerName.endsWith(".onnx_data")
-                                ) {
+                                if (lowerName.endsWith(".onnx.data") || lowerName.endsWith(".data")) {
                                     dataFilesByName[lowerName] = docId to docSize
                                 } else {
                                     val matched = matchSlotForFileName(displayName, parentPathHint)
@@ -1136,26 +1206,6 @@ object OnnxProtobufInspector {
                                     if (isAuxiliary3DOrOcclusionModel(displayName)) {
                                         rawAuxiliaryOnnx.add(Triple(docId, displayName, docSize))
                                     }
-                                    val nextGenSlot = NextGenBcdHelper.classifySlotForFileName(displayName)
-                                    if (nextGenSlot != null) {
-                                        val pri = when (nextGenSlot) {
-                                            NextGenBcdSlot.NEXTGEN_SWAPPER ->
-                                                NextGenBcdHelper.computeSwapperCandidatePriority(displayName, docSize, false)
-                                            NextGenBcdSlot.XSEG_OCCLUDER ->
-                                                NextGenBcdHelper.computeOccluderCandidatePriority(displayName, docSize, false)
-                                            NextGenBcdSlot.CODEFORMER ->
-                                                if (docSize >= 8L * 1024L * 1024L) 1100 else 100
-                                        }
-                                        rawNextGenBcdCandidates.add(
-                                            NextGenBcdModelManager.ScannedCandidate(
-                                                docId = docId,
-                                                displayName = displayName,
-                                                sizeBytes = docSize,
-                                                slot = nextGenSlot,
-                                                priority = pri
-                                            )
-                                        )
-                                    }
                                 }
                             }
                         }
@@ -1163,19 +1213,22 @@ object OnnxProtobufInspector {
                 }
             }
 
-            onProgress("Scanning folder for .onnx models & SD Inpaint packs...")
+            onProgress("Scanning folder for .onnx models...")
             val rootHint = rootDocId.substringAfterLast(':')
             scanDocumentDirectory(rootDocId, rootHint, 0)
 
             val bestBySlot = mutableMapOf<ModelSlot, DiscoveredDocEntry>()
+            val multiVariantsBySlot = mutableMapOf<ModelSlot, MutableMap<String, DiscoveredDocEntry>>()
             val bestDepthByFamily = mutableMapOf<DepthModelFamily, DiscoveredDocEntry>()
+            val multiVariantSlots = setOf(ModelSlot.SWAPPER, ModelSlot.ENHANCEMENT, ModelSlot.FACE_OCCLUDER)
             for (rawEntry in rawDiscoveredOnnx) {
                 val docId = rawEntry.docId
                 val displayName = rawEntry.displayName
                 val docSize = rawEntry.sizeBytes
                 val pathHint = rawEntry.parentPathHint
                 val matchedSlot = rawEntry.slot
-                val hasCompanion = findCompanionDataEntry(displayName, dataFilesByName) != null
+                val companionLower = "${displayName.trim().lowercase()}.data"
+                val hasCompanion = dataFilesByName.containsKey(companionLower)
                 val priority = when (matchedSlot) {
                     ModelSlot.SWAPPER -> computeSwapCandidatePriority(displayName, docSize, hasCompanion)
                     ModelSlot.SEGMENTATION -> {
@@ -1183,7 +1236,6 @@ object OnnxProtobufInspector {
                         val segScore = when {
                             lower.contains("segformer") -> 95
                             lower.contains("bisenet") -> 90
-                            lower.contains("face_occluder") || lower.contains("dfl_xseg") -> 80
                             else -> 70
                         }
                         if (docSize >= 1024L * 1024L || hasCompanion) segScore + 1000 else segScore
@@ -1206,6 +1258,18 @@ object OnnxProtobufInspector {
                         }
                     }
                 }
+                if (matchedSlot in multiVariantSlots) {
+                    val key = if (matchedSlot == ModelSlot.SWAPPER) {
+                        computeSwapTargetFileName(displayName, matchedSlot.canonicalFileName).lowercase()
+                    } else {
+                        sanitizeImportedFileName(displayName, matchedSlot.canonicalFileName).lowercase()
+                    }
+                    val slotMap = multiVariantsBySlot.getOrPut(matchedSlot) { linkedMapOf() }
+                    val prev = slotMap[key]
+                    if (prev == null || priority > prev.priorityScore) {
+                        slotMap[key] = rawEntry.copy(priorityScore = priority)
+                    }
+                }
                 val currentBest = bestBySlot[matchedSlot]
                 if (currentBest == null || priority > currentBest.priorityScore) {
                     bestBySlot[matchedSlot] = rawEntry.copy(priorityScore = priority)
@@ -1218,6 +1282,7 @@ object OnnxProtobufInspector {
                 ModelSlot.RECOGNIZER,
                 ModelSlot.SWAPPER,
                 ModelSlot.ENHANCEMENT,
+                ModelSlot.FACE_OCCLUDER,
                 ModelSlot.SEGMENTATION,
                 ModelSlot.MATTING,
                 ModelSlot.INPAINTING,
@@ -1227,7 +1292,13 @@ object OnnxProtobufInspector {
                 ModelSlot.FACE_REAGING
             )
             val entriesToImport = buildList {
-                orderedSlots.mapNotNullTo(this) { bestBySlot[it] }
+                for (slot in orderedSlots) {
+                    if (slot in multiVariantSlots) {
+                        multiVariantsBySlot[slot]?.values?.sortedByDescending { it.priorityScore }?.forEach { add(it) }
+                    } else {
+                        bestBySlot[slot]?.let { add(it) }
+                    }
+                }
                 bestDepthByFamily[DepthModelFamily.DEPTH_ANYTHING_V2]?.let { add(it) }
                 bestDepthByFamily[DepthModelFamily.SENTIS_MIDAS]?.let { add(it) }
             }
@@ -1236,19 +1307,11 @@ object OnnxProtobufInspector {
 
             entriesToImport.forEachIndexed { idx, entry ->
                 val slot = entry.slot
-                // Determine target file name: preserve hyperswap vs inswapper and Depth Anything V2 vs sentis-MiDaS
+                // Determine target file name: preserve multi-variant swapper/enhancer/occluder names cleanly
                 val targetFileName = when (slot) {
-                    ModelSlot.SWAPPER -> {
-                        val lower = entry.displayName.trim().lowercase()
-                        when {
-                            lower.contains("hyperswap_1b") -> "hyperswap_1b_256.onnx"
-                            lower.contains("hyperswap_1a") -> "hyperswap_1a_256.onnx"
-                            lower.contains("hyperswap_1c") -> "hyperswap_1c_256.onnx"
-                            lower.contains("inswapper_128_fp16") -> "inswapper_128_fp16.onnx"
-                            lower.contains("inswapper") -> "inswapper_128.onnx"
-                            else -> slot.canonicalFileName
-                        }
-                    }
+                    ModelSlot.SWAPPER -> computeSwapTargetFileName(entry.displayName, slot.canonicalFileName)
+                    ModelSlot.ENHANCEMENT, ModelSlot.FACE_OCCLUDER ->
+                        sanitizeImportedFileName(entry.displayName, slot.canonicalFileName)
                     ModelSlot.DEPTH -> DepthEstimationEngine.canonicalImportedFileName(
                         entry.displayName,
                         entry.parentPathHint
@@ -1259,23 +1322,25 @@ object OnnxProtobufInspector {
                 val subDir = File(rootDir, slot.subdirectory).apply { if (!exists()) mkdirs() }
                 val destFile = File(subDir, targetFileName)
 
-                val existing = if (slot == ModelSlot.DEPTH) destFile else resolveModelFile(context, slot)
+                val existing = if (slot == ModelSlot.DEPTH || slot in multiVariantSlots) {
+                    destFile
+                } else {
+                    resolveModelFile(context, slot)
+                }
                 if (onlyMissing && existing.exists() && existing.length() > 1024L) {
                     return@forEachIndexed
                 }
 
                 // Fast-path: if destination file already exists with identical size (and companion .data if any), skip re-copying!
-                val companionMatch = findCompanionDataEntry(entry.displayName, dataFilesByName)
-                val companionName = companionMatch?.first
-                val companionEntry = companionMatch?.second
-                val companionDest = companionName?.let { File(subDir, it) }
+                val companionLower = "${entry.displayName.trim().lowercase()}.data"
+                val companionEntry = dataFilesByName[companionLower]
+                val companionDest = File(subDir, "${entry.displayName.trim()}.data")
 
                 val mainAlreadyMatches = entry.sizeBytes > 1024L &&
                     destFile.exists() &&
                     destFile.length() == entry.sizeBytes
                 val companionAlreadyMatches = companionEntry == null ||
-                    (companionDest != null && companionDest.exists() &&
-                        (companionEntry.second <= 0L || companionDest.length() == companionEntry.second))
+                    (companionDest.exists() && (companionEntry.second <= 0L || companionDest.length() == companionEntry.second))
 
                 if (mainAlreadyMatches && companionAlreadyMatches) {
                     importedSlots.add(slot)
@@ -1303,23 +1368,18 @@ object OnnxProtobufInspector {
                     overrideFileName = targetFileName
                 )
                 if (importRes.isSuccess) {
-                    // If this ONNX model has an external weights .data / .onnx_data file in the folder, copy it alongside
-                    if (companionEntry != null && companionDest != null && companionName != null) {
-                        onProgress("Importing companion weights: $companionName...")
+                    // If this ONNX model has an external weights .onnx.data file in the folder, copy it alongside
+                    if (companionEntry != null) {
+                        onProgress("Importing companion weights: ${entry.displayName}.data...")
                         val companionUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(
                             treeUri,
                             companionEntry.first
                         )
                         runCatching {
                             copyUriToFileSafely(context, companionUri, companionDest)
-                            val extSuffix = if (companionName.endsWith(".onnx_data")) ".onnx_data" else ".data"
-                            val canonicalCompanion = File(subDir, "${targetFileName.removeSuffix(".onnx")}$extSuffix")
-                            val altCompanion = File(subDir, "$targetFileName.data")
+                            val canonicalCompanion = File(subDir, "$targetFileName.data")
                             if (canonicalCompanion.absolutePath != companionDest.absolutePath && !canonicalCompanion.exists()) {
                                 copyUriToFileSafely(context, companionUri, canonicalCompanion)
-                            }
-                            if (extSuffix == ".data" && altCompanion.absolutePath != companionDest.absolutePath && !altCompanion.exists()) {
-                                copyUriToFileSafely(context, companionUri, altCompanion)
                             }
                         }
                     }
@@ -1328,7 +1388,6 @@ object OnnxProtobufInspector {
             }
 
             // Also import any auxiliary 3D landmark (1k3d68.onnx, 2d106det.onnx) or occlusion/parsing models
-            var skippedAux = 0
             for ((docId, displayName, docSize) in rawAuxiliaryOnnx) {
                 val lower = displayName.trim().lowercase()
                 val auxSubDirName = if (lower.contains("1k3d68") || lower.contains("2d106det")) {
@@ -1342,14 +1401,13 @@ object OnnxProtobufInspector {
                     continue
                 }
                 if (docSize > 0L && rootDir.usableSpace < docSize + 32L * 1024L * 1024L) {
-                    skippedAux++
                     continue
                 }
                 runCatching {
                     onProgress("Importing 3D/Occlusion model: $displayName...")
                     val docUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                     copyUriToFileSafely(context, docUri, auxDest)
-                }.onFailure { skippedAux++ }
+                }
             }
 
             // Import Stable Diffusion 1.5 Inpainting ONNX folders (Priority 1: FP16, Priority 2: INT8)
@@ -1362,40 +1420,10 @@ object OnnxProtobufInspector {
                 )
             }.getOrDefault(emptyList())
 
-            val importedNextGenBcdSlots = runCatching {
-                val resolvedCandidates = rawNextGenBcdCandidates.map { cand ->
-                    val hasCompanion = findCompanionDataEntry(cand.displayName, dataFilesByName) != null
-                    if (!hasCompanion) cand else {
-                        val updatedPri = when (cand.slot) {
-                            NextGenBcdSlot.NEXTGEN_SWAPPER ->
-                                NextGenBcdHelper.computeSwapperCandidatePriority(cand.displayName, cand.sizeBytes, true)
-                            NextGenBcdSlot.XSEG_OCCLUDER ->
-                                NextGenBcdHelper.computeOccluderCandidatePriority(cand.displayName, cand.sizeBytes, true)
-                            NextGenBcdSlot.CODEFORMER -> 1100
-                        }
-                        cand.copy(priority = updatedPri)
-                    }
-                }
-                NextGenBcdModelManager.importFromTreeScan(
-                    context = context,
-                    treeUri = treeUri,
-                    discovered = resolvedCandidates,
-                    dataFilesByName = dataFilesByName,
-                    onProgress = onProgress
-                )
-            }.getOrDefault(emptyList())
-
-            if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty() || importedSdPacks.isNotEmpty() || importedNextGenBcdSlots.isNotEmpty()) {
+            if (importedSlots.isNotEmpty() || rawAuxiliaryOnnx.isNotEmpty() || importedSdPacks.isNotEmpty()) {
                 saveLinkedModelsFolderUri(context, treeUri)
             }
-            Result.success(
-                FolderAutoImportReport(
-                    importedSlots = importedSlots,
-                    importedSdPacks = importedSdPacks,
-                    skippedAuxiliaryCount = skippedAux,
-                    importedNextGenBcdSlots = importedNextGenBcdSlots
-                )
-            )
+            Result.success(importedSlots)
         } catch (oom: OutOfMemoryError) {
             clearCachedSessions()
             System.gc()
@@ -1452,13 +1480,30 @@ object OnnxProtobufInspector {
                 "hyperswap_1b_256.onnx",
                 "hyperswap_1a_256.onnx",
                 "hyperswap_1c_256.onnx",
+                "simswap_unofficial_512.onnx",
+                "simswap_512.onnx",
+                "simswap_256.onnx",
+                "reswapper_256.onnx",
                 "inswapper_128.onnx",
                 "inswapper_128_fp16.onnx"
+            ),
+            ModelSlot.FACE_OCCLUDER to listOf(
+                "face_occluder.onnx",
+                "xseg_3.onnx",
+                "xseg_2.onnx",
+                "xseg_1.onnx",
+                "dfl_xseg.onnx"
             ),
             ModelSlot.SEGMENTATION to listOf("segformer_B5_ce.onnx", "bisenet.onnx", "face_parsing.onnx"),
             ModelSlot.MATTING to listOf("modnet.onnx", "stylematte_synth.onnx"),
             ModelSlot.INPAINTING to listOf("lama_fp32.onnx", "big-lama.onnx", "lama.onnx"),
-            ModelSlot.ENHANCEMENT to listOf("gfpgan_1.4.onnx", "codeformer.onnx"),
+            ModelSlot.ENHANCEMENT to listOf(
+                "gfpgan_1.4.onnx",
+                "codeformer.onnx",
+                "gpen_bfr_512.onnx",
+                "gpen_bfr_256.onnx",
+                "restoreformer_plus_plus.onnx"
+            ),
             ModelSlot.DEPTH to listOf(
                 "depth_anything_v2_small.onnx",
                 "depth_anything_v2_fp16.onnx",
@@ -1562,15 +1607,22 @@ object OnnxProtobufInspector {
         return try {
             val root = getModelsRootDir(context)
             val subDir = File(root, slot.subdirectory).apply { if (!exists()) mkdirs() }
-            val targetName = overrideFileName ?: if (slot == ModelSlot.DEPTH) {
-                val pickedName = queryDisplayName(context, uri)
-                if (!pickedName.isNullOrBlank()) {
-                    DepthEstimationEngine.canonicalImportedFileName(pickedName, "depth")
+            val pickedNameForNaming = queryDisplayName(context, uri)
+            val targetName = overrideFileName ?: when (slot) {
+                ModelSlot.DEPTH -> if (!pickedNameForNaming.isNullOrBlank()) {
+                    DepthEstimationEngine.canonicalImportedFileName(pickedNameForNaming, "depth")
                 } else {
                     slot.canonicalFileName
                 }
-            } else {
-                slot.canonicalFileName
+                ModelSlot.SWAPPER -> computeSwapTargetFileName(
+                    pickedNameForNaming.orEmpty(),
+                    slot.canonicalFileName
+                )
+                ModelSlot.ENHANCEMENT, ModelSlot.FACE_OCCLUDER -> sanitizeImportedFileName(
+                    pickedNameForNaming,
+                    slot.canonicalFileName
+                )
+                else -> slot.canonicalFileName
             }
             val destFile = File(subDir, targetName)
             val tempFile = File(subDir, "$targetName.tmp")
@@ -1594,13 +1646,8 @@ object OnnxProtobufInspector {
                 error("Selected file is too small (${tempFile.length()} bytes) to be a valid ONNX model.")
             }
 
-            if (slot == ModelSlot.SWAPPER) {
-                // Remove any older swapper variant in this subdirectory so resolveModelFile picks the newly imported one
-                subDir.listFiles()?.forEach { f ->
-                    if (f.isFile && f.name.endsWith(".onnx") && f.name != tempFile.name && f.name != destFile.name) {
-                        f.delete()
-                    }
-                }
+            if (slot == ModelSlot.SWAPPER && targetName.lowercase().contains("inswapper")) {
+                // Invalidate cached emap only when importing/updating an InSwapper model so sibling models stay intact
                 File(root, EMAP_CACHE_FILE).delete()
                 File(root, EMAP_META_FILE).delete()
             }
@@ -1731,6 +1778,8 @@ object OnnxProtobufInspector {
             cacheFile.length() == EMAP_BYTES.toLong() &&
             (!metaFile.exists() || runCatching { metaFile.readText() }.getOrNull() == expectedSig)
 
+        val installedVariants = listSlotVariantFiles(context, slot).map { it.name }
+
         return OnnxModelInspection(
             slot = slot,
             isPresent = true,
@@ -1744,7 +1793,8 @@ object OnnxProtobufInspector {
             runtimeInputs = runtimeInputs,
             runtimeOutputs = runtimeOutputs,
             hasEmbeddedEmap512x512 = hasEmap,
-            verificationNote = ortNote
+            verificationNote = ortNote,
+            installedVariants = installedVariants
         )
     }
 
@@ -1776,6 +1826,9 @@ object OnnxProtobufInspector {
             ModelSlot.HEAD_POSE -> listOf(
                 TensorDescriptor("input", "FLOAT", listOf(1, 3, 224, 224))
             )
+            ModelSlot.FACE_OCCLUDER -> listOf(
+                TensorDescriptor("in_face", "FLOAT", listOf(1, 256, 256, 3))
+            )
         }
     }
 
@@ -1797,6 +1850,7 @@ object OnnxProtobufInspector {
             ModelSlot.FACE_REAGING -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3, 512, 512)))
             ModelSlot.FACE_MESH_3D -> listOf(TensorDescriptor("landmarks", "FLOAT", listOf(1, 1404)))
             ModelSlot.HEAD_POSE -> listOf(TensorDescriptor("output", "FLOAT", listOf(1, 3)))
+            ModelSlot.FACE_OCCLUDER -> listOf(TensorDescriptor("out_mask", "FLOAT", listOf(1, 256, 256, 1)))
         }
     }
 

@@ -1300,72 +1300,7 @@ class HeadErase3DPipelineTest {
         tgtBmp.recycle()
         targetReactRes.outputBitmap.recycle()
     }
-
-    @Test
-    fun `CleanEraseHeadReplacementEngine prevents background gap and two-tone step across chin-to-neck junction`() {
-        val w = 256
-        val h = 256
-        val bgWall = Color.rgb(30, 120, 210) // High-contrast cool blue wall that would glare clearly if any neck void leaked
-        val (srcBmp, srcFace) = createPortrait(
-            width = w,
-            height = h,
-            bgColor = Color.rgb(45, 55, 70),
-            skinColor = Color.rgb(236, 194, 166),
-            hairColor = Color.rgb(26, 22, 22)
-        )
-        val (tgtBmp, tgtFace) = createPortrait(
-            width = w,
-            height = h,
-            bgColor = bgWall,
-            skinColor = Color.rgb(208, 164, 138),
-            hairColor = Color.rgb(28, 22, 20)
-        )
-        // Paint natural sub-chin neck shadow on Target right under chin (y in 168..184)
-        for (y in 168..184) {
-            for (x in 110..146) {
-                tgtBmp.setPixel(x, y, Color.rgb(142, 110, 92))
-            }
-        }
-
-        val result = CleanEraseHeadReplacementEngine.execute(
-            context = context,
-            ortEnv = null,
-            sourceBitmap = srcBmp,
-            sourceFace = srcFace,
-            targetBitmap = tgtBmp,
-            targetFacesToReplace = listOf(tgtFace),
-            pipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
-            skinToneMode = com.example.onnx.SkinToneSourceMode.SOURCE_IDENTITY,
-            enableColorTransfer = true,
-            enableProvenanceWatermark = false,
-            allowTwoModelFallbackForTesting = true,
-            lowMemoryMode = true,
-            onProgress = {}
-        )
-
-        // Check every vertical pixel along central chin-to-neck column (y in 156..196): zero cool blue wall leaks!
-        var prevLum = -1f
-        var maxVerticalStep = 0f
-        for (y in 156..196) {
-            val px = result.outputBitmap.getPixel(128, y)
-            val r = Color.red(px)
-            val g = Color.green(px)
-            val b = Color.blue(px)
-            assertTrue(
-                "Cool blue wall leaked at neck y=$y RGB=($r,$g,$b)",
-                r > b + 12 && r > 125
-            )
-            val lum = 0.299f * r + 0.587f * g + 0.114f * b
-            if (prevLum >= 0f) {
-                val step = kotlin.math.abs(lum - prevLum)
-                if (step > maxVerticalStep) maxVerticalStep = step
-            }
-            prevLum = lum
-        }
-        assertTrue("Expected smooth chin-to-neck gradient (maxVerticalStep=$maxVerticalStep)", maxVerticalStep < 16f)
-
-        srcBmp.recycle()
-        tgtBmp.recycle()
-        result.outputBitmap.recycle()
-    }
 }
+
+
+

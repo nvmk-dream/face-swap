@@ -12,7 +12,6 @@ import android.graphics.Paint
 import android.graphics.PointF
 import android.graphics.RectF
 import java.io.File
-import java.nio.DoubleBuffer
 import java.nio.FloatBuffer
 import java.nio.ShortBuffer
 import kotlin.math.abs
@@ -1360,227 +1359,6 @@ object FaceBlender {
     }
 
     /**
-     * Runs `codeformer.onnx` ([1, 3, 512, 512] in [-1, 1] + scalar fidelity weight `w`) ONLY for
-     * Option B+C and Option D. Supports DOUBLE/FLOAT/FLOAT16 scalar/1D `w` tensors cleanly.
-     */
-    fun runCodeFormerSession512(
-        ortEnv: OrtEnvironment,
-        session: OrtSession,
-        crop128Or512: Bitmap,
-        fidelityWeight: Double = 0.60
-    ): Bitmap? {
-        val inputsMap = session.inputInfo
-        val imageEntry = inputsMap.entries.firstOrNull { (_, node) ->
-            (node.info as? TensorInfo)?.shape?.size == 4
-        } ?: inputsMap.entries.firstOrNull() ?: return null
-
-        val imageInputName = imageEntry.key
-        val inInfo = imageEntry.value.info as? TensorInfo
-        val inShape = inInfo?.shape ?: longArrayOf(1L, 3L, HD_SIZE.toLong(), HD_SIZE.toLong())
-        val isNhwcIn = inShape.size == 4 && inShape[3] == 3L && inShape[1] != 3L
-        val rawH = if (inShape.size == 4) (if (isNhwcIn) inShape[1] else inShape[2]) else HD_SIZE.toLong()
-        val modelSize = if (rawH > 0L) rawH.toInt().coerceIn(128, 1024) else HD_SIZE
-
-        val hw = modelSize * modelSize
-        val pixels = if (modelSize == HD_SIZE) {
-            upscaleBitmapBicubicTo512(crop128Or512)
-        } else {
-            val scaled = Bitmap.createScaledBitmap(crop128Or512, modelSize, modelSize, true)
-            IntArray(hw).also { scaled.getPixels(it, 0, modelSize, 0, 0, modelSize, modelSize); scaled.recycle() }
-        }
-
-        val floatInput = NextGenBcdHelper.encodeImageFloats(
-            pixels = pixels,
-            hw = hw,
-            isNhwc = isNhwcIn,
-            useBgr = false,
-            normMode = NextGenInputNormMode.SIGNED_MINUS1_TO_1
-        )
-        val tensorShape = if (isNhwcIn) {
-            longArrayOf(1L, modelSize.toLong(), modelSize.toLong(), 3L)
-        } else {
-            longArrayOf(1L, 3L, modelSize.toLong(), modelSize.toLong())
-        }
-        val inTensor = if (inInfo?.type == OnnxJavaType.FLOAT16) {
-            val shorts = ShortArray(3 * hw) { idx -> DepthEstimationEngine.floatToFloat16(floatInput[idx]) }
-            OnnxTensor.createTensor(ortEnv, ShortBuffer.wrap(shorts), tensorShape, OnnxJavaType.FLOAT16)
-        } else {
-            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floatInput), tensorShape)
-        }
-
-        // CodeFormer fidelity weight input ('w'), typically DOUBLE scalar/[]/[1] or FLOAT scalar/[]/[1]
-        val wEntry = inputsMap.entries.firstOrNull { (k, _) -> k != imageInputName }
-        var wTensor: OnnxTensor? = null
-        if (wEntry != null) {
-            val wInfo = wEntry.value.info as? TensorInfo
-            val rawWShape = wInfo?.shape ?: longArrayOf(1L)
-            val effectiveWShape = when {
-                rawWShape.isEmpty() -> longArrayOf()
-                else -> LongArray(rawWShape.size) { 1L }
-            }
-            val safeW = fidelityWeight.coerceIn(0.1, 1.0)
-            wTensor = when (wInfo?.type) {
-                OnnxJavaType.FLOAT -> OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floatArrayOf(safeW.toFloat())), effectiveWShape)
-                OnnxJavaType.FLOAT16 -> OnnxTensor.createTensor(
-                    ortEnv,
-                    ShortBuffer.wrap(shortArrayOf(DepthEstimationEngine.floatToFloat16(safeW.toFloat()))),
-                    effectiveWShape,
-                    OnnxJavaType.FLOAT16
-                )
-                OnnxJavaType.DOUBLE -> OnnxTensor.createTensor(ortEnv, DoubleBuffer.wrap(doubleArrayOf(safeW)), effectiveWShape)
-                else -> OnnxTensor.createTensor(ortEnv, DoubleBuffer.wrap(doubleArrayOf(safeW)), effectiveWShape)
-            }
-        }
-
-        val outPixels = IntArray(hw)
-        var introducedNeonRed = 0
-        var introducedBlack = 0
-        var nanFloats = 0
-        try {
-            val feedMap = buildMap<String, OnnxTensor> {
-                put(imageInputName, inTensor)
-                if (wEntry != null && wTensor != null) {
-                    put(wEntry.key, wTensor)
-                }
-            }
-            session.run(feedMap).use { res ->
-                val outT = res[0] as OnnxTensor
-                val outInfo = outT.info
-                val outShape = outInfo.shape
-                val isNhwcOut = outShape.size == 4 && outShape[3] == 3L && outShape[1] != 3L
-                val outFloats = FloatArray(3 * hw)
-                if (outInfo.type == OnnxJavaType.FLOAT16) {
-                    val sb = outT.shortBuffer
-                    val count = min(sb.remaining(), outFloats.size)
-                    for (i in 0 until count) {
-                        outFloats[i] = DepthEstimationEngine.float16ToFloat(sb.get())
-                    }
-                } else {
-                    val fb = outT.floatBuffer
-                    fb.get(outFloats, 0, min(fb.remaining(), outFloats.size))
-                }
-
-                var minV = Float.MAX_VALUE
-                var maxV = -Float.MAX_VALUE
-                for (v in outFloats) {
-                    if (!v.isFinite()) {
-                        nanFloats++
-                    } else {
-                        if (v < minV) minV = v
-                        if (v > maxV) maxV = v
-                    }
-                }
-                if (nanFloats > hw / 50) return null
-                val isUnsigned01 = minV >= -0.05f && maxV <= 1.25f
-                val is255 = maxV > 2.5f
-
-                for (i in 0 until hw) {
-                    val frRaw = if (isNhwcOut) outFloats[i * 3] else outFloats[i]
-                    val fgRaw = if (isNhwcOut) outFloats[i * 3 + 1] else outFloats[hw + i]
-                    val fbRaw = if (isNhwcOut) outFloats[i * 3 + 2] else outFloats[2 * hw + i]
-                    val fr = if (frRaw.isFinite()) frRaw else 0f
-                    val fg = if (fgRaw.isFinite()) fgRaw else 0f
-                    val fb = if (fbRaw.isFinite()) fbRaw else 0f
-
-                    val r: Int
-                    val g: Int
-                    val b: Int
-                    when {
-                        is255 -> {
-                            r = fr.toInt().coerceIn(0, 255)
-                            g = fg.toInt().coerceIn(0, 255)
-                            b = fb.toInt().coerceIn(0, 255)
-                        }
-                        isUnsigned01 -> {
-                            r = (fr.coerceIn(0f, 1f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                            g = (fg.coerceIn(0f, 1f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                            b = (fb.coerceIn(0f, 1f) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                        }
-                        else -> {
-                            r = (((fr * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                            g = (((fg * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                            b = (((fb * 0.5f + 0.5f).coerceIn(0f, 1f)) * 255.0f + 0.5f).toInt().coerceIn(0, 255)
-                        }
-                    }
-                    outPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-
-                    val inC = pixels[i]
-                    val inR = (inC ushr 16) and 0xFF
-                    val inG = (inC ushr 8) and 0xFF
-                    val inB = inC and 0xFF
-                    val inLum = 0.299f * inR + 0.587f * inG + 0.114f * inB
-                    if ((r - g >= 72) && (r - b >= 72) && (inR - inG < 48)) {
-                        introducedNeonRed++
-                    }
-                    if (r <= 8 && g <= 8 && b <= 8 && inLum > 48f) {
-                        introducedBlack++
-                    }
-                }
-            }
-        } finally {
-            runCatching { inTensor.close() }
-            runCatching { wTensor?.close() }
-        }
-        if ((introducedNeonRed + introducedBlack).toFloat() / hw.toFloat() > 0.025f) {
-            return null
-        }
-        val restored = Bitmap.createBitmap(modelSize, modelSize, Bitmap.Config.ARGB_8888)
-        restored.setPixels(outPixels, 0, modelSize, 0, 0, modelSize, modelSize)
-        if (modelSize == HD_SIZE) return restored
-        val resized512 = Bitmap.createScaledBitmap(restored, HD_SIZE, HD_SIZE, true)
-        restored.recycle()
-        return resized512
-    }
-
-    /**
-     * Option B+C & D Next-Gen Enhancer: runs dedicated `codeformer.onnx` with fidelity weight `w`
-     * if installed, falling back cleanly to `gfpgan_1.4.onnx` if CodeFormer is absent or fails.
-     * Returns `(restoredBitmap, usedCodeFormer)`.
-     */
-    fun runNextGenCodeFormerOrGfpgan512(
-        ortEnv: OrtEnvironment?,
-        codeformerFile: File?,
-        gfpganFile: File?,
-        crop128Or512: Bitmap,
-        enhancementStrength: Float,
-        preferHardwareAccel: Boolean = false,
-        preloadedGfpganSession: OrtSession? = null
-    ): Pair<Bitmap?, Boolean> {
-        if (ortEnv == null) return null to false
-        if (codeformerFile != null && codeformerFile.exists() && codeformerFile.length() > 1024L) {
-            val fidelity = NextGenBcdHelper.computeCodeFormerFidelityWeight(enhancementStrength)
-            val cfBmp = runCatching {
-                val cached = OnnxProtobufInspector.getOrCreateCachedSession(
-                    ortEnv = ortEnv,
-                    file = codeformerFile,
-                    preferHardwareAcceleration = preferHardwareAccel
-                )
-                if (cached != null) {
-                    runCodeFormerSession512(ortEnv, cached, crop128Or512, fidelity)
-                } else {
-                    val (session, _) = OnnxProtobufInspector.createSessionWithFallback(
-                        ortEnv = ortEnv,
-                        modelFile = codeformerFile,
-                        preferHardwareAcceleration = preferHardwareAccel
-                    )
-                    session.use { s -> runCodeFormerSession512(ortEnv, s, crop128Or512, fidelity) }
-                }
-            }.getOrNull()
-            if (cfBmp != null) {
-                return cfBmp to true
-            }
-        }
-        val gfpFallback = runOptionalGfpganEnhancement512(
-            ortEnv = ortEnv,
-            gfpganFile = gfpganFile,
-            crop128Or512 = crop128Or512,
-            preferHardwareAccel = preferHardwareAccel,
-            preloadedGfpganSession = preloadedGfpganSession
-        )
-        return gfpFallback to false
-    }
-
-    /**
      * Online AI Photo Style 512x512 HD Super-Resolution & Seamless Blending Pipeline:
      *  1. Upscales the cleaned 128x128 face crop to 512x512 HD (using `gfpgan_1.4.onnx` if installed
      *     or smooth bicubic/bilinear scaling).
@@ -1638,10 +1416,9 @@ object FaceBlender {
         faceReagingFile: File? = null,
         sourceDetectedFace: DetectedFace? = null,
         targetDetectedFace: DetectedFace? = null,
-        useNextGenSwapStack: Boolean = false,
-        codeformerFile: File? = null,
-        xsegOccluderFile: File? = null,
-        onEnhancerEngineReported: ((String) -> Unit)? = null
+        optionDConfig: OptionDFaceFusionConfig = OptionDFaceFusionConfig(),
+        optionDOccluderFile: File? = null,
+        onOptionDEnhancerUsed: ((String) -> Unit)? = null
     ): Bitmap {
         val isCleanIdentityOptionB = !identityPreservationMode &&
             (swapStrategyOption == FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY)
@@ -1653,7 +1430,6 @@ object FaceBlender {
         val geom512 = computeWarpedGeometry(m128, targetLandmarks5, scale = 4.0f)
 
         // Optional Neural Occlusion Gate via segformer_B5_ce.onnx and/or Depth Anything V2 / sentis-MiDaS
-        // (Plus dedicated XSeg / face_occluder ONLY when useNextGenSwapStack == true for Option B+C & D)
         val tMask0 = System.currentTimeMillis()
         val segOcclusionGate512 = if (enableOcclusionProtection && (preloadedSegformerSession != null || segformerFile != null)) {
             HeadSegmentationAndInpainting.computeFaceOcclusionGate512(
@@ -1662,14 +1438,6 @@ object FaceBlender {
                 segModelFile = segformerFile,
                 preferHardwareAccel = preferHardwareAccel,
                 preloadedSegformerSession = preloadedSegformerSession
-            )
-        } else null
-        val xsegOcclusionGate512 = if (useNextGenSwapStack && enableOcclusionProtection && xsegOccluderFile != null) {
-            HeadSegmentationAndInpainting.computeXsegOccluderGate512(
-                ortEnv = ortEnv,
-                alignedTarget512 = alignedTarget512,
-                occluderFile = xsegOccluderFile,
-                preferHardwareAccel = preferHardwareAccel
             )
         } else null
         val depthOcclusionGate512 = if (enableOcclusionProtection && depthMap != null) {
@@ -1688,12 +1456,29 @@ object FaceBlender {
                 )
             }.getOrNull()
         } else null
-        val neuralOcclusionGate512 = listOfNotNull(
-            xsegOcclusionGate512,
-            segOcclusionGate512,
-            depthOcclusionGate512
-        ).reduceOrNull { acc, gate ->
-            FloatArray(acc.size) { i -> min(acc[i], gate[i]) }
+        val xsegOcclusionGate512 = if (!identityPreservationMode &&
+            swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT &&
+            enableOcclusionProtection &&
+            optionDOccluderFile != null
+        ) {
+            FaceFusionOptionDEngine.computeXsegOcclusionGate512(
+                ortEnv = ortEnv,
+                alignedTarget512 = alignedTarget512,
+                occluderFile = optionDOccluderFile,
+                preferHardwareAccel = preferHardwareAccel
+            )
+        } else null
+        val combinedSegDepthGate = when {
+            segOcclusionGate512 != null && depthOcclusionGate512 != null ->
+                FloatArray(segOcclusionGate512.size) { i -> min(segOcclusionGate512[i], depthOcclusionGate512[i]) }
+            segOcclusionGate512 != null -> segOcclusionGate512
+            else -> depthOcclusionGate512
+        }
+        val neuralOcclusionGate512 = when {
+            combinedSegDepthGate != null && xsegOcclusionGate512 != null ->
+                FloatArray(combinedSegDepthGate.size) { i -> min(combinedSegDepthGate[i], xsegOcclusionGate512[i]) }
+            xsegOcclusionGate512 != null -> xsegOcclusionGate512
+            else -> combinedSegDepthGate
         }
         var maskGenMs = (System.currentTimeMillis() - tMask0).coerceAtLeast(0L)
 
@@ -1709,21 +1494,26 @@ object FaceBlender {
 
         val clampedEnhance = enhancementStrength.coerceIn(0f, 1f)
         val tRestore0 = System.currentTimeMillis()
-        var usedCodeFormer = false
-        val gfp512 = if (!identityPreservationMode && clampedEnhance > 0.05f) {
-            if (useNextGenSwapStack) {
-                val (restoredBmp, cfUsed) = runNextGenCodeFormerOrGfpgan512(
+        val gfp512 = if (!identityPreservationMode && clampedEnhance > 0.05f && (preloadedGfpganSession != null || gfpganFile != null)) {
+            if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
+                val optDEnh = FaceFusionOptionDEngine.runOptionDEnhancer512(
                     ortEnv = ortEnv,
-                    codeformerFile = codeformerFile,
-                    gfpganFile = gfpganFile,
-                    crop128Or512 = activeSwapCrop,
-                    enhancementStrength = clampedEnhance,
+                    enhancerFile = gfpganFile,
+                    crop128To512 = activeSwapCrop,
+                    codeformerFidelity = optionDConfig.codeformerFidelity,
                     preferHardwareAccel = preferHardwareAccel,
-                    preloadedGfpganSession = preloadedGfpganSession
+                    preloadedSession = preloadedGfpganSession
                 )
-                usedCodeFormer = cfUsed
-                restoredBmp
-            } else if (preloadedGfpganSession != null || gfpganFile != null) {
+                if (optDEnh != null) {
+                    val label = if (optDEnh.isCodeFormer) {
+                        "${optDEnh.usedEnhancerFileName} (w=${"%.2f".format(optDEnh.appliedFidelityW)})"
+                    } else {
+                        optDEnh.usedEnhancerFileName
+                    }
+                    onOptionDEnhancerUsed?.invoke(label)
+                }
+                optDEnh?.restored512
+            } else {
                 runOptionalGfpganEnhancement512(
                     ortEnv = ortEnv,
                     gfpganFile = gfpganFile,
@@ -1731,16 +1521,9 @@ object FaceBlender {
                     preferHardwareAccel = preferHardwareAccel,
                     preloadedGfpganSession = preloadedGfpganSession
                 )
-            } else null
+            }
         } else null
         onGfpganUsed?.invoke(gfp512 != null)
-        onEnhancerEngineReported?.invoke(
-            when {
-                usedCodeFormer -> "CodeFormer"
-                gfp512 != null -> "GFPGAN"
-                else -> "Bicubic"
-            }
-        )
 
         val total512 = HD_SIZE * HD_SIZE
         // Upscale swapped crop (128x128 or 256x256) to 512x512 using sharp 4x4 Catmull-Rom Bicubic interpolation
@@ -1766,9 +1549,7 @@ object FaceBlender {
             gfp512.recycle()
             // Controlled Enhancer: for Clean Option B keep GFPGAN subtle (<=0.16 on 256px, <=0.30 on 128px)
             // so Source eye/brow/lip identity is never smoothed into a generic GFPGAN template.
-            val gfpBaseWeight = if (usedCodeFormer) {
-                (0.28f + 0.22f * clampedEnhance).coerceIn(0f, 0.50f)
-            } else if (isCleanIdentityOptionB) {
+            val gfpBaseWeight = if (isCleanIdentityOptionB) {
                 if (activeSwapCrop.width >= 256) {
                     (0.04f + 0.12f * clampedEnhance).coerceIn(0f, 0.16f)
                 } else {
@@ -2268,7 +2049,7 @@ object FaceBlender {
      * Upscales any 128x128 or 256x256 face crop to 512x512 HD using 4x4 Catmull-Rom Bicubic interpolation
      * instead of blurry bilinear scaling.
      */
-    private fun upscaleBitmapBicubicTo512(src: Bitmap): IntArray {
+    internal fun upscaleBitmapBicubicTo512(src: Bitmap): IntArray {
         val w = src.width
         val h = src.height
         val out = IntArray(HD_SIZE * HD_SIZE)
@@ -3358,26 +3139,23 @@ object FaceBlender {
                     // if Source jaw extends below Target's chin contour into neck shadow, taper alpha smoothly;
                     // Option D uses K/L Ear-to-Chin arc strength specifically along the lower jawline-to-neck seam.
                     val chinStartRatio = when {
-                        isCleanOptionB -> 0.90f
                         optionDJawFuller -> 0.88f
                         swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT -> 0.80f
-                        isNeuralSwap -> 0.86f
+                        isNeuralSwap -> 0.82f
                         else -> 0.72f
                     }
                     val lumThresh = when {
                         optionDJawFuller -> 34f
-                        isNeuralSwap -> 32f
+                        isNeuralSwap -> 22f
                         else -> 16f
                     }
-                    val maxJawFade = if (isNeuralSwap && swapStrategyOption != FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) 0.55f else 0.80f
                     if (localY > chinStartRatio * radiusYBottom && abs(sLum - tLum) > lumThresh) {
-                        val jawMismatch = ((abs(sLum - tLum) - lumThresh) / 38f).coerceIn(0f, 1f)
+                        val jawMismatch = ((abs(sLum - tLum) - lumThresh) / 40f).coerceIn(0f, 1f)
                         val chinFade = (((localY / radiusYBottom) - chinStartRatio) / (1.0f - chinStartRatio)).coerceIn(0f, 1f)
                         val klExtra = if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT && !optionDJawFuller) {
                             ((optionDFit?.klArcNeckBlendStrength ?: 0.28f) * 0.32f).coerceIn(0f, 0.20f)
                         } else 0f
-                        val cap = (maxJawFade + klExtra).coerceIn(0f, 0.88f)
-                        alpha *= (1.0f - (jawMismatch * chinFade * cap).coerceIn(0f, cap))
+                        alpha *= (1.0f - (jawMismatch * chinFade * (0.80f + klExtra)).coerceIn(0f, 0.88f))
                     }
                 }
 

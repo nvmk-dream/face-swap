@@ -75,8 +75,6 @@ import com.example.onnx.AccessoryTarget
 import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.InpaintModelOption
 import com.example.onnx.ModelSlot
-import com.example.onnx.OutpaintExtendPreset
-import com.example.onnx.SdInpaintPackType
 import com.example.onnx.SkinToneSourceMode
 import com.example.ui.FaceSwapUiState
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -91,6 +89,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import com.example.onnx.OptionDEnhancerChoice
+import com.example.onnx.OptionDSwapperChoice
 import com.example.ui.OutputResolutionOption
 import com.example.ui.ProcessingQualityLevel
 import com.example.ui.StudioMode
@@ -154,9 +154,6 @@ fun StudioTab(
     onSelectStudioSubPage: (StudioSubPage) -> Unit = {},
     onPickInpaintSourceFromFolder: () -> Unit = {},
     onSelectInpaintModelOption: (InpaintModelOption) -> Unit = {},
-    onUploadRealVisFp16Folder: () -> Unit = {},
-    onUploadSd15Fp16Folder: () -> Unit = {},
-    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onInpaintMaskUpdated: (android.graphics.Bitmap?) -> Unit = {},
@@ -173,10 +170,6 @@ fun StudioTab(
     onComputeAccessoryLayers: () -> Unit = {},
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onInpaintMaskAndPromptUpdated: (android.graphics.Bitmap?, String?) -> Unit = { bmp, _ -> onInpaintMaskUpdated(bmp) },
-    onInpaintCurvyAmountChanged: (Float) -> Unit = {},
-    onInpaintHipPositionChanged: (Float) -> Unit = {},
-    onSelectOutpaintExtendPreset: (OutpaintExtendPreset) -> Unit = {},
-    onResetBodyAndOutpaintEdits: () -> Unit = {},
     onRunInpaint: () -> Unit = {},
     onCancelInpaint: () -> Unit = {},
     onReuseInpaintResult: () -> Unit = {},
@@ -188,6 +181,10 @@ fun StudioTab(
     onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
     onConfirmSwapStrategySelection: () -> Unit = {},
     onDismissSwapStrategyPopup: () -> Unit = {},
+    onOptionDSwapperChoiceChanged: (OptionDSwapperChoice) -> Unit = {},
+    onOptionDEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit = {},
+    onOptionDCodeformerFidelityChanged: (Float) -> Unit = {},
+    onOptionDPixelBoostChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Front Page: Clean, focused UI matching the user's reference design
@@ -223,8 +220,10 @@ fun StudioTab(
             onRequestSwapStrategySelection = onRequestSwapStrategySelection,
             onConfirmSwapStrategySelection = onConfirmSwapStrategySelection,
             onDismissSwapStrategyPopup = onDismissSwapStrategyPopup,
-            onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
-            onDeleteSdInpaintPack = onDeleteSdInpaintPack,
+            onOptionDSwapperChoiceChanged = onOptionDSwapperChoiceChanged,
+            onOptionDEnhancerChoiceChanged = onOptionDEnhancerChoiceChanged,
+            onOptionDCodeformerFidelityChanged = onOptionDCodeformerFidelityChanged,
+            onOptionDPixelBoostChanged = onOptionDPixelBoostChanged,
             onOpenInpaintPage = {
                 onSelectStudioSubPage(StudioSubPage.INPAINT_PAGE)
             },
@@ -244,9 +243,6 @@ fun StudioTab(
             onPickSourceFromFolder = onPickInpaintSourceFromFolder,
             onSelectModelOption = onSelectInpaintModelOption,
             onImportModelFolder = onImportAllFromFolder,
-            onUploadRealVisFp16Folder = onUploadRealVisFp16Folder,
-            onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
-            onDeleteSdInpaintPack = onDeleteSdInpaintPack,
             onUploadClipTokenizer = onUploadClipTokenizer,
             onUploadSingleTokenizerFile = onUploadSingleTokenizerFile,
             onMaskUpdated = onInpaintMaskUpdated,
@@ -263,10 +259,6 @@ fun StudioTab(
             onComputeAccessoryLayers = onComputeAccessoryLayers,
             onApplyAccessorySelectionAndExpand = onApplyAccessorySelectionAndExpand,
             onMaskAndPromptUpdated = onInpaintMaskAndPromptUpdated,
-            onCurvyAmountChanged = onInpaintCurvyAmountChanged,
-            onHipPositionChanged = onInpaintHipPositionChanged,
-            onSelectOutpaintPreset = onSelectOutpaintExtendPreset,
-            onResetBodyAndOutpaint = onResetBodyAndOutpaintEdits,
             onCreateInpaint = onRunInpaint,
             onCancelInpaint = onCancelInpaint,
             onSaveToFolder = onSaveBitmapToFolder,

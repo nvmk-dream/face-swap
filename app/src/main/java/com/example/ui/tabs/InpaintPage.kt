@@ -95,13 +95,10 @@ import com.example.R
 import com.example.onnx.AccessoryTarget
 import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.InpaintModelOption
-import com.example.onnx.OutpaintExtendPreset
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.components.DrawMaskEditorDialog
-import com.example.ui.components.InpaintBodyAndOutpaintCard
-import com.example.ui.components.InpaintFolderAutoPickButton
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -147,9 +144,6 @@ fun InpaintPage(
     onPickSourceFromFolder: () -> Unit,
     onSelectModelOption: (InpaintModelOption) -> Unit,
     onImportModelFolder: () -> Unit,
-    onUploadRealVisFp16Folder: () -> Unit = {},
-    onUploadSd15Fp16Folder: () -> Unit = {},
-    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
     onUploadClipTokenizer: () -> Unit = {},
     onUploadSingleTokenizerFile: (String) -> Unit = {},
     onMaskUpdated: (Bitmap?) -> Unit,
@@ -166,10 +160,6 @@ fun InpaintPage(
     onComputeAccessoryLayers: () -> Unit = {},
     onApplyAccessorySelectionAndExpand: (Set<AccessoryTarget>, Float) -> Unit = { _, _ -> },
     onMaskAndPromptUpdated: (Bitmap?, String?) -> Unit = { bmp, _ -> onMaskUpdated(bmp) },
-    onCurvyAmountChanged: (Float) -> Unit = {},
-    onHipPositionChanged: (Float) -> Unit = {},
-    onSelectOutpaintPreset: (OutpaintExtendPreset) -> Unit = {},
-    onResetBodyAndOutpaint: () -> Unit = {},
     onCreateInpaint: () -> Unit,
     onCancelInpaint: () -> Unit = {},
     onSaveToFolder: (Bitmap) -> Unit,
@@ -268,22 +258,17 @@ fun InpaintPage(
                     contentAlignment = Alignment.Center
                 ) {
                     if (sourceBmp != null) {
-                        val previewScale = if (uiState.inpaintOutpaintPreset != OutpaintExtendPreset.NONE) {
-                            ContentScale.Fit
-                        } else {
-                            ContentScale.Crop
-                        }
                         Image(
                             bitmap = sourceBmp.asImageBitmap(),
                             contentDescription = "Inpaint Source Image",
-                            contentScale = previewScale,
+                            contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
                         if (maskBmp != null) {
                             Image(
                                 bitmap = maskBmp.asImageBitmap(),
                                 contentDescription = "Painted Inpaint Mask Overlay",
-                                contentScale = previewScale,
+                                contentScale = ContentScale.Crop,
                                 alpha = 0.55f,
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -384,7 +369,6 @@ fun InpaintPage(
 
                         val hasFp32 = SdInpaintPackType.SD15_FP32 in uiState.installedSdInpaintPacks
                         val hasInt8 = SdInpaintPackType.REALVIS_INT8 in uiState.installedSdInpaintPacks
-                        val hasRealVisFp16 = SdInpaintPackType.REALVIS_FP16 in uiState.installedSdInpaintPacks
                         val hasFp16 = SdInpaintPackType.SD15_FP16 in uiState.installedSdInpaintPacks
                         val hasLama = uiState.isLamaInpaintReady
 
@@ -393,8 +377,8 @@ fun InpaintPage(
                             onDismissRequest = { showModelDropdown = false }
                         ) {
                             ModelDropdownEntry(
-                                title = "Auto (FP32 / INT8 / RV-FP16 > FP16)",
-                                statusBadge = if (hasFp32 || hasInt8 || hasRealVisFp16 || hasFp16) "Priority" else "Coming Soon",
+                                title = "Auto (FP32 / INT8 > FP16)",
+                                statusBadge = if (hasFp32 || hasInt8 || hasFp16) "Priority" else "Coming Soon",
                                 selected = uiState.inpaintModelOption == InpaintModelOption.AUTO,
                                 enabled = true,
                                 onClick = {
@@ -419,16 +403,6 @@ fun InpaintPage(
                                 enabled = hasInt8,
                                 onClick = {
                                     onSelectModelOption(InpaintModelOption.REALVIS_INT8)
-                                    showModelDropdown = false
-                                }
-                            )
-                            ModelDropdownEntry(
-                                title = "Realistic Vision V5.1 (FP16)",
-                                statusBadge = if (hasRealVisFp16) "Photoreal • Ready" else "Missing",
-                                selected = uiState.inpaintModelOption == InpaintModelOption.REALVIS_FP16,
-                                enabled = hasRealVisFp16,
-                                onClick = {
-                                    onSelectModelOption(InpaintModelOption.REALVIS_FP16)
                                     showModelDropdown = false
                                 }
                             )
@@ -473,7 +447,7 @@ fun InpaintPage(
                                 },
                                 text = {
                                     Text(
-                                        text = "Folder Auto-Pick (.onnx / SD Pack)",
+                                        text = "Import Model Folder (FP16 / INT8)",
                                         fontWeight = FontWeight.Bold,
                                         color = Color(0xFF0284C7),
                                         fontSize = 13.sp
@@ -482,58 +456,6 @@ fun InpaintPage(
                                 onClick = {
                                     showModelDropdown = false
                                     onImportModelFolder()
-                                }
-                            )
-                            DropdownMenuItem(
-                                modifier = Modifier.testTag("inpaint_dropdown_upload_realvis_fp16"),
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.UploadFile,
-                                        contentDescription = "Upload Realistic Vision V5.1 FP16 Folder",
-                                        tint = Color(0xFF4F46E5)
-                                    )
-                                },
-                                text = {
-                                    Text(
-                                        text = if (hasRealVisFp16) {
-                                            "RealVis V5.1 (FP16) [Inpaint] ✓ Replace"
-                                        } else {
-                                            "Upload RealVis V5.1 (FP16) [Inpaint]"
-                                        },
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (hasRealVisFp16) Color(0xFF059669) else Color(0xFF4F46E5),
-                                        fontSize = 13.sp
-                                    )
-                                },
-                                onClick = {
-                                    showModelDropdown = false
-                                    onUploadRealVisFp16Folder()
-                                }
-                            )
-                            DropdownMenuItem(
-                                modifier = Modifier.testTag("inpaint_dropdown_upload_sd15_fp16"),
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.UploadFile,
-                                        contentDescription = "Upload SD 1.5 Inpaint FP16 Folder",
-                                        tint = Color(0xFF0369A1)
-                                    )
-                                },
-                                text = {
-                                    Text(
-                                        text = if (hasFp16) {
-                                            "SD 1.5 Inpaint (FP16) [FaceSwap] ✓ Replace"
-                                        } else {
-                                            "Upload SD 1.5 (FP16) [FaceSwap Seam]"
-                                        },
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (hasFp16) Color(0xFF059669) else Color(0xFF0369A1),
-                                        fontSize = 13.sp
-                                    )
-                                },
-                                onClick = {
-                                    showModelDropdown = false
-                                    onUploadSd15Fp16Folder()
                                 }
                             )
                             DropdownMenuItem(
@@ -731,18 +653,6 @@ fun InpaintPage(
                 }
             }
 
-            // Prominent 1-Tap Folder Auto-Pick (.onnx & SD 1.5 Pack) + Dedicated RealVis V5.1 (FP16) Slot
-            InpaintFolderAutoPickButton(
-                isBusy = uiState.isInspectingModels,
-                installedPacksCount = uiState.installedSdInpaintPacks.size,
-                onAutoPickFolder = onImportModelFolder,
-                hasRealVisFp16Installed = SdInpaintPackType.REALVIS_FP16 in uiState.installedSdInpaintPacks,
-                onUploadRealVisFp16Folder = onUploadRealVisFp16Folder,
-                onClearRealVisFp16Pack = {
-                    onDeleteSdInpaintPack(SdInpaintPackType.REALVIS_FP16)
-                }
-            )
-
             val usesSdPack = uiState.installedSdInpaintPacks.isNotEmpty() &&
                 uiState.inpaintModelOption != InpaintModelOption.LAMA_ONNX &&
                 uiState.inpaintModelOption != InpaintModelOption.CV_FALLBACK
@@ -766,20 +676,6 @@ fun InpaintPage(
                 frostedBorderColor = frostedBorderColor,
                 darkSlate = darkSlate,
                 mutedSlate = mutedSlate
-            )
-
-            // 100% Offline Curvy Body Reshape + Half->Full Body Outpaint Card
-            InpaintBodyAndOutpaintCard(
-                hasSourceImage = uiState.inpaintSourceBitmap != null,
-                curvyAmount = uiState.inpaintCurvyAmount,
-                hipPositionRatio = uiState.inpaintHipPositionRatio,
-                outpaintPreset = uiState.inpaintOutpaintPreset,
-                hasSdPackInstalled = uiState.installedSdInpaintPacks.isNotEmpty(),
-                isAdjusting = uiState.isAdjustingBodyShape,
-                onCurvyAmountChanged = onCurvyAmountChanged,
-                onHipPositionChanged = onHipPositionChanged,
-                onSelectOutpaintPreset = onSelectOutpaintPreset,
-                onResetEdits = onResetBodyAndOutpaint
             )
 
             // Prompt Header Row: "Prompt" left | "Fast Mode" + Switch right

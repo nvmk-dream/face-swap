@@ -16,6 +16,7 @@ import com.example.onnx.CraniofacialAnalyzer
 import com.example.onnx.CraniofacialPairReport
 import com.example.onnx.DetectedFace
 import com.example.onnx.FaceAlignment
+import com.example.onnx.FaceFusionOptionDEngine
 import com.example.onnx.FaceReactionSourceMode
 import com.example.onnx.FaceSwapStrategyOption
 import com.example.onnx.FaceSwapAndRestorationService
@@ -23,6 +24,9 @@ import com.example.onnx.FaceSwapExecutionResult
 import com.example.onnx.HeadReplacementPipelineMode
 import com.example.onnx.HeadSegmentationAndInpainting
 import com.example.onnx.InpaintModelOption
+import com.example.onnx.OptionDEnhancerChoice
+import com.example.onnx.OptionDFaceFusionConfig
+import com.example.onnx.OptionDSwapperChoice
 import com.example.onnx.DepthEstimationEngine
 import com.example.onnx.AccessoryMaskEngine
 import com.example.onnx.AccessoryMaskLayers
@@ -38,14 +42,9 @@ import com.example.onnx.OnnxProtobufInspector
 import com.example.onnx.OnnxRuntimeModelService
 import com.example.onnx.ClipTokenizerStatus
 import com.example.onnx.InstalledSdInpaintPack
-import com.example.onnx.NextGenBcdModelManager
-import com.example.onnx.NextGenBcdModelsState
-import com.example.onnx.NextGenBcdSlot
 import com.example.onnx.SdInpaintOnnxEngine
 import com.example.onnx.SdInpaintPackManager
 import com.example.onnx.SdInpaintPackType
-import com.example.onnx.BodyReshapeAndOutpaintEngine
-import com.example.onnx.OutpaintExtendPreset
 import com.example.onnx.SkinToneSourceMode
 import com.example.onnx.SwapStageProgress
 import com.example.onnx.VisualValidationBenchmark
@@ -114,6 +113,12 @@ data class FaceSwapUiState(
     val studioMode: StudioMode = StudioMode.FACE_SWAP,
     val swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
     val pendingStrategyPopupOption: FaceSwapStrategyOption? = null,
+    val optionDSwapperChoice: OptionDSwapperChoice = OptionDSwapperChoice.AUTO,
+    val optionDEnhancerChoice: OptionDEnhancerChoice = OptionDEnhancerChoice.AUTO,
+    val optionDCodeformerFidelity: Float = 0.60f,
+    val optionDPixelBoostEnabled: Boolean = false,
+    val installedOptionDSwappers: List<String> = emptyList(),
+    val installedOptionDEnhancers: List<String> = emptyList(),
     val headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
     val qualityLevel: ProcessingQualityLevel = ProcessingQualityLevel.BALANCED,
     val outputResolution: OutputResolutionOption = OutputResolutionOption.ORIGINAL,
@@ -163,12 +168,7 @@ data class FaceSwapUiState(
     val lastAuditLogId: Int? = null,
     val showOriginalInComparison: Boolean = false,
     val inpaintSourceBitmap: Bitmap? = null,
-    val inpaintOriginalSourceBitmap: Bitmap? = null,
     val inpaintMaskBitmap: Bitmap? = null,
-    val inpaintCurvyAmount: Float = 0.0f,
-    val inpaintHipPositionRatio: Float = 0.64f,
-    val inpaintOutpaintPreset: OutpaintExtendPreset = OutpaintExtendPreset.NONE,
-    val isAdjustingBodyShape: Boolean = false,
     val inpaintPrompt: String = "",
     val inpaintNegativePrompt: String = SdInpaintOnnxEngine.DEFAULT_NEGATIVE_PROMPT,
     val inpaintFastMode: Boolean = true,
@@ -193,7 +193,6 @@ data class FaceSwapUiState(
     val installedSdInpaintPacks: List<SdInpaintPackType> = emptyList(),
     val installedSdPackDetails: List<InstalledSdInpaintPack> = emptyList(),
     val clipTokenizerStatus: ClipTokenizerStatus = ClipTokenizerStatus(),
-    val nextGenBcdState: NextGenBcdModelsState = NextGenBcdModelsState(),
     val isLamaInpaintReady: Boolean = false,
     val inpaintModelLabel: String = "Coming Soon",
     val statusBannerMessage: String? = null,
@@ -230,6 +229,9 @@ data class FaceSwapUiState(
 
     val isEnhancerReady: Boolean
         get() = modelInspections.any { it.slot == ModelSlot.ENHANCEMENT && it.isValidOnnx }
+
+    val isFaceOccluderReady: Boolean
+        get() = modelInspections.any { it.slot == ModelSlot.FACE_OCCLUDER && it.isValidOnnx }
 
     val isSdInpaintReady: Boolean
         get() = installedSdInpaintPacks.isNotEmpty()
@@ -278,7 +280,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
     @Volatile
     private var activeInpaintCancelToken = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeInpaintJob: kotlinx.coroutines.Job? = null
-    private var bodyReshapePreviewJob: kotlinx.coroutines.Job? = null
     private var pendingFolderSaveBitmap: Bitmap? = null
 
     val auditLogs: StateFlow<List<SwapAuditLog>> = auditRepository.allLogs.stateIn(
@@ -504,6 +505,22 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(headPipelineMode = mode) }
     }
 
+    fun setOptionDSwapperChoice(choice: OptionDSwapperChoice) {
+        _uiState.update { it.copy(optionDSwapperChoice = choice) }
+    }
+
+    fun setOptionDEnhancerChoice(choice: OptionDEnhancerChoice) {
+        _uiState.update { it.copy(optionDEnhancerChoice = choice) }
+    }
+
+    fun setOptionDCodeformerFidelity(fidelity: Float) {
+        _uiState.update { it.copy(optionDCodeformerFidelity = fidelity.coerceIn(0.0f, 1.0f)) }
+    }
+
+    fun setOptionDPixelBoostEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(optionDPixelBoostEnabled = enabled) }
+    }
+
     fun setQualityLevel(level: ProcessingQualityLevel) {
         _uiState.update {
             it.copy(
@@ -665,7 +682,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     memoryServiceState = it.memoryServiceState.copy(isLoading = true)
                 )
             }
-            val (inspections, memState, packDetails, tokStatusAndExtras) = withContext(Dispatchers.IO) {
+            val (inspections, memState, packDetails, tokStatusAndLama) = withContext(Dispatchers.IO) {
                 val ctx = getApplication<Application>()
                 val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                 val mem = modelService.loadModelsIntoMemory(
@@ -676,10 +693,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(ctx)
                 val lamaFile = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
                 val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
-                val nextGen = NextGenBcdModelManager.inspectAllSlots(ctx)
-                Quadruple(insp, mem, details, Triple(tokStatus, hasLama, nextGen))
+                Quadruple(insp, mem, details, tokStatus to hasLama)
             }
-            val (tokStatus, lamaReady, nextGenState) = tokStatusAndExtras
+            val (tokStatus, lamaReady) = tokStatusAndLama
             val sdPackTypes = packDetails.map { it.packType }
             val lamaFile = OnnxProtobufInspector.resolveModelFile(getApplication(), ModelSlot.INPAINTING)
             val resolvedOption = if (_uiState.value.inpaintModelOption == InpaintModelOption.AUTO) {
@@ -694,14 +710,17 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             )
             val runtimeLatched = OnnxProtobufInspector.isRuntimeLowRamLatched(getApplication())
             val runtimeLatchStage = OnnxProtobufInspector.getLastRuntimeCrashStage(getApplication())
+            val optDSwappers = inspections.firstOrNull { it.slot == ModelSlot.SWAPPER }?.installedVariants.orEmpty()
+            val optDEnhancers = inspections.firstOrNull { it.slot == ModelSlot.ENHANCEMENT }?.installedVariants.orEmpty()
             _uiState.update {
                 it.copy(
                     modelInspections = inspections,
                     memoryServiceState = memState,
+                    installedOptionDSwappers = optDSwappers,
+                    installedOptionDEnhancers = optDEnhancers,
                     installedSdInpaintPacks = sdPackTypes,
                     installedSdPackDetails = packDetails,
                     clipTokenizerStatus = tokStatus,
-                    nextGenBcdState = nextGenState,
                     isLamaInpaintReady = lamaReady,
                     inpaintModelOption = resolvedOption,
                     inpaintModelLabel = label,
@@ -783,15 +802,19 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     }
                     val importedInspection = inspections.firstOrNull { it.slot == slot }
                     val valid = importedInspection?.isValidOnnx == true
+                    val optDSwappers = inspections.firstOrNull { it.slot == ModelSlot.SWAPPER }?.installedVariants.orEmpty()
+                    val optDEnhancers = inspections.firstOrNull { it.slot == ModelSlot.ENHANCEMENT }?.installedVariants.orEmpty()
                     _uiState.update {
                         it.copy(
                             modelInspections = inspections,
                             memoryServiceState = memState,
+                            installedOptionDSwappers = optDSwappers,
+                            installedOptionDEnhancers = optDEnhancers,
                             isInspectingModels = false,
                             missingModelPromptSlot = if (valid) null else it.missingModelPromptSlot,
                             missingModelPromptMessage = if (valid) null else it.missingModelPromptMessage,
                             statusBannerMessage = if (valid) {
-                                "Installed & loaded ${slot.canonicalFileName} (${formatBytes(file.length())}) into memory"
+                                "Installed & loaded ${file.name} (${formatBytes(file.length())}) into memory"
                             } else {
                                 null
                             },
@@ -833,7 +856,7 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             }
             val prevTokReady = SdInpaintPackManager.inspectClipTokenizerStatus(getApplication()).isReady
             val result = withContext(Dispatchers.IO) {
-                OnnxProtobufInspector.importAllModelsDetailedFromTreeUri(
+                OnnxProtobufInspector.importAllModelsFromTreeUri(
                     context = getApplication(),
                     treeUri = treeUri,
                     onlyMissing = false,
@@ -845,10 +868,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                 )
             }
             result.fold(
-                onSuccess = { report ->
-                    val importedSlots = report.importedSlots
+                onSuccess = { importedSlots ->
                     val ctx = getApplication<Application>()
-                    val (inspections, memState, packDetails, tokAndLamaNextGen) = withContext(Dispatchers.IO) {
+                    val (inspections, memState, packDetails, tokAndLama) = withContext(Dispatchers.IO) {
                         OnnxProtobufInspector.clearCachedSessions()
                         val insp = OnnxProtobufInspector.inspectAllModels(ctx, ortEnv)
                         val mem = modelService.loadModelsIntoMemory(
@@ -858,10 +880,9 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         val details = SdInpaintPackManager.discoverInstalledPacks(ctx)
                         val tokStatus = SdInpaintPackManager.inspectClipTokenizerStatus(ctx)
                         val lama = OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
-                        val nextGen = NextGenBcdModelManager.inspectAllSlots(ctx)
-                        Quadruple(insp, mem, details, Triple(tokStatus, lama, nextGen))
+                        Quadruple(insp, mem, details, tokStatus to lama)
                     }
-                    val (tokStatus, lamaFile, nextGenState) = tokAndLamaNextGen
+                    val (tokStatus, lamaFile) = tokAndLama
                     val sdPackTypes = packDetails.map { it.packType }
                     val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
                     val defaultOpt = SdInpaintPackManager.determineDefaultModelOption(ctx, if (hasLama) lamaFile else null)
@@ -871,27 +892,25 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                         importedSlots.forEach { s ->
                             add(OnnxProtobufInspector.resolveModelFile(ctx, s).name)
                         }
-                        report.importedNextGenBcdSlots.forEach { ngSlot ->
-                            val ngFileName = NextGenBcdModelManager.resolveActiveFile(ctx, ngSlot)?.name ?: ngSlot.canonicalHint
-                            add("$ngFileName (Opt B+C/D)")
-                        }
-                        val reportedPacks = if (report.importedSdPacks.isNotEmpty()) report.importedSdPacks else sdPackTypes
-                        reportedPacks.forEach { packType ->
+                        sdPackTypes.forEach { packType ->
                             add(packType.displayLabel)
                         }
-                        if (tokStatus.isReady && (!prevTokReady || report.importedSdPacks.isNotEmpty())) {
+                        if (tokStatus.isReady && !prevTokReady) {
                             add("CLIP Tokenizer")
                         }
-                    }.distinct()
+                    }
 
+                    val optDSwappers = inspections.firstOrNull { it.slot == ModelSlot.SWAPPER }?.installedVariants.orEmpty()
+                    val optDEnhancers = inspections.firstOrNull { it.slot == ModelSlot.ENHANCEMENT }?.installedVariants.orEmpty()
                     _uiState.update {
                         it.copy(
                             modelInspections = inspections,
                             memoryServiceState = memState,
+                            installedOptionDSwappers = optDSwappers,
+                            installedOptionDEnhancers = optDEnhancers,
                             installedSdInpaintPacks = sdPackTypes,
                             installedSdPackDetails = packDetails,
                             clipTokenizerStatus = tokStatus,
-                            nextGenBcdState = nextGenState,
                             isLamaInpaintReady = hasLama,
                             inpaintModelOption = defaultOpt,
                             inpaintModelLabel = label,
@@ -926,208 +945,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
             )
-        }
-    }
-
-    fun importNextGenBcdModel(uri: Uri, slot: NextGenBcdSlot) {
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isInspectingModels = true,
-                    statusBannerMessage = "Uploading ${slot.canonicalHint} for Option B+C & D...",
-                    errorBannerMessage = null
-                )
-            }
-            val ctx = getApplication<Application>()
-            val importRes = withContext(Dispatchers.IO) {
-                NextGenBcdModelManager.importSingleModelFromUri(ctx, uri, slot)
-            }
-            val nextGenState = withContext(Dispatchers.IO) {
-                NextGenBcdModelManager.inspectAllSlots(ctx)
-            }
-            importRes.fold(
-                onSuccess = { importedFile ->
-                    _uiState.update {
-                        it.copy(
-                            nextGenBcdState = nextGenState,
-                            isInspectingModels = false,
-                            statusBannerMessage = "✓ ${importedFile.name} (${formatBytes(importedFile.length())}) uploaded (Option B+C & D only • A & B untouched).",
-                            errorBannerMessage = null
-                        )
-                    }
-                },
-                onFailure = { err ->
-                    _uiState.update {
-                        it.copy(
-                            nextGenBcdState = nextGenState,
-                            isInspectingModels = false,
-                            statusBannerMessage = null,
-                            errorBannerMessage = "Upload failed (${slot.canonicalHint}): ${err.message}"
-                        )
-                    }
-                }
-            )
-        }
-    }
-
-    fun deleteNextGenBcdModel(slot: NextGenBcdSlot) {
-        viewModelScope.launch {
-            val ctx = getApplication<Application>()
-            val removed = withContext(Dispatchers.IO) {
-                NextGenBcdModelManager.deleteSlotModel(ctx, slot)
-            }
-            val nextGenState = withContext(Dispatchers.IO) {
-                NextGenBcdModelManager.inspectAllSlots(ctx)
-            }
-            _uiState.update {
-                it.copy(
-                    nextGenBcdState = nextGenState,
-                    statusBannerMessage = if (removed) {
-                        "Cleared ${slot.title} — Option B+C & D will safely use default HyperSwap/GFPGAN."
-                    } else {
-                        "No model file to clear in ${slot.title}."
-                    }
-                )
-            }
-        }
-    }
-
-    fun importRealisticVisionFp16FromFolder(treeUri: Uri) {
-        importSpecificSdInpaintPackFromFolder(treeUri, SdInpaintPackType.REALVIS_FP16)
-    }
-
-    fun importSd15Fp16FromFolder(treeUri: Uri) {
-        importSpecificSdInpaintPackFromFolder(treeUri, SdInpaintPackType.SD15_FP16)
-    }
-
-    private fun importSpecificSdInpaintPackFromFolder(
-        treeUri: Uri,
-        targetPackType: SdInpaintPackType
-    ) {
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isInspectingModels = true,
-                    statusBannerMessage = "Scanning & uploading ${targetPackType.displayLabel} folder...",
-                    errorBannerMessage = null
-                )
-            }
-            val ctx = getApplication<Application>()
-            val importedTypes = withContext(Dispatchers.IO) {
-                OnnxProtobufInspector.clearCachedSessions()
-                SdInpaintOnnxEngine.clearSessionCache()
-                runCatching {
-                    SdInpaintPackManager.importSdInpaintPacksFromTreeUri(
-                        context = ctx,
-                        treeUri = treeUri,
-                        targetPackTypeOverride = targetPackType,
-                        onProgress = { msg ->
-                            _uiState.update { s -> s.copy(statusBannerMessage = msg) }
-                        }
-                    )
-                }.getOrDefault(emptyList())
-            }
-            val (packDetails, tokStatus, lamaFile) = withContext(Dispatchers.IO) {
-                Triple(
-                    SdInpaintPackManager.discoverInstalledPacks(ctx),
-                    SdInpaintPackManager.inspectClipTokenizerStatus(ctx),
-                    OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
-                )
-            }
-            val sdPackTypes = packDetails.map { it.packType }
-            val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
-            val succeeded = targetPackType in importedTypes || targetPackType in sdPackTypes
-            val currentOption = _uiState.value.inpaintModelOption
-            val nextOption = when {
-                !succeeded -> currentOption
-                targetPackType == SdInpaintPackType.REALVIS_FP16 -> InpaintModelOption.REALVIS_FP16
-                targetPackType == SdInpaintPackType.SD15_FP16 &&
-                    SdInpaintPackType.REALVIS_FP16 !in sdPackTypes &&
-                    currentOption == InpaintModelOption.AUTO -> InpaintModelOption.SD15_FP16
-                else -> currentOption
-            }
-            val nextLabel = SdInpaintPackManager.formatDropdownLabel(
-                ctx,
-                nextOption,
-                if (hasLama) lamaFile else null
-            )
-            if (succeeded) {
-                OnnxProtobufInspector.saveLinkedModelsFolderUri(ctx, treeUri)
-            }
-            val roleLabel = if (targetPackType == SdInpaintPackType.SD15_FP16) {
-                "Face Swap / Seam Bridge"
-            } else {
-                "Inpaint"
-            }
-            _uiState.update {
-                it.copy(
-                    installedSdInpaintPacks = sdPackTypes,
-                    installedSdPackDetails = packDetails,
-                    clipTokenizerStatus = tokStatus,
-                    isLamaInpaintReady = hasLama,
-                    inpaintModelOption = nextOption,
-                    inpaintModelLabel = nextLabel,
-                    isInspectingModels = false,
-                    statusBannerMessage = if (succeeded) {
-                        val tokNote = if (tokStatus.isReady) "Tokenizer Ready ✓" else "Tokenizer Missing"
-                        "✓ ${targetPackType.displayLabel} ($roleLabel) தனி slot-இல் upload ஆகிவிட்டது ($tokNote)."
-                    } else {
-                        null
-                    },
-                    errorBannerMessage = if (!succeeded) {
-                        "தேர்வு செய்த folder-இல் unet, text_encoder, vae_encoder, vae_decoder ONNX கோப்புகள் கிடைக்கவில்லை."
-                    } else {
-                        null
-                    }
-                )
-            }
-        }
-    }
-
-    fun deleteSdInpaintPack(packType: SdInpaintPackType) {
-        viewModelScope.launch {
-            val ctx = getApplication<Application>()
-            val removed = withContext(Dispatchers.IO) {
-                SdInpaintPackManager.deleteInstalledPack(ctx, packType)
-            }
-            val (packDetails, tokStatus, lamaFile) = withContext(Dispatchers.IO) {
-                Triple(
-                    SdInpaintPackManager.discoverInstalledPacks(ctx),
-                    SdInpaintPackManager.inspectClipTokenizerStatus(ctx),
-                    OnnxProtobufInspector.resolveModelFile(ctx, ModelSlot.INPAINTING)
-                )
-            }
-            val sdPackTypes = packDetails.map { it.packType }
-            val hasLama = lamaFile.exists() && lamaFile.length() > 1024L
-            val currentOption = _uiState.value.inpaintModelOption
-            val optionStillAvailable = when (currentOption) {
-                InpaintModelOption.REALVIS_FP16 -> SdInpaintPackType.REALVIS_FP16 in sdPackTypes
-                InpaintModelOption.SD15_FP16 -> SdInpaintPackType.SD15_FP16 in sdPackTypes
-                InpaintModelOption.REALVIS_INT8 -> SdInpaintPackType.REALVIS_INT8 in sdPackTypes
-                InpaintModelOption.SD15_FP32 -> SdInpaintPackType.SD15_FP32 in sdPackTypes
-                else -> true
-            }
-            val nextOption = if (optionStillAvailable) {
-                currentOption
-            } else {
-                SdInpaintPackManager.determineDefaultModelOption(ctx, if (hasLama) lamaFile else null)
-            }
-            val nextLabel = SdInpaintPackManager.formatDropdownLabel(
-                ctx,
-                nextOption,
-                if (hasLama) lamaFile else null
-            )
-            _uiState.update {
-                it.copy(
-                    installedSdInpaintPacks = sdPackTypes,
-                    installedSdPackDetails = packDetails,
-                    clipTokenizerStatus = tokStatus,
-                    isLamaInpaintReady = hasLama,
-                    inpaintModelOption = nextOption,
-                    inpaintModelLabel = nextLabel,
-                    statusBannerMessage = if (removed) "${packType.displayLabel} removed from local storage." else null
-                )
-            }
         }
     }
 
@@ -1713,7 +1530,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                     autoBodyAgeMatch = state.autoBodyAgeMatch,
                                     faceAgingFactor = state.faceAgingFactor,
                                     headPipelineMode = state.headPipelineMode,
-                                    enableNextGenSwapStack = true,
                                     isCancelled = { jobCancelToken.get() },
                                     onProgress = { progress ->
                                         if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@replaceFullHead
@@ -1749,6 +1565,16 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                                     autoBodyAgeMatch = state.autoBodyAgeMatch,
                                     faceAgingFactor = state.faceAgingFactor,
                                     swapStrategyOption = state.swapStrategyOption,
+                                    optionDConfig = if (state.swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
+                                        OptionDFaceFusionConfig(
+                                            swapperChoice = state.optionDSwapperChoice,
+                                            enhancerChoice = state.optionDEnhancerChoice,
+                                            codeformerFidelity = state.optionDCodeformerFidelity,
+                                            pixelBoostEnabled = state.optionDPixelBoostEnabled
+                                        )
+                                    } else {
+                                        OptionDFaceFusionConfig()
+                                    },
                                     isCancelled = { jobCancelToken.get() },
                                     onProgress = { progress ->
                                         if (jobCancelToken.get() || activeSwapCancelToken !== jobCancelToken) return@swapFaces
@@ -2176,10 +2002,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     _uiState.update {
                         it.copy(
                             inpaintSourceBitmap = bitmap,
-                            inpaintOriginalSourceBitmap = bitmap,
-                            inpaintCurvyAmount = 0.0f,
-                            inpaintHipPositionRatio = 0.64f,
-                            inpaintOutpaintPreset = OutpaintExtendPreset.NONE,
                             inpaintMaskBitmap = null,
                             inpaintDepthMap = null,
                             inpaintAccessoryLayers = null,
@@ -2199,152 +2021,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
             )
-        }
-    }
-
-    fun setInpaintCurvyAmount(strength: Float) {
-        val clamped = strength.coerceIn(0f, 1f)
-        val cur = _uiState.value
-        val baseOriginal = cur.inpaintOriginalSourceBitmap ?: cur.inpaintSourceBitmap ?: return
-        _uiState.update {
-            it.copy(
-                inpaintOriginalSourceBitmap = baseOriginal,
-                inpaintCurvyAmount = clamped,
-                errorBannerMessage = null
-            )
-        }
-        rebuildCurvyAndOutpaintSource(updateStatusBanner = false)
-    }
-
-    fun setInpaintHipPositionRatio(ratio: Float) {
-        val clamped = ratio.coerceIn(0.45f, 0.85f)
-        val cur = _uiState.value
-        val baseOriginal = cur.inpaintOriginalSourceBitmap ?: cur.inpaintSourceBitmap ?: return
-        _uiState.update {
-            it.copy(
-                inpaintOriginalSourceBitmap = baseOriginal,
-                inpaintHipPositionRatio = clamped,
-                errorBannerMessage = null
-            )
-        }
-        if (cur.inpaintCurvyAmount > 0.01f) {
-            rebuildCurvyAndOutpaintSource(updateStatusBanner = false)
-        }
-    }
-
-    fun selectOutpaintExtendPreset(preset: OutpaintExtendPreset) {
-        val cur = _uiState.value
-        val wasExtended = cur.inpaintOutpaintPreset != OutpaintExtendPreset.NONE
-        val baseOriginal = cur.inpaintOriginalSourceBitmap ?: cur.inpaintSourceBitmap
-        if (baseOriginal == null) {
-            _uiState.update {
-                it.copy(errorBannerMessage = "Please select a Source Image from device folder first.")
-            }
-            return
-        }
-        val nextPrompt = if (preset != OutpaintExtendPreset.NONE) {
-            BodyReshapeAndOutpaintEngine.buildOutpaintPrompt(cur.inpaintPrompt, preset)
-        } else {
-            cur.inpaintPrompt
-        }
-        _uiState.update {
-            it.copy(
-                inpaintOriginalSourceBitmap = baseOriginal,
-                inpaintOutpaintPreset = preset,
-                inpaintPrompt = nextPrompt,
-                errorBannerMessage = null
-            )
-        }
-        rebuildCurvyAndOutpaintSource(
-            updateStatusBanner = true,
-            clearMaskWhenNotExtended = wasExtended && preset == OutpaintExtendPreset.NONE
-        )
-    }
-
-    fun resetBodyAndOutpaintEdits() {
-        val cur = _uiState.value
-        val orig = cur.inpaintOriginalSourceBitmap ?: return
-        bodyReshapePreviewJob?.cancel()
-        _uiState.update {
-            it.copy(
-                inpaintSourceBitmap = orig,
-                inpaintCurvyAmount = 0.0f,
-                inpaintHipPositionRatio = 0.64f,
-                inpaintOutpaintPreset = OutpaintExtendPreset.NONE,
-                inpaintMaskBitmap = null,
-                isAdjustingBodyShape = false,
-                statusBannerMessage = "Restored original photo (${orig.width}×${orig.height}).",
-                errorBannerMessage = null
-            )
-        }
-    }
-
-    private fun rebuildCurvyAndOutpaintSource(
-        updateStatusBanner: Boolean,
-        clearMaskWhenNotExtended: Boolean = false
-    ) {
-        val snapshot = _uiState.value
-        val baseOriginal = snapshot.inpaintOriginalSourceBitmap ?: return
-        val curvyStrength = snapshot.inpaintCurvyAmount
-        val hipY = snapshot.inpaintHipPositionRatio
-        val extendPreset = snapshot.inpaintOutpaintPreset
-
-        bodyReshapePreviewJob?.cancel()
-        bodyReshapePreviewJob = viewModelScope.launch {
-            _uiState.update { it.copy(isAdjustingBodyShape = true) }
-            val resultPair = withContext(Dispatchers.Default) {
-                val reshaped = if (curvyStrength > 0.01f) {
-                    BodyReshapeAndOutpaintEngine.applyCurvyBodyReshape(
-                        sourceBitmap = baseOriginal,
-                        curvyStrength = curvyStrength,
-                        hipYRatio = hipY
-                    )
-                } else {
-                    baseOriginal
-                }
-                if (extendPreset != OutpaintExtendPreset.NONE) {
-                    val extended = BodyReshapeAndOutpaintEngine.extendCanvasForFullBodyOutpaint(
-                        sourceBitmap = reshaped,
-                        extendFraction = extendPreset.fraction
-                    )
-                    if (reshaped !== baseOriginal) {
-                        reshaped.recycle()
-                    }
-                    extended.extendedBitmap to extended.autoMaskBitmap
-                } else {
-                    reshaped to null
-                }
-            }
-            val (nextSourceBmp, nextOutpaintMask) = resultPair
-            _uiState.update { cur ->
-                val resolvedMask = if (extendPreset != OutpaintExtendPreset.NONE) {
-                    nextOutpaintMask
-                } else if (clearMaskWhenNotExtended) {
-                    null
-                } else {
-                    cur.inpaintMaskBitmap
-                }
-                val banner = if (updateStatusBanner) {
-                    when {
-                        extendPreset != OutpaintExtendPreset.NONE && cur.installedSdInpaintPacks.isEmpty() ->
-                            "Canvas extended (${nextSourceBmp.width}×${nextSourceBmp.height}) & Auto-Masked! For full legs/feet generation, import SD 1.5 FP16 / RealVis INT8 via Auto-Pick Folder."
-                        extendPreset != OutpaintExtendPreset.NONE ->
-                            "Canvas extended (${nextSourceBmp.width}×${nextSourceBmp.height}) & Auto-Masked! Tap Create to generate lower body & feet."
-                        curvyStrength > 0.01f ->
-                            "Curvy Reshape (${(curvyStrength * 100).toInt()}%) applied offline!"
-                        else -> "Restored original photo (${nextSourceBmp.width}×${nextSourceBmp.height})."
-                    }
-                } else {
-                    cur.statusBannerMessage
-                }
-                cur.copy(
-                    inpaintSourceBitmap = nextSourceBmp,
-                    inpaintMaskBitmap = resolvedMask,
-                    inpaintDepthMap = null,
-                    isAdjustingBodyShape = false,
-                    statusBannerMessage = banner
-                )
-            }
         }
     }
 
@@ -2479,7 +2155,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         val nextOption = when {
             SdInpaintPackType.SD15_FP32 in installedPacks -> InpaintModelOption.SD15_FP32
             SdInpaintPackType.REALVIS_INT8 in installedPacks -> InpaintModelOption.REALVIS_INT8
-            SdInpaintPackType.REALVIS_FP16 in installedPacks -> InpaintModelOption.REALVIS_FP16
             SdInpaintPackType.SD15_FP16 in installedPacks -> InpaintModelOption.SD15_FP16
             else -> cur.inpaintModelOption
         }
@@ -2738,10 +2413,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 inpaintSourceBitmap = resultBmp,
-                inpaintOriginalSourceBitmap = resultBmp,
-                inpaintCurvyAmount = 0.0f,
-                inpaintHipPositionRatio = 0.64f,
-                inpaintOutpaintPreset = OutpaintExtendPreset.NONE,
                 inpaintMaskBitmap = null,
                 inpaintDepthMap = null,
                 inpaintAccessoryLayers = null,
@@ -2808,44 +2479,8 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
             return
         }
         if (maskBmp == null || !InteractiveInpaintEngine.hasPaintedMaskPixels(maskBmp)) {
-            if (state.inpaintCurvyAmount > 0.01f && state.inpaintOutpaintPreset == OutpaintExtendPreset.NONE) {
-                val pct = kotlin.math.round(state.inpaintCurvyAmount * 100f).toInt()
-                val engineUsed = "Offline Curvy Body Reshape ($pct%)"
-                val doneMsg = "Body Contour Reshape ($pct%) completed offline."
-                viewModelScope.launch {
-                    val historyPath = withContext(Dispatchers.IO) {
-                        ImageGalleryHelper.saveBitmapToHistoryCache(getApplication(), srcBmp)
-                    }
-                    auditRepository.insert(
-                        SwapAuditLog(
-                            sourceResolution = "${srcBmp.width}x${srcBmp.height}",
-                            targetResolution = "${srcBmp.width}x${srcBmp.height}",
-                            swappedFacesCount = 1,
-                            pipelineSummary = "[BODY RESHAPE • $engineUsed]",
-                            detectionMs = 0L,
-                            embeddingMs = 0L,
-                            inswapperMs = 120L,
-                            blendingMs = 0L,
-                            totalMs = 120L,
-                            colorTransferEnabled = false,
-                            watermarkEnabled = false,
-                            resultImagePath = historyPath
-                        )
-                    )
-                    _uiState.update {
-                        it.copy(
-                            inpaintResultBitmap = srcBmp,
-                            inpaintElapsedSec = 0.12f,
-                            inpaintEngineLabel = engineUsed,
-                            statusBannerMessage = doneMsg,
-                            errorBannerMessage = null
-                        )
-                    }
-                }
-                return
-            }
             _uiState.update {
-                it.copy(errorBannerMessage = "Please tap 'Edit Mask' / 'Draw Mask' (or choose Full-Body Extend) first.")
+                it.copy(errorBannerMessage = "Please tap 'Edit Mask' / 'Draw Mask' and paint the region to inpaint first.")
             }
             return
         }
@@ -2865,7 +2500,6 @@ class FaceSwapViewModel(application: Application) : AndroidViewModel(application
         }
         if ((state.inpaintModelOption == InpaintModelOption.SD15_FP32 ||
                 state.inpaintModelOption == InpaintModelOption.REALVIS_INT8 ||
-                state.inpaintModelOption == InpaintModelOption.REALVIS_FP16 ||
                 state.inpaintModelOption == InpaintModelOption.SD15_FP16) &&
             primaryPackPre == null
         ) {

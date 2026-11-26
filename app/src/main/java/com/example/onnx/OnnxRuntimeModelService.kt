@@ -33,6 +33,7 @@ data class OnnxMemoryServiceState(
     val reagingLoaded: Boolean = false,
     val faceMeshLoaded: Boolean = false,
     val headPoseLoaded: Boolean = false,
+    val faceOccluderLoaded: Boolean = false,
     val loadedSessions: Map<ModelSlot, LoadedSessionInfo> = emptyMap(),
     val totalResidentBytes: Long = 0L,
     val totalLoadTimeMs: Long = 0L,
@@ -128,6 +129,7 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
         swapStrategyOption: FaceSwapStrategyOption = FaceSwapStrategyOption.OPTION_B_PURE_IDENTITY,
+        optionDConfig: OptionDFaceFusionConfig = OptionDFaceFusionConfig(),
         captureDiagnostics: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}
@@ -158,7 +160,6 @@ interface FaceSwapAndRestorationService : AutoCloseable {
         autoBodyAgeMatch: Boolean = true,
         faceAgingFactor: Float = 0.0f,
         headPipelineMode: HeadReplacementPipelineMode = HeadReplacementPipelineMode.CLEAN_ERASE_3D_FAST,
-        enableNextGenSwapStack: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onProgress: (SwapStageProgress) -> Unit = {}
     ): FaceSwapExecutionResult
@@ -409,6 +410,7 @@ class OnnxRuntimeModelService(
         val reaging = sessionMetadata[ModelSlot.FACE_REAGING]?.isLoadedInMemory == true
         val faceMesh = sessionMetadata[ModelSlot.FACE_MESH_3D]?.isLoadedInMemory == true
         val headPose = sessionMetadata[ModelSlot.HEAD_POSE]?.isLoadedInMemory == true
+        val faceOccluder = sessionMetadata[ModelSlot.FACE_OCCLUDER]?.isLoadedInMemory == true
         val emap = cachedEmap512x512 != null
 
         val residentBytes = sessionMetadata.values
@@ -437,6 +439,7 @@ class OnnxRuntimeModelService(
             reagingLoaded = reaging,
             faceMeshLoaded = faceMesh,
             headPoseLoaded = headPose,
+            faceOccluderLoaded = faceOccluder,
             loadedSessions = sessionMetadata.toMap(),
             totalResidentBytes = residentBytes,
             totalLoadTimeMs = totalLoadTimeMs,
@@ -522,6 +525,7 @@ class OnnxRuntimeModelService(
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
         swapStrategyOption: FaceSwapStrategyOption,
+        optionDConfig: OptionDFaceFusionConfig,
         captureDiagnostics: Boolean,
         isCancelled: () -> Boolean,
         onProgress: (SwapStageProgress) -> Unit
@@ -555,6 +559,7 @@ class OnnxRuntimeModelService(
             autoBodyAgeMatch = autoBodyAgeMatch,
             faceAgingFactor = faceAgingFactor,
             swapStrategyOption = swapStrategyOption,
+            optionDConfig = optionDConfig,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedGfpganSession = null,
@@ -588,7 +593,6 @@ class OnnxRuntimeModelService(
         autoBodyAgeMatch: Boolean,
         faceAgingFactor: Float,
         headPipelineMode: HeadReplacementPipelineMode,
-        enableNextGenSwapStack: Boolean,
         isCancelled: () -> Boolean,
         onProgress: (SwapStageProgress) -> Unit
     ): FaceSwapExecutionResult {
@@ -617,7 +621,6 @@ class OnnxRuntimeModelService(
             autoBodyAgeMatch = autoBodyAgeMatch,
             faceAgingFactor = faceAgingFactor,
             headPipelineMode = headPipelineMode,
-            enableNextGenSwapStack = enableNextGenSwapStack,
             preloadedArcFaceSession = null,
             preloadedSwapSession = null,
             preloadedSegformerSession = null,

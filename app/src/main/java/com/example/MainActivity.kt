@@ -73,7 +73,6 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.provider.MediaStore
 import com.example.onnx.ModelSlot
-import com.example.onnx.NextGenBcdSlot
 import com.example.ui.AppTab
 import com.example.ui.FaceSwapViewModel
 import com.example.ui.StudioSubPage
@@ -111,7 +110,6 @@ fun FaceSwapStudioApp(
     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
 
     var pendingImportSlot by remember { mutableStateOf(ModelSlot.DETECTOR) }
-    var pendingNextGenSlot by remember { mutableStateOf(NextGenBcdSlot.NEXTGEN_SWAPPER) }
     var zoomViewerState by remember { mutableStateOf<Pair<Bitmap, String>?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -202,20 +200,6 @@ fun FaceSwapStudioApp(
         }
     }
 
-    val nextGenBcdDocumentPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            viewModel.importNextGenBcdModel(uri, pendingNextGenSlot)
-        }
-    }
-
     val onnxFolderTreePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { treeUri ->
@@ -227,34 +211,6 @@ fun FaceSwapStudioApp(
                 )
             }
             viewModel.importAllModelsFromFolder(treeUri)
-        }
-    }
-
-    val realVisFp16FolderTreePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { treeUri ->
-        if (treeUri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    treeUri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            viewModel.importRealisticVisionFp16FromFolder(treeUri)
-        }
-    }
-
-    val sd15Fp16FolderTreePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { treeUri ->
-        if (treeUri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    treeUri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            viewModel.importSd15Fp16FromFolder(treeUri)
         }
     }
 
@@ -715,6 +671,10 @@ fun FaceSwapStudioApp(
                     onRequestSwapStrategySelection = viewModel::requestSwapStrategySelection,
                     onConfirmSwapStrategySelection = viewModel::confirmSwapStrategySelection,
                     onDismissSwapStrategyPopup = viewModel::dismissSwapStrategyPopup,
+                    onOptionDSwapperChoiceChanged = viewModel::setOptionDSwapperChoice,
+                    onOptionDEnhancerChoiceChanged = viewModel::setOptionDEnhancerChoice,
+                    onOptionDCodeformerFidelityChanged = viewModel::setOptionDCodeformerFidelity,
+                    onOptionDPixelBoostChanged = viewModel::setOptionDPixelBoostEnabled,
                     onOpenModelsTab = { viewModel.selectTab(AppTab.MODELS) },
                     onImportModelForSlot = { slot ->
                         pendingImportSlot = slot
@@ -730,13 +690,6 @@ fun FaceSwapStudioApp(
                         inpaintSourceFolderPicker.launch(arrayOf("image/*"))
                     },
                     onSelectInpaintModelOption = viewModel::selectInpaintModelOption,
-                    onUploadRealVisFp16Folder = {
-                        realVisFp16FolderTreePicker.launch(null)
-                    },
-                    onUploadSd15Fp16Folder = {
-                        sd15Fp16FolderTreePicker.launch(null)
-                    },
-                    onDeleteSdInpaintPack = viewModel::deleteSdInpaintPack,
                     onUploadClipTokenizer = {
                         clipTokenizerPicker.launch(arrayOf("*/*"))
                     },
@@ -758,10 +711,6 @@ fun FaceSwapStudioApp(
                     onComputeAccessoryLayers = viewModel::computeInpaintAccessoryLayers,
                     onApplyAccessorySelectionAndExpand = viewModel::updateAccessorySelectionAndExpand,
                     onInpaintMaskAndPromptUpdated = viewModel::applyMaskWithOptionalPrompt,
-                    onInpaintCurvyAmountChanged = viewModel::setInpaintCurvyAmount,
-                    onInpaintHipPositionChanged = viewModel::setInpaintHipPositionRatio,
-                    onSelectOutpaintExtendPreset = viewModel::selectOutpaintExtendPreset,
-                    onResetBodyAndOutpaintEdits = viewModel::resetBodyAndOutpaintEdits,
                     onRunInpaint = {
                         if (uiState.inpaintSourceBitmap != null &&
                             uiState.inpaintMaskBitmap != null &&
@@ -804,7 +753,6 @@ fun FaceSwapStudioApp(
                     segformerAutoSelectedForAccessory = uiState.segformerAutoSelectedForAccessory,
                     sdPackDetails = uiState.installedSdPackDetails,
                     clipTokenizerStatus = uiState.clipTokenizerStatus,
-                    nextGenBcdState = uiState.nextGenBcdState,
                     onImportModelForSlot = { slot ->
                         pendingImportSlot = slot
                         onnxDocumentPicker.launch(arrayOf("*/*"))
@@ -820,18 +768,6 @@ fun FaceSwapStudioApp(
                         pendingSingleTokenizerHint = expectedName
                         singleTokenizerPicker.launch(arrayOf("*/*"))
                     },
-                    onUploadRealVisFp16Folder = {
-                        realVisFp16FolderTreePicker.launch(null)
-                    },
-                    onUploadSd15Fp16Folder = {
-                        sd15Fp16FolderTreePicker.launch(null)
-                    },
-                    onDeleteSdInpaintPack = viewModel::deleteSdInpaintPack,
-                    onUploadNextGenBcdModel = { slot ->
-                        pendingNextGenSlot = slot
-                        nextGenBcdDocumentPicker.launch(arrayOf("*/*"))
-                    },
-                    onDeleteNextGenBcdModel = viewModel::deleteNextGenBcdModel,
                     onPreloadMemoryModels = viewModel::preloadModelsIntoMemory,
                     onReleaseMemoryModels = viewModel::releaseModelsFromMemory
                 )

@@ -13,9 +13,8 @@ enum class SdInpaintPackType(
 ) {
     SD15_FP32("sd15_fp32", "SD 1.5 Inpaint (FP32)", 1),
     REALVIS_INT8("realvis51_int8", "RealVis 5.1 (INT8)", 2),
-    REALVIS_FP16("realvis51_fp16", "Realistic Vision V5.1 (FP16)", 3),
-    CUSTOM_SD("custom_sd", "SD 1.5 Inpaint (Custom)", 4),
-    SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", 5)
+    CUSTOM_SD("custom_sd", "SD 1.5 Inpaint (Custom)", 3),
+    SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", 4)
 }
 
 enum class InpaintModelOption(
@@ -23,10 +22,9 @@ enum class InpaintModelOption(
     val displayName: String,
     val shortBadge: String
 ) {
-    AUTO("auto", "Auto (FP32 / INT8 / RV-FP16 > FP16)", "AUTO"),
+    AUTO("auto", "Auto (FP32 / INT8 > FP16)", "AUTO"),
     SD15_FP32("sd15_fp32", "SD 1.5 Inpaint (FP32)", "FP32"),
     REALVIS_INT8("realvis51_int8", "RealVis 5.1 (INT8)", "INT8"),
-    REALVIS_FP16("realvis51_fp16", "Realistic Vision V5.1 (FP16)", "RV-FP16"),
     SD15_FP16("sd15_fp16", "SD 1.5 Inpaint (FP16)", "FP16"),
     LAMA_ONNX("lama_fp32", "LaMa (Object Remove)", "LAMA"),
     CV_FALLBACK("cv_fallback", "Fast Offline CV", "CV")
@@ -107,23 +105,20 @@ object SdInpaintPackManager {
 
     fun classifyPackType(folderName: String): SdInpaintPackType {
         val lower = folderName.trim().lowercase()
-        val isRealVis = lower.contains("realvis") ||
-            lower.contains("realistic_vision") ||
-            lower.contains("realistic-vision") ||
-            lower.contains("realistic vision") ||
-            lower.contains("rv5")
-        val isFp16 = lower.contains("fp16") || lower.contains("f16") || lower.contains("half")
-        val isInt8 = lower.contains("int8") || lower.contains("qint8") || lower.contains("quint8") || lower.contains("q8")
         return when {
             lower.contains("fp32") ||
                 lower.contains("f32") ||
                 lower.contains("float32") -> SdInpaintPackType.SD15_FP32
 
-            isRealVis && isFp16 -> SdInpaintPackType.REALVIS_FP16
+            lower.contains("int8") ||
+                lower.contains("qint8") ||
+                lower.contains("quint8") ||
+                lower.contains("q8") ||
+                lower.contains("realvis") -> SdInpaintPackType.REALVIS_INT8
 
-            isInt8 || isRealVis -> SdInpaintPackType.REALVIS_INT8
-
-            isFp16 -> SdInpaintPackType.SD15_FP16
+            lower.contains("fp16") ||
+                lower.contains("f16") ||
+                lower.contains("half") -> SdInpaintPackType.SD15_FP16
 
             lower.contains("v1-5-inpainting") ||
                 lower.contains("v1.5-inpainting") ||
@@ -537,20 +532,17 @@ object SdInpaintPackManager {
                 installed.firstOrNull { it.packType == SdInpaintPackType.SD15_FP32 }
             InpaintModelOption.REALVIS_INT8 ->
                 installed.firstOrNull { it.packType == SdInpaintPackType.REALVIS_INT8 }
-            InpaintModelOption.REALVIS_FP16 ->
-                installed.firstOrNull { it.packType == SdInpaintPackType.REALVIS_FP16 }
             InpaintModelOption.SD15_FP16 ->
                 installed.firstOrNull { it.packType == SdInpaintPackType.SD15_FP16 }
             InpaintModelOption.AUTO ->
-                installed.firstOrNull() // Already sorted: FP32 (1) > RealVis INT8 (2) > RealVis FP16 (3) > Custom (4) > FP16 (5)
+                installed.firstOrNull() // Already sorted: FP32 (1) > INT8 (2) > Custom (3) > FP16 (4)
             InpaintModelOption.LAMA_ONNX, InpaintModelOption.CV_FALLBACK -> null
         }
     }
 
     /**
-     * Resolves an installed SD 1.5 pack optimized for mobile Face Swap / Stage 5 Head/Neck Seam Bridge:
-     * prioritizes `REALVIS_INT8` (1) -> `SD15_FP16` (2, dedicated Face Swap Seam slot) ->
-     * `REALVIS_FP16` (3, Inpaint fallback) -> `CUSTOM_SD` (4) -> `SD15_FP32` (5).
+     * Resolves an installed SD 1.5 pack optimized for mobile Stage 5 Head/Neck Seam Bridge:
+     * prioritizes smaller/faster `REALVIS_INT8` first, then `SD15_FP16`, `CUSTOM_SD`, and finally `SD15_FP32`.
      */
     fun resolvePackForSeamBridge(context: Context): InstalledSdInpaintPack? {
         val installed = discoverInstalledPacks(context)
@@ -558,24 +550,15 @@ object SdInpaintPackManager {
         val seamPriority = mapOf(
             SdInpaintPackType.REALVIS_INT8 to 1,
             SdInpaintPackType.SD15_FP16 to 2,
-            SdInpaintPackType.REALVIS_FP16 to 3,
-            SdInpaintPackType.CUSTOM_SD to 4,
-            SdInpaintPackType.SD15_FP32 to 5
+            SdInpaintPackType.CUSTOM_SD to 3,
+            SdInpaintPackType.SD15_FP32 to 4
         )
         return installed.minByOrNull { seamPriority[it.packType] ?: 99 }
     }
 
-    fun deleteInstalledPack(context: Context, packType: SdInpaintPackType): Boolean {
-        val packDir = File(getSdInpaintRootDir(context), packType.id)
-        if (!packDir.exists()) return false
-        SdInpaintOnnxEngine.clearSessionCache()
-        OnnxProtobufInspector.clearCachedSessions()
-        return runCatching { packDir.deleteRecursively() }.getOrDefault(false)
-    }
-
     /**
      * Computes the default model option prioritizing CPU speed & accuracy:
-     * Priority 1: SD 1.5 FP32 -> Priority 2: RealVis 5.1 INT8 -> Priority 3: Realistic Vision V5.1 FP16 -> Custom -> SD 1.5 FP16 -> LaMa
+     * Priority 1: SD 1.5 FP32 -> Priority 2: RealVis 5.1 INT8 -> Custom -> Secondary: SD 1.5 FP16 -> LaMa
      */
     fun determineDefaultModelOption(
         context: Context,
@@ -587,9 +570,6 @@ object SdInpaintPackManager {
         }
         if (installed.any { it.packType == SdInpaintPackType.REALVIS_INT8 }) {
             return InpaintModelOption.REALVIS_INT8
-        }
-        if (installed.any { it.packType == SdInpaintPackType.REALVIS_FP16 }) {
-            return InpaintModelOption.REALVIS_FP16
         }
         if (installed.any { it.packType == SdInpaintPackType.CUSTOM_SD }) {
             return InpaintModelOption.AUTO
@@ -684,8 +664,7 @@ object SdInpaintPackManager {
                 if (lower.contains("fp16")) score -= 250
                 if (lower.contains("int8") || lower.contains("quant")) score -= 200
             }
-            SdInpaintPackType.SD15_FP16,
-            SdInpaintPackType.REALVIS_FP16 -> {
+            SdInpaintPackType.SD15_FP16 -> {
                 if (lower.contains("fp16") || lower.contains("f16")) score += 450
                 if (lower == "model.onnx") score += 350
                 if (lower.contains("int8") || lower.contains("quant")) score -= 300
@@ -780,14 +759,11 @@ object SdInpaintPackManager {
     fun importSdInpaintPacksFromTreeUri(
         context: Context,
         treeUri: Uri,
-        targetPackTypeOverride: SdInpaintPackType? = null,
         onProgress: (String) -> Unit = {}
     ): List<SdInpaintPackType> {
         val resolver = context.contentResolver
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
-        val rootDocName = queryDocDisplayName(context, treeUri, rootDocId)
-            ?.takeIf { it.isNotBlank() }
-            ?: rootDocId.substringAfterLast(':').substringAfterLast('/')
+        val rootDocName = queryDocDisplayName(context, treeUri, rootDocId).orEmpty()
 
         val collectedFiles = mutableListOf<TreeNodeFile>()
 
@@ -862,9 +838,7 @@ object SdInpaintPackManager {
                 val packFolderPath = if (packSegs.isEmpty()) "__root__" else packSegs.joinToString("/")
                 val packFolderName = packSegs.lastOrNull() ?: rootDocName.ifBlank { "sd_inpaint" }
                 if (compName == "tokenizer" && packSegs.isEmpty()) {
-                    // Sibling tokenizer/ folder at selected root can serve both root pack and child packs
-                    val rootKey = PackBucketKey("__root__", rootDocName.ifBlank { "sd_inpaint" })
-                    packBuckets.getOrPut(rootKey) { mutableListOf() }.add(compName to file)
+                    // Sibling tokenizer/ folder at selected root can serve packs in child folders too
                     if (canonicalTokName != null) {
                         rootTokenizerFiles.getOrPut("__root__") { mutableListOf() }.add(file)
                     }
@@ -918,7 +892,7 @@ object SdInpaintPackManager {
         if (packBuckets.isEmpty()) return emptyList()
 
         // Only consider buckets that contain at least unet + text_encoder + vae_encoder + vae_decoder
-        val rawCompleteBuckets = packBuckets.entries
+        val completeBuckets = packBuckets.entries
             .mapNotNull { (key, compFiles) ->
                 val compsPresent = compFiles
                     .filter { (comp, f) -> comp in COMPONENT_DIRS && f.displayName.endsWith(".onnx", ignoreCase = true) }
@@ -927,33 +901,13 @@ object SdInpaintPackManager {
                 if (!compsPresent.containsAll(COMPONENT_DIRS)) {
                     null
                 } else {
-                    val directType = classifyPackType(key.packFolderName)
-                    val packType = if (directType == SdInpaintPackType.CUSTOM_SD) {
-                        val fileHints = (key.packFolderPath + " " + compFiles.joinToString(" ") { it.second.displayName }).lowercase()
-                        val isRealVisHint = fileHints.contains("realvis") || fileHints.contains("realistic_vision") || fileHints.contains("realistic-vision")
-                        when {
-                            isRealVisHint && (fileHints.contains("fp16") || fileHints.contains("f16")) -> SdInpaintPackType.REALVIS_FP16
-                            fileHints.contains("fp16") || fileHints.contains("f16") -> SdInpaintPackType.SD15_FP16
-                            fileHints.contains("int8") || fileHints.contains("q8") || isRealVisHint -> SdInpaintPackType.REALVIS_INT8
-                            else -> directType
-                        }
-                    } else {
-                        directType
-                    }
+                    val packType = classifyPackType(key.packFolderName)
                     Triple(packType, key, compFiles)
                 }
             }
-            .sortedBy { it.first.priorityOrder } // Priority 1: FP32 -> RealVis INT8 -> RealVis FP16 -> Custom -> FP16
+            .sortedBy { it.first.priorityOrder } // Priority 1: FP16 first, Priority 2: INT8 second!
 
-        if (rawCompleteBuckets.isEmpty()) return emptyList()
-
-        val completeBuckets = if (targetPackTypeOverride != null) {
-            val chosen = rawCompleteBuckets.firstOrNull { it.first == targetPackTypeOverride }
-                ?: rawCompleteBuckets.first()
-            listOf(Triple(targetPackTypeOverride, chosen.second, chosen.third))
-        } else {
-            rawCompleteBuckets
-        }
+        if (completeBuckets.isEmpty()) return emptyList()
 
         val sdRoot = getSdInpaintRootDir(context)
         val importedTypes = mutableListOf<SdInpaintPackType>()
@@ -1055,14 +1009,10 @@ object SdInpaintPackManager {
         val dataFiles = compDir.listFiles()
             ?.filter {
                 it.isFile && (it.name.endsWith(".data", ignoreCase = true) ||
-                    it.name.endsWith(".onnx_data", ignoreCase = true) ||
-                    it.name.endsWith(".pb", ignoreCase = true))
+                    it.name.endsWith(".onnx_data", ignoreCase = true))
             }
             .orEmpty()
-        val referencesExternalData = fileContainsAnyAsciiToken(
-            onnxFile,
-            listOf(".onnx.data", ".onnx_data", "model.data", "weights.pb")
-        )
+        val referencesExternalData = fileContainsAnyAsciiToken(onnxFile, listOf(".onnx.data", ".onnx_data", "model.data"))
         if (!referencesExternalData) return false
         return dataFiles.none { it.length() > 1024L }
     }

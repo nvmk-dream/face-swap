@@ -110,6 +110,55 @@ object FaceAlignment {
     }
 
     /**
+     * Exact ArcFace 5-point Umeyama similarity alignment (`diffX = 0`, `ratio = imageSize / 112.0f`)
+     * required by SimSwap 256/512 models (`arcface_112_v2` template scaled directly without
+     * InSwapper's 8px horizontal offset). Used exclusively by Option D SimSwap.
+     */
+    fun estimateNormArcFaceExact(srcPoints: List<PointF>, imageSize: Int): FloatArray {
+        require(srcPoints.size >= 5) { "At least 5 facial landmarks are required for alignment." }
+        val ratio = imageSize / 112.0f
+        val dstPoints = Array(5) { i ->
+            PointF(ARCFACE_DST_112[i].x * ratio, ARCFACE_DST_112[i].y * ratio)
+        }
+        val n = 5
+        var srcMeanX = 0f
+        var srcMeanY = 0f
+        var dstMeanX = 0f
+        var dstMeanY = 0f
+        for (i in 0 until n) {
+            srcMeanX += srcPoints[i].x
+            srcMeanY += srcPoints[i].y
+            dstMeanX += dstPoints[i].x
+            dstMeanY += dstPoints[i].y
+        }
+        srcMeanX /= n
+        srcMeanY /= n
+        dstMeanX /= n
+        dstMeanY /= n
+
+        var numA = 0f
+        var numB = 0f
+        var denom = 0f
+        for (i in 0 until n) {
+            val u = srcPoints[i].x - srcMeanX
+            val v = srcPoints[i].y - srcMeanY
+            val xp = dstPoints[i].x - dstMeanX
+            val yp = dstPoints[i].y - dstMeanY
+            numA += u * xp + v * yp
+            numB += u * yp - v * xp
+            denom += u * u + v * v
+        }
+        if (denom < 1e-6f) {
+            return floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f)
+        }
+        val a = numA / denom
+        val b = numB / denom
+        val tx = dstMeanX - (a * srcMeanX - b * srcMeanY)
+        val ty = dstMeanY - (b * srcMeanX + a * srcMeanY)
+        return floatArrayOf(a, -b, tx, b, a, ty)
+    }
+
+    /**
      * Computes the exact inverse 2x3 affine matrix `M^-1` mapping from aligned crop coordinates
      * `(x', y')` back to original image coordinates `(x, y)`.
      */

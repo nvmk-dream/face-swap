@@ -535,42 +535,6 @@ object HeadSegmentationAndInpainting {
         return refined
     }
 
-    internal fun computeShadowAwareSkinLikelihood(
-        r: Float,
-        g: Float,
-        b: Float,
-        skinR: Float,
-        skinG: Float,
-        skinB: Float
-    ): Float {
-        val skinDist = sqrt(
-            (r - skinR) * (r - skinR) * 0.35f +
-                (g - skinG) * (g - skinG) * 0.45f +
-                (b - skinB) * (b - skinB) * 0.20f
-        )
-        val rgbSkinSim = (1.0f - (skinDist / 62.0f)).coerceIn(0f, 1f)
-
-        val pSum = (r + g + b).coerceAtLeast(18f)
-        val sSum = (skinR + skinG + skinB).coerceAtLeast(18f)
-        val chromaDist = abs((r / pSum) - (skinR / sSum)) +
-            abs((g / pSum) - (skinG / sSum)) +
-            abs((b / pSum) - (skinB / sSum))
-        val pLum = 0.299f * r + 0.587f * g + 0.114f * b
-        val sLum = (0.299f * skinR + 0.587f * skinG + 0.114f * skinB).coerceAtLeast(24f)
-        val lumRatio = pLum / sLum
-        val shadowSkinSim = if (pLum >= 26f && r >= b - 4f && lumRatio in 0.30f..1.35f) {
-            val chromaOk = (1.0f - (chromaDist / 0.16f)).coerceIn(0f, 1f)
-            val lumOk = when {
-                lumRatio >= 0.48f -> 1.0f
-                else -> ((lumRatio - 0.30f) / 0.18f).coerceIn(0f, 1f)
-            }
-            chromaOk * lumOk * 0.92f
-        } else {
-            0f
-        }
-        return max(rgbSkinSim, shadowSkinSim).coerceIn(0f, 1f)
-    }
-
     /**
      * Built-in Android Head/Hair/Skull/Neck segmentation & matting engine.
      * Separates background from hair crown, skull, ears, face, and upper neck using exterior
@@ -658,9 +622,13 @@ object HeadSegmentationAndInpainting {
                 }
                 val bgLikelihood = (sqrt(minBgDistSq) / 38.0f).coerceIn(0f, 1f)
 
-                // Distance to facial skin chrominance (Euclidean + luminance-normalized hue similarity
-                // so naturally shadowed chin-to-neck skin is never misclassified as non-skin background).
-                val isSkinLike = computeShadowAwareSkinLikelihood(r, g, b, skinR, skinG, skinB)
+                // Distance to facial skin chrominance
+                val skinDist = sqrt(
+                    (r - skinR) * (r - skinR) * 0.35f +
+                        (g - skinG) * (g - skinG) * 0.45f +
+                        (b - skinB) * (b - skinB) * 0.20f
+                )
+                val isSkinLike = (1.0f - (skinDist / 62.0f)).coerceIn(0f, 1f)
 
                 // Anatomical regions in canonical 256x256 head space:
                 // A) Core Face Oval: center (0.50, 0.56), rx = 0.21, ry = 0.23
@@ -695,10 +663,10 @@ object HeadSegmentationAndInpainting {
                     0f
                 }
 
-                // C) Upper & Mid Neck Column (ny in 0.66..0.95, yaw-tolerant width nx in 0.30..0.70)
-                val neckAlpha = if (ny in 0.66f..0.95f) {
-                    val nxDist = abs(nx - 0.50f) / 0.195f
-                    val nyTaper = ((0.95f - ny) / (0.95f - 0.66f)).coerceIn(0f, 1f)
+                // C) Upper Neck Column (ny in 0.70..0.92, nx in 0.33..0.67)
+                val neckAlpha = if (ny in 0.68f..0.93f) {
+                    val nxDist = abs(nx - 0.50f) / 0.165f
+                    val nyTaper = ((0.93f - ny) / (0.93f - 0.68f)).coerceIn(0f, 1f)
                     if (nxDist < 1.0f) {
                         val horiz = (0.5f * (1f + cos(Math.PI * nxDist))).toFloat()
                         horiz * nyTaper * (0.55f + 0.45f * isSkinLike)
@@ -1225,113 +1193,6 @@ object HeadSegmentationAndInpainting {
             }.getOrNull()
         }
         return null
-    }
-
-    /**
-     * Runs dedicated `face_occluder.onnx` or `dfl_xseg.onnx` (typically 256x256 RGB NCHW or NHWC ->
-     * 1-channel foreground occlusion mask in [0, 1]) ONLY for Option B+C and Option D.
-     * Option A & B continue using [computeFaceOcclusionGate512] untouched.
-     */
-    fun computeXsegOccluderGate512(
-        ortEnv: OrtEnvironment?,
-        alignedTarget512: Bitmap,
-        occluderFile: File?,
-        preferHardwareAccel: Boolean = false
-    ): FloatArray? {
-        if (ortEnv == null || occluderFile == null || !occluderFile.exists() || occluderFile.length() <= 1024L) {
-            return null
-        }
-        return runCatching {
-            val session = OnnxProtobufInspector.getOrCreateCachedSession(
-                ortEnv = ortEnv,
-                file = occluderFile,
-                preferHardwareAcceleration = preferHardwareAccel
-            ) ?: return@runCatching null
-
-            val inputEntry = session.inputInfo.entries.firstOrNull() ?: return@runCatching null
-            val inputName = inputEntry.key
-            val inInfo = inputEntry.value.info as? ai.onnxruntime.TensorInfo
-            val inShape = inInfo?.shape ?: longArrayOf(1L, 3L, 256L, 256L)
-            val isNhwcIn = inShape.size == 4 && inShape[3] == 3L && inShape[1] != 3L
-            val rawH = if (inShape.size == 4) (if (isNhwcIn) inShape[1] else inShape[2]) else 256L
-            val rawW = if (inShape.size == 4) (if (isNhwcIn) inShape[2] else inShape[3]) else 256L
-            val modelH = if (rawH > 0L) rawH.toInt().coerceIn(64, 512) else 256
-            val modelW = if (rawW > 0L) rawW.toInt().coerceIn(64, 512) else 256
-
-            val scaled = if (alignedTarget512.width == modelW && alignedTarget512.height == modelH) {
-                alignedTarget512
-            } else {
-                Bitmap.createScaledBitmap(alignedTarget512, modelW, modelH, true)
-            }
-            val hw = modelW * modelH
-            val pixels = IntArray(hw)
-            scaled.getPixels(pixels, 0, modelW, 0, 0, modelW, modelH)
-            if (scaled !== alignedTarget512) scaled.recycle()
-
-            val floatInput = NextGenBcdHelper.buildXsegRgbInputFloats(
-                pixels = pixels,
-                width = modelW,
-                height = modelH,
-                isNhwc = isNhwcIn
-            )
-            val tensorShape = if (isNhwcIn) {
-                longArrayOf(1L, modelH.toLong(), modelW.toLong(), 3L)
-            } else {
-                longArrayOf(1L, 3L, modelH.toLong(), modelW.toLong())
-            }
-
-            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floatInput), tensorShape).use { inTensor ->
-                session.run(mapOf(inputName to inTensor)).use { results ->
-                    val outTensor = results[0] as OnnxTensor
-                    val outShape = outTensor.info.shape
-                    val outBuf = outTensor.floatBuffer
-                    val remaining = outBuf.remaining()
-                    if (remaining <= 0) return@runCatching null
-                    val outFloats = FloatArray(remaining)
-                    outBuf.get(outFloats)
-
-                    var maskH = modelH
-                    var maskW = modelW
-                    var channels = 1
-                    var isNhwcOut = false
-                    when (outShape.size) {
-                        4 -> {
-                            val d1 = outShape[1].toInt()
-                            val d2 = outShape[2].toInt()
-                            val d3 = outShape[3].toInt()
-                            if (d3 in 1..2 && d1 > 16 && d2 > 16) {
-                                isNhwcOut = true
-                                maskH = d1
-                                maskW = d2
-                                channels = d3
-                            } else if (d1 in 1..2 && d2 > 16 && d3 > 16) {
-                                isNhwcOut = false
-                                channels = d1
-                                maskH = d2
-                                maskW = d3
-                            }
-                        }
-                        3 -> {
-                            val d1 = outShape[1].toInt()
-                            val d2 = outShape[2].toInt()
-                            if (d1 > 16 && d2 > 16) {
-                                maskH = d1
-                                maskW = d2
-                                channels = 1
-                            }
-                        }
-                    }
-
-                    NextGenBcdHelper.upscaleXsegMaskTo512(
-                        outFloats = outFloats,
-                        maskH = maskH,
-                        maskW = maskW,
-                        channels = channels,
-                        isNhwc = isNhwcOut
-                    )
-                }
-            }
-        }.getOrNull()
     }
 
     /**

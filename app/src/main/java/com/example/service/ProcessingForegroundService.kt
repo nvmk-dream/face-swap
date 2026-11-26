@@ -14,7 +14,6 @@ import android.os.Build
 import android.os.IBinder
 import android.annotation.SuppressLint
 import android.os.PowerManager
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -54,11 +53,7 @@ class ProcessingForegroundService : Service() {
         }
         val startedForeground = runCatching {
             ServiceCompat.startForeground(this, ONGOING_NOTIFICATION_ID, notification, serviceType)
-            true
-        }.getOrElse {
-            Log.w("FGS", "startForeground exception: ${it.message}")
-            false
-        }
+        }.isSuccess
         if (!startedForeground) {
             serviceActive = false
             startRequestedAtMs = 0L
@@ -195,10 +190,7 @@ class ProcessingForegroundService : Service() {
                 }
                 val launched = runCatching {
                     ContextCompat.startForegroundService(appCtx, intent)
-                }.getOrElse {
-                    Log.w("FGS", "startForegroundService exception: ${it.message}")
-                    null
-                } != null
+                }.isSuccess
                 if (launched) {
                     lastOngoingNotifyAtMs = now
                     return

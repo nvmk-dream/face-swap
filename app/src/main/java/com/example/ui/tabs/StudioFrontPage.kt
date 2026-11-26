@@ -11,6 +11,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -56,10 +58,18 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import com.example.onnx.FaceFusionOptionDEngine
+import com.example.onnx.OptionDEnhancerChoice
+import com.example.onnx.OptionDSwapperChoice
+import java.io.File
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -97,7 +107,6 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.onnx.FaceSwapStrategyOption
 import com.example.onnx.HeadReplacementPipelineMode
-import com.example.onnx.SdInpaintPackType
 import com.example.ui.FaceSwapUiState
 import com.example.ui.StudioMode
 import com.example.ui.theme.ElectricCyan
@@ -218,8 +227,10 @@ fun StudioFrontPage(
     onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
     onConfirmSwapStrategySelection: () -> Unit = {},
     onDismissSwapStrategyPopup: () -> Unit = {},
-    onUploadSd15Fp16Folder: () -> Unit = {},
-    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {},
+    onOptionDSwapperChoiceChanged: (OptionDSwapperChoice) -> Unit = {},
+    onOptionDEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit = {},
+    onOptionDCodeformerFidelityChanged: (Float) -> Unit = {},
+    onOptionDPixelBoostChanged: (Boolean) -> Unit = {},
     onOpenInpaintPage: () -> Unit = {},
     onViewResultFullScreen: (Bitmap) -> Unit = {},
     onViewStepFullScreen: (Bitmap, String) -> Unit = { bmp, _ -> onViewResultFullScreen(bmp) },
@@ -273,8 +284,10 @@ fun StudioFrontPage(
                 onAutoBodyAgeMatchChanged = onAutoBodyAgeMatchChanged,
                 onHeadPipelineModeChanged = onHeadPipelineModeChanged,
                 onRequestSwapStrategySelection = onRequestSwapStrategySelection,
-                onUploadSd15Fp16Folder = onUploadSd15Fp16Folder,
-                onDeleteSdInpaintPack = onDeleteSdInpaintPack
+                onOptionDSwapperChoiceChanged = onOptionDSwapperChoiceChanged,
+                onOptionDEnhancerChoiceChanged = onOptionDEnhancerChoiceChanged,
+                onOptionDCodeformerFidelityChanged = onOptionDCodeformerFidelityChanged,
+                onOptionDPixelBoostChanged = onOptionDPixelBoostChanged
             )
 
             // 4. Result Card (Source -> Target + Result Preview + Output 1 & 2 Steps + Download + Save to Gallery + Completed Footer)
@@ -757,8 +770,10 @@ private fun FrontMainWorkspaceCard(
     onAutoBodyAgeMatchChanged: (Boolean) -> Unit = {},
     onHeadPipelineModeChanged: (HeadReplacementPipelineMode) -> Unit = {},
     onRequestSwapStrategySelection: (com.example.onnx.FaceSwapStrategyOption) -> Unit = {},
-    onUploadSd15Fp16Folder: () -> Unit = {},
-    onDeleteSdInpaintPack: (SdInpaintPackType) -> Unit = {}
+    onOptionDSwapperChoiceChanged: (OptionDSwapperChoice) -> Unit = {},
+    onOptionDEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit = {},
+    onOptionDCodeformerFidelityChanged: (Float) -> Unit = {},
+    onOptionDPixelBoostChanged: (Boolean) -> Unit = {}
 ) {
     val cardShape = RoundedCornerShape(20.dp)
     Surface(
@@ -1064,6 +1079,16 @@ private fun FrontMainWorkspaceCard(
                         report = uiState.craniofacialReport,
                         selectedStrategy = uiState.swapStrategyOption
                     )
+
+                    if (uiState.swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
+                        OptionDFaceFusionControlsCard(
+                            uiState = uiState,
+                            onSwapperChoiceChanged = onOptionDSwapperChoiceChanged,
+                            onEnhancerChoiceChanged = onOptionDEnhancerChoiceChanged,
+                            onCodeformerFidelityChanged = onOptionDCodeformerFidelityChanged,
+                            onPixelBoostChanged = onOptionDPixelBoostChanged
+                        )
+                    }
                 }
 
                 if (uiState.studioMode == StudioMode.HEAD_REPLACEMENT ||
@@ -1159,107 +1184,6 @@ private fun FrontMainWorkspaceCard(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.padding(horizontal = 5.dp, vertical = 4.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Dedicated Card 2: Face Swap / Head Seam Bridge -> SD 1.5 Inpaint (FP16)
-                        val sd15Fp16Pack = uiState.installedSdPackDetails.firstOrNull {
-                            it.packType == SdInpaintPackType.SD15_FP16
-                        }
-                        val hasSd15Fp16 = sd15Fp16Pack != null
-                        val sd15SizeLabel = sd15Fp16Pack?.let {
-                            val gb = it.totalSizeBytes / (1024.0 * 1024.0 * 1024.0)
-                            if (gb >= 0.8) "%.2f GB".format(gb)
-                            else "%.0f MB".format(it.totalSizeBytes / (1024.0 * 1024.0))
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (hasSd15Fp16) Color(0xCCF0FDF4) else Color(0xCCEEF2FF),
-                            border = BorderStroke(
-                                1.1.dp,
-                                if (hasSd15Fp16) Color(0x8810B981) else Color(0x884F46E5)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("front_upload_sd15_fp16_card")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 48.dp)
-                                    .clickable(enabled = !uiState.isInspectingModels, onClick = onUploadSd15Fp16Folder)
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (hasSd15Fp16) Icons.Default.CheckCircle else Icons.Default.Folder,
-                                    contentDescription = "Face Swap SD 1.5 Inpaint FP16 Pack",
-                                    tint = if (hasSd15Fp16) Color(0xFF059669) else Color(0xFF4F46E5),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(1.dp)
-                                ) {
-                                    Text(
-                                        text = "Face Swap Seam: SD 1.5 Inpaint (FP16)",
-                                        color = Color(0xFF0F172A),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.5.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = if (hasSd15Fp16) {
-                                            "✓ Ready ($sd15SizeLabel) • Head/Seam Bridge (Inpaint உடன் கலக்காது)"
-                                        } else {
-                                            "Option B+C & Head Seam-க்கு SD 1.5 FP16 folder upload செய்யவும்"
-                                        },
-                                        color = if (hasSd15Fp16) Color(0xFF047857) else Color(0xFF4338CA),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (hasSd15Fp16) {
-                                    Surface(
-                                        shape = RoundedCornerShape(50),
-                                        color = Color(0x1AEF4444),
-                                        border = BorderStroke(1.dp, Color(0x66DC2626)),
-                                        modifier = Modifier
-                                            .heightIn(min = 32.dp)
-                                            .clickable(enabled = !uiState.isInspectingModels) {
-                                                onDeleteSdInpaintPack(SdInpaintPackType.SD15_FP16)
-                                            }
-                                            .testTag("front_clear_sd15_fp16_btn")
-                                    ) {
-                                        Box(
-                                            contentAlignment = Alignment.Center,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                        ) {
-                                            Text(
-                                                text = "Clear",
-                                                color = Color(0xFFDC2626),
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 10.sp
-                                            )
-                                        }
-                                    }
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(50),
-                                    color = if (hasSd15Fp16) Color(0xFF059669) else Color(0xFF4F46E5)
-                                ) {
-                                    Text(
-                                        text = if (hasSd15Fp16) "Replace" else "Upload",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 10.5.sp,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 }
                             }
@@ -2403,6 +2327,292 @@ internal fun CraniofacialAnalysisDiagnosticCard(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun OptionDFaceFusionControlsCard(
+    uiState: FaceSwapUiState,
+    onSwapperChoiceChanged: (OptionDSwapperChoice) -> Unit,
+    onEnhancerChoiceChanged: (OptionDEnhancerChoice) -> Unit,
+    onCodeformerFidelityChanged: (Float) -> Unit,
+    onPixelBoostChanged: (Boolean) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFFF0F9FF),
+        border = BorderStroke(1.2.dp, Color(0xFF0284C7)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("option_d_facefusion_card")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Option D • FaceFusion Offline Engine",
+                        color = Color(0xFF0C4A6E),
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 12.5.sp
+                    )
+                    Text(
+                        text = "SimSwap 512 / ReSwapper 256 / CodeFormer (w) / GPEN / XSeg — Option D-ல் மட்டும்",
+                        color = Color(0xFF475569),
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (uiState.isFaceOccluderReady) Color(0xFFDCFCE7) else Color(0xFFE0F2FE),
+                    border = BorderStroke(
+                        1.dp,
+                        if (uiState.isFaceOccluderReady) Color(0xFF16A34A) else Color(0xFF0284C7)
+                    ),
+                    modifier = Modifier.testTag("option_d_occluder_status_badge")
+                ) {
+                    Text(
+                        text = if (uiState.isFaceOccluderReady) "XSeg Ready" else "XSeg Optional",
+                        color = if (uiState.isFaceOccluderReady) Color(0xFF166534) else Color(0xFF0369A1),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.5.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            // Swapper model selector
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Face Swapper Model (${uiState.installedOptionDSwappers.size} installed)",
+                    color = Color(0xFF0369A1),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OptionDSwapperChoice.entries.forEach { choice ->
+                        val selected = uiState.optionDSwapperChoice == choice
+                        val available = if (choice == OptionDSwapperChoice.AUTO) {
+                            uiState.isSwapperReady
+                        } else {
+                            uiState.installedOptionDSwappers.any { name ->
+                                FaceFusionOptionDEngine.isFileMatchingSwapperChoice(File(name), choice)
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = when {
+                                selected -> Color(0xFF0F2C59)
+                                available -> Color.White
+                                else -> Color(0xFFF1F5F9)
+                            },
+                            border = BorderStroke(
+                                width = if (selected) 1.6.dp else 1.dp,
+                                color = when {
+                                    selected -> Color(0xFF00E5FF)
+                                    available -> Color(0xFF7DD3FC)
+                                    else -> Color(0xFFCBD5E1)
+                                }
+                            ),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onSwapperChoiceChanged(choice) }
+                                .testTag("option_d_swapper_${choice.id}")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = choice.title,
+                                    color = if (selected) Color.White else Color(0xFF0F172A),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = if (available) "${choice.shortBadge} • Ready" else "${choice.shortBadge} • Not Added",
+                                    color = when {
+                                        selected -> Color(0xFF7DD3FC)
+                                        available -> Color(0xFF059669)
+                                        else -> Color(0xFF64748B)
+                                    },
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pixel Boost toggle
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color.White,
+                border = BorderStroke(1.dp, Color(0x4D0284C7)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Pixel Boost (4× Sub-pixel Tiles)",
+                            color = Color(0xFF0F172A),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.5.sp
+                        )
+                        Text(
+                            text = "ON செய்தால் 256→512px / 128→256px கூடுதல் தெளிவு கிடைக்கும்",
+                            color = Color(0xFF475569),
+                            fontSize = 9.5.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Switch(
+                        checked = uiState.optionDPixelBoostEnabled,
+                        onCheckedChange = onPixelBoostChanged,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF0284C7)
+                        ),
+                        modifier = Modifier.testTag("option_d_pixel_boost_switch")
+                    )
+                }
+            }
+
+            // Enhancer selector
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Face Enhancer (${uiState.installedOptionDEnhancers.size} installed)",
+                    color = Color(0xFF0369A1),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OptionDEnhancerChoice.entries.forEach { choice ->
+                        val selected = uiState.optionDEnhancerChoice == choice
+                        val available = if (choice == OptionDEnhancerChoice.AUTO) {
+                            uiState.isEnhancerReady
+                        } else {
+                            uiState.installedOptionDEnhancers.any { name ->
+                                FaceFusionOptionDEngine.isFileMatchingEnhancerChoice(File(name), choice)
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = when {
+                                selected -> Color(0xFF0F2C59)
+                                available -> Color.White
+                                else -> Color(0xFFF1F5F9)
+                            },
+                            border = BorderStroke(
+                                width = if (selected) 1.6.dp else 1.dp,
+                                color = when {
+                                    selected -> Color(0xFF00E5FF)
+                                    available -> Color(0xFF7DD3FC)
+                                    else -> Color(0xFFCBD5E1)
+                                }
+                            ),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onEnhancerChoiceChanged(choice) }
+                                .testTag("option_d_enhancer_${choice.id}")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = choice.title,
+                                    color = if (selected) Color.White else Color(0xFF0F172A),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = if (available) "${choice.shortBadge} • Ready" else "${choice.shortBadge} • Not Added",
+                                    color = when {
+                                        selected -> Color(0xFF7DD3FC)
+                                        available -> Color(0xFF059669)
+                                        else -> Color(0xFF64748B)
+                                    },
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // CodeFormer fidelity (w) slider
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "CodeFormer Fidelity (w)",
+                        color = Color(0xFF0F172A),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = "w = %.2f".format(uiState.optionDCodeformerFidelity),
+                        color = Color(0xFF0369A1),
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.testTag("option_d_codeformer_w_value")
+                    )
+                }
+                Slider(
+                    value = uiState.optionDCodeformerFidelity,
+                    onValueChange = onCodeformerFidelityChanged,
+                    valueRange = 0.0f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF0284C7),
+                        activeTrackColor = Color(0xFF0284C7)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .semantics { contentDescription = "CodeFormer fidelity weight w" }
+                        .testTag("option_d_codeformer_fidelity_slider")
+                )
+                Text(
+                    text = "0.0 = Max Quality Restore • 1.0 = Max Original Identity (CodeFormer.onnx)",
+                    color = Color(0xFF64748B),
+                    fontSize = 9.sp
+                )
             }
         }
     }

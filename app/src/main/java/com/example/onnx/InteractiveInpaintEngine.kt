@@ -163,7 +163,6 @@ object InteractiveInpaintEngine {
 
         val requiresExplicitSdPack = selectedOption == InpaintModelOption.SD15_FP32 ||
             selectedOption == InpaintModelOption.SD15_FP16 ||
-            selectedOption == InpaintModelOption.REALVIS_FP16 ||
             selectedOption == InpaintModelOption.REALVIS_INT8
         if (requiresExplicitSdPack) {
             if (primarySdPack == null) {
@@ -240,26 +239,22 @@ object InteractiveInpaintEngine {
                         onProgress = onProgress
                     )
                 } else {
-                    val sdAttempt = runCatching {
-                        SdInpaintOnnxEngine.inpaint(
-                            ortEnv = ortEnv,
-                            pack = primarySdPack,
-                            sourceBitmap = sourceBitmap,
-                            maskBitmap = guardedMaskBitmap,
-                            prompt = prompt,
-                            negativePrompt = negativePrompt,
-                            fastMode = fastMode,
-                            turboMode = turboMode,
-                            preferHardwareAccel = false,
-                            strength = strength,
-                            guidanceScale = guidanceScale,
-                            context = context,
-                            isCancelled = isCancelled,
-                            onProgress = onProgress
-                        )
-                    }
-                    if (sdAttempt.isSuccess) return sdAttempt.getOrThrow()
-                    onProgress("SD Inpaint pack skipped (${sdAttempt.exceptionOrNull()?.message}); using Mango 4 prompt-guided texture synthesizer...")
+                    return SdInpaintOnnxEngine.inpaint(
+                        ortEnv = ortEnv,
+                        pack = primarySdPack,
+                        sourceBitmap = sourceBitmap,
+                        maskBitmap = guardedMaskBitmap,
+                        prompt = prompt,
+                        negativePrompt = negativePrompt,
+                        fastMode = fastMode,
+                        turboMode = turboMode,
+                        preferHardwareAccel = false,
+                        strength = strength,
+                        guidanceScale = guidanceScale,
+                        context = context,
+                        isCancelled = isCancelled,
+                        onProgress = onProgress
+                    )
                 }
             }
         }
@@ -355,7 +350,7 @@ object InteractiveInpaintEngine {
             if (isCancelled()) {
                 throw CancellationException("Inpaint cancelled by user.")
             }
-            if (prompt.isNotBlank()) {
+            if (prompt.isNotBlank() && !isRemovalIntentPrompt(prompt)) {
                 onProgress("Running Mango 4 style prompt-guided inpaint (\"$prompt\")...")
                 inpaintedFull = runPromptGuidedMango4Inpaint(
                     sourceBitmap = sourceBitmap,
@@ -885,6 +880,18 @@ object InteractiveInpaintEngine {
         return out
     }
 
+    internal fun isRemovalIntentPrompt(prompt: String): Boolean {
+        val trimmed = prompt.trim()
+        if (trimmed.isEmpty()) return false
+        val lower = trimmed.lowercase(java.util.Locale.ROOT)
+        val hasRemovalVerb = Regex("\\b(?:remove|erase|delete|clear|clean|without|hide|vanish)\\b")
+            .containsMatchIn(lower)
+        if (!hasRemovalVerb) return false
+        val hasReplacementVerb = Regex("\\b(?:replace\\s+with|change\\s+to|turn\\s+into|add|wear|put\\s+on)\\b")
+            .containsMatchIn(lower)
+        return !hasReplacementVerb
+    }
+
     private fun runPromptGuidedMango4Inpaint(
         sourceBitmap: Bitmap,
         fullMaskAlpha: FloatArray,
@@ -895,70 +902,58 @@ object InteractiveInpaintEngine {
         val height = sourceBitmap.height
         val total = width * height
         val srcPx = IntArray(total)
-        return runCatching {
-            sourceBitmap.getPixels(srcPx, 0, width, 0, 0, width, height)
-            val outPx = srcPx.copyOf()
+        sourceBitmap.getPixels(srcPx, 0, width, 0, 0, width, height)
+        val outPx = srcPx.copyOf()
 
-            val pLower = prompt.lowercase(java.util.Locale.ROOT)
-            val (targetR, targetG, targetB) = when {
-                pLower.contains("mango") || pLower.contains("orange") || pLower.contains("yellow") || pLower.contains("gold") -> Triple(255, 140, 20)
-                pLower.contains("red") || pLower.contains("rose") || pLower.contains("ruby") || pLower.contains("crimson") -> Triple(220, 35, 45)
-                pLower.contains("blue") || pLower.contains("ocean") || pLower.contains("sky") -> Triple(30, 120, 225)
-                pLower.contains("green") || pLower.contains("nature") || pLower.contains("leaf") -> Triple(40, 175, 75)
-                pLower.contains("purple") || pLower.contains("violet") -> Triple(135, 40, 185)
-                pLower.contains("pink") -> Triple(245, 100, 160)
-                pLower.contains("black") || pLower.contains("dark") || pLower.contains("sunglasses") -> Triple(25, 25, 30)
-                else -> {
-                    val hash = kotlin.math.abs(prompt.hashCode())
-                    Triple((hash % 180 + 75), ((hash / 7) % 180 + 75), ((hash / 31) % 180 + 75))
+        val pLower = prompt.lowercase(java.util.Locale.ROOT)
+        val (targetR, targetG, targetB) = when {
+            pLower.contains("mango") || pLower.contains("orange") || pLower.contains("yellow") || pLower.contains("gold") -> Triple(255, 140, 20)
+            pLower.contains("red") || pLower.contains("rose") || pLower.contains("ruby") || pLower.contains("crimson") -> Triple(220, 35, 45)
+            pLower.contains("blue") || pLower.contains("ocean") || pLower.contains("sky") -> Triple(30, 120, 225)
+            pLower.contains("green") || pLower.contains("nature") || pLower.contains("leaf") -> Triple(40, 175, 75)
+            pLower.contains("purple") || pLower.contains("violet") -> Triple(135, 40, 185)
+            pLower.contains("pink") -> Triple(245, 100, 160)
+            pLower.contains("black") || pLower.contains("dark") || pLower.contains("sunglasses") -> Triple(25, 25, 30)
+            else -> {
+                val hash = kotlin.math.abs(prompt.hashCode())
+                Triple((hash % 180 + 75), ((hash / 7) % 180 + 75), ((hash / 31) % 180 + 75))
+            }
+        }
+
+        val minX = maskBounds[0]
+        val minY = maskBounds[1]
+        val maxX = maskBounds[2]
+        val maxY = maskBounds[3]
+        val boxW = max(1, maxX - minX + 1)
+        val boxH = max(1, maxY - minY + 1)
+
+        for (y in minY..maxY) {
+            val rowOff = y * width
+            for (x in minX..maxX) {
+                val idx = rowOff + x
+                val m = fullMaskAlpha[idx]
+                if (m > 0.01f) {
+                    val orig = srcPx[idx]
+                    val oR = (orig ushr 16) and 0xFF
+                    val oG = (orig ushr 8) and 0xFF
+                    val oB = orig and 0xFF
+
+                    val nx = (x - minX).toFloat() / boxW
+                    val ny = (y - minY).toFloat() / boxH
+                    val noise = (kotlin.math.sin(nx * 24.0) * kotlin.math.cos(ny * 24.0) * 18.0).toInt()
+
+                    val blendFactor = (m * 0.78f).coerceIn(0f, 1f)
+                    val r = (oR * (1f - blendFactor) + (targetR + noise).coerceIn(0, 255) * blendFactor).roundToInt().coerceIn(0, 255)
+                    val g = (oG * (1f - blendFactor) + (targetG + noise).coerceIn(0, 255) * blendFactor).roundToInt().coerceIn(0, 255)
+                    val b = (oB * (1f - blendFactor) + (targetB + noise).coerceIn(0, 255) * blendFactor).roundToInt().coerceIn(0, 255)
+
+                    outPx[idx] = Color.rgb(r, g, b)
                 }
             }
+        }
 
-            val minX = maskBounds.getOrNull(0)?.coerceIn(0, width - 1) ?: 0
-            val minY = maskBounds.getOrNull(1)?.coerceIn(0, height - 1) ?: 0
-            val maxX = maskBounds.getOrNull(2)?.coerceIn(minX, width - 1) ?: (width - 1)
-            val maxY = maskBounds.getOrNull(3)?.coerceIn(minY, height - 1) ?: (height - 1)
-            val boxW = max(1, maxX - minX + 1)
-            val boxH = max(1, maxY - minY + 1)
-
-            for (y in minY..maxY) {
-                if (y < 0 || y >= height) continue
-                val rowOff = y * width
-                for (x in minX..maxX) {
-                    if (x < 0 || x >= width) continue
-                    val idx = rowOff + x
-                    if (idx < 0 || idx >= total) continue
-                    val m = fullMaskAlpha.getOrNull(idx) ?: 0f
-                    if (m > 0.01f) {
-                        val orig = srcPx[idx]
-                        val oR = (orig ushr 16) and 0xFF
-                        val oG = (orig ushr 8) and 0xFF
-                        val oB = orig and 0xFF
-                        val oLum = 0.299f * oR + 0.587f * oG + 0.114f * oB
-
-                        // Preserve saree folds, shadows, and fabric texture using luminance scaling
-                        val lumFactor = (oLum / 255.0f).coerceIn(0.12f, 0.95f)
-                        val nx = (x - minX).toFloat() / boxW
-                        val ny = (y - minY).toFloat() / boxH
-                        val fabricWeave = (kotlin.math.sin(nx * 56.0) * kotlin.math.cos(ny * 56.0) * 5.0).toInt()
-
-                        val tintedR = (targetR * lumFactor * 1.18f + fabricWeave).toInt().coerceIn(0, 255)
-                        val tintedG = (targetG * lumFactor * 1.18f + fabricWeave).toInt().coerceIn(0, 255)
-                        val tintedB = (targetB * lumFactor * 1.18f + fabricWeave).toInt().coerceIn(0, 255)
-
-                        val blendFactor = (m * 0.88f).coerceIn(0f, 1f)
-                        val r = (oR * (1f - blendFactor) + tintedR * blendFactor).roundToInt().coerceIn(0, 255)
-                        val g = (oG * (1f - blendFactor) + tintedG * blendFactor).roundToInt().coerceIn(0, 255)
-                        val b = (oB * (1f - blendFactor) + tintedB * blendFactor).roundToInt().coerceIn(0, 255)
-
-                        outPx[idx] = Color.rgb(r, g, b)
-                    }
-                }
-            }
-
-            val resultBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            resultBmp.setPixels(outPx, 0, width, 0, 0, width, height)
-            resultBmp
-        }.getOrDefault(sourceBitmap)
+        val resultBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        resultBmp.setPixels(outPx, 0, width, 0, 0, width, height)
+        return resultBmp
     }
 }

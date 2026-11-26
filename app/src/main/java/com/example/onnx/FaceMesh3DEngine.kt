@@ -688,8 +688,6 @@ object FaceMesh3DEngine {
             return PointF(tgtEyeMidX + rx, tgtEyeMidY + ry)
         }
 
-        val downX = -tgtDirY
-        val downY = tgtDirX
         val tgtCanvasPts = Array(CONTROL_POINT_COUNT) { i ->
             val projectedSrcPt = rawProjectedPts[i]
             val basePt = when {
@@ -722,14 +720,11 @@ object FaceMesh3DEngine {
                         synced.y * 0.32f + rawCanvasPts[i].y * 0.68f
                     )
                 }
-                // Anchor lower neck & collar junction (28..30) coherently onto Target neck/collar axis (88% Target)
-                else -> {
-                    val synced = rotateAndPerspectiveSync(projectedSrcPt, rotFraction = 0.35f, yawPerspStrength = 0.10f)
-                    PointF(
-                        synced.x * 0.12f + rawCanvasPts[i].x * 0.88f,
-                        synced.y * 0.12f + rawCanvasPts[i].y * 0.88f
-                    )
-                }
+                // Anchor lower neck & collar junction (28..30) cleanly onto Target neck/collar axis (88% Target)
+                else -> PointF(
+                    projectedSrcPt.x * 0.12f + rawCanvasPts[i].x * 0.88f,
+                    projectedSrcPt.y * 0.12f + rawCanvasPts[i].y * 0.88f
+                )
             }
             // Apply user scaleAdjust & offset around eye midpoint
             val safeScale = scaleAdjust.coerceIn(0.80f, 1.25f)
@@ -737,24 +732,6 @@ object FaceMesh3DEngine {
             val adjY = tgtEyeMidY + (basePt.y - tgtEyeMidY) * safeScale + offsetY * (canvasSize / 320f)
             PointF(adjX, adjY)
         }
-
-        // Prevent triangle inversion / folded neck creases along head-down vector when Source & Target chin lengths differ
-        fun clampBelowAnchor(ptIdx: Int, anchorIdx: Int, minDownDelta: Float) {
-            val anchor = tgtCanvasPts[anchorIdx]
-            val cur = tgtCanvasPts[ptIdx]
-            val curDot = (cur.x - anchor.x) * downX + (cur.y - anchor.y) * downY
-            if (curDot < minDownDelta) {
-                val push = minDownDelta - curDot
-                tgtCanvasPts[ptIdx] = PointF(cur.x + downX * push, cur.y + downY * push)
-            }
-        }
-        val safeScaledEyeDist = tgtEyeDist * scaleAdjust.coerceIn(0.80f, 1.25f)
-        clampBelowAnchor(25, 15, safeScaledEyeDist * 0.22f)
-        clampBelowAnchor(26, 17, safeScaledEyeDist * 0.20f)
-        clampBelowAnchor(27, 16, safeScaledEyeDist * 0.22f)
-        clampBelowAnchor(28, 25, safeScaledEyeDist * 0.26f)
-        clampBelowAnchor(29, 26, safeScaledEyeDist * 0.26f)
-        clampBelowAnchor(30, 27, safeScaledEyeDist * 0.26f)
 
         val srcW = sourceBitmap.width
         val srcH = sourceBitmap.height
