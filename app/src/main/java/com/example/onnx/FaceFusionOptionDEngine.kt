@@ -65,18 +65,18 @@ data class OptionDFaceFusionConfig(
  */
 object FaceFusionOptionDEngine {
 
-    private enum class InputNormMode {
+    internal enum class InputNormMode {
         SIGNED_MINUS1_TO_1,
         UNSIGNED_0_TO_1,
         IMAGENET
     }
 
-    private enum class ChannelLayout {
+    internal enum class ChannelLayout {
         RGB,
         BGR
     }
 
-    private data class SwapperInputSpec(
+    internal data class SwapperInputSpec(
         val channelLayout: ChannelLayout,
         val normMode: InputNormMode
     ) {
@@ -113,6 +113,27 @@ object FaceFusionOptionDEngine {
         val primary = OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_OCCLUDER)
         if (primary.exists() && primary.length() > 1024L) return primary
         return OnnxProtobufInspector.listSlotVariantFiles(context, ModelSlot.FACE_OCCLUDER).firstOrNull()
+    }
+
+    fun resolveSimSwapEmbeddingConverterFile(context: Context): File? {
+        val root = OnnxProtobufInspector.getModelsRootDir(context)
+        val searchDirs = listOf(
+            File(root, ModelSlot.RECOGNIZER.subdirectory),
+            File(root, ModelSlot.SWAPPER.subdirectory),
+            root
+        )
+        for (dir in searchDirs) {
+            if (!dir.exists() || !dir.isDirectory) continue
+            val exact = File(dir, "crossface_simswap.onnx")
+            if (exact.isFile && exact.length() > 1024L) return exact
+            val fuzzy = dir.listFiles()?.firstOrNull { f ->
+                val l = f.name.lowercase()
+                f.isFile && f.length() > 1024L && l.endsWith(".onnx") &&
+                    l.contains("crossface") && l.contains("simswap")
+            }
+            if (fuzzy != null) return fuzzy
+        }
+        return null
     }
 
     fun isFileMatchingSwapperChoice(file: File, choice: OptionDSwapperChoice): Boolean {
@@ -281,7 +302,20 @@ object FaceFusionOptionDEngine {
         if (isCancelled()) throw CancellationException("Face swap cancelled by user.")
 
         val swapFile = resolveSwapperFile(context, config.swapperChoice)
-        val swapSession = preloadedSwapSession ?: if (swapFile.exists() && swapFile.length() > 1024L && ortEnv != null) {
+        var modelCropSize = inferCropSizeFromFileName(swapFile)
+
+        val validatedPreloadedSession = preloadedSwapSession?.takeIf { sess ->
+            val spatialDim = sess.inputInfo.values.firstNotNullOfOrNull { nodeInfo ->
+                val tInfo = nodeInfo.info as? TensorInfo
+                if (tInfo != null && tInfo.shape.size == 4) {
+                    val nhwc = tInfo.shape[3] == 3L && tInfo.shape[1] != 3L
+                    (if (nhwc) tInfo.shape[1] else tInfo.shape[2]).toInt()
+                } else null
+            }
+            spatialDim == null || spatialDim <= 0 || spatialDim == modelCropSize
+        }
+
+        val swapSession = validatedPreloadedSession ?: if (swapFile.exists() && swapFile.length() > 1024L && ortEnv != null) {
             OnnxProtobufInspector.getOrCreateCachedSession(
                 ortEnv = ortEnv,
                 file = swapFile,
@@ -295,7 +329,6 @@ object FaceFusionOptionDEngine {
         var isTargetNhwc = false
         var targetInputType = OnnxJavaType.FLOAT
         var sourceInputType = OnnxJavaType.FLOAT
-        var modelCropSize = inferCropSizeFromFileName(swapFile)
 
         if (swapSession != null) {
             for ((name, nodeInfo) in swapSession.inputInfo) {
@@ -338,7 +371,7 @@ object FaceFusionOptionDEngine {
         }
 
         val alignMatrix = if (simSwapAlign) {
-            FaceAlignment.estimateNormArcFaceExact(targetFace.landmarks5, boostSize)
+            FaceAlignment.estimateNormArcFaceV1(targetFace.landmarks5, boostSize)
         } else {
             FaceAlignment.estimateNorm(targetFace.landmarks5, boostSize)
         }
@@ -372,16 +405,38 @@ object FaceFusionOptionDEngine {
             )
         }
 
-        val sourceVec = if (isEmapProjectionRequired(swapFile)) {
-            InSwapperEngine.resolveSwapperSourceVector(
-                context = context,
-                activeSwapFile = swapFile,
-                isHyperSwap256 = false,
-                sourceEmbedding = sourceEmbedding
-            )
-        } else {
-            sourceEmbedding.rawNormedEmbedding512
+        var usedCrossfaceConverter = false
+        val sourceVec = when {
+            isEmapProjectionRequired(swapFile) -> {
+                InSwapperEngine.resolveSwapperSourceVector(
+                    context = context,
+                    activeSwapFile = swapFile,
+                    isHyperSwap256 = false,
+                    sourceEmbedding = sourceEmbedding
+                )
+            }
+            simSwapAlign -> {
+                val crossfaceFile = resolveSimSwapEmbeddingConverterFile(context)
+                val converted = if (crossfaceFile != null) {
+                    runSimSwapEmbeddingConverter(
+                        ortEnv = ortEnv,
+                        converterFile = crossfaceFile,
+                        unnormedEmbedding512 = sourceEmbedding.unnormedEmbedding512,
+                        preferHardwareAccel = preferHardwareAccel
+                    )
+                } else null
+                if (converted != null) {
+                    usedCrossfaceConverter = true
+                    converted
+                } else {
+                    sourceEmbedding.rawNormedEmbedding512
+                }
+            }
+            else -> sourceEmbedding.rawNormedEmbedding512
         }
+        val crossfaceTag = if (simSwapAlign) {
+            if (usedCrossfaceConverter) " + crossface_simswap" else " (direct L2)"
+        } else ""
 
         val sourceTensor = if (sourceInputType == OnnxJavaType.FLOAT16) {
             val sHalf = ShortArray(512) { idx -> DepthEstimationEngine.floatToFloat16(sourceVec[idx]) }
@@ -481,7 +536,7 @@ object FaceFusionOptionDEngine {
                 effectiveOutputSize = boostSize,
                 usedPixelBoost = shouldUsePixelBoost,
                 usedNeuralSwap = true,
-                diagnosticSummary = diagText
+                diagnosticSummary = "$diagText$crossfaceTag"
             )
         } finally {
             runCatching { sourceTensor.close() }
@@ -497,16 +552,83 @@ object FaceFusionOptionDEngine {
         }
     }
 
-    private fun defaultSpecForSwapper(file: File): SwapperInputSpec {
+    private fun runSimSwapEmbeddingConverter(
+        ortEnv: OrtEnvironment,
+        converterFile: File,
+        unnormedEmbedding512: FloatArray,
+        preferHardwareAccel: Boolean
+    ): FloatArray? {
+        if (!converterFile.exists() || converterFile.length() <= 1024L || unnormedEmbedding512.size != 512) {
+            return null
+        }
+        val session = OnnxProtobufInspector.getOrCreateCachedSession(
+            ortEnv = ortEnv,
+            file = converterFile,
+            preferHardwareAcceleration = preferHardwareAccel
+        ) ?: return null
+        return runCatching {
+            val inEntry = session.inputInfo.entries.firstOrNull() ?: return@runCatching null
+            val inInfo = inEntry.value.info as? TensorInfo
+            val shape = if (inInfo != null && inInfo.shape.size == 1) longArrayOf(512L) else longArrayOf(1L, 512L)
+            val inTensor = if (inInfo?.type == OnnxJavaType.FLOAT16) {
+                val shorts = ShortArray(512) { idx -> DepthEstimationEngine.floatToFloat16(unnormedEmbedding512[idx]) }
+                OnnxTensor.createTensor(ortEnv, ShortBuffer.wrap(shorts), shape, OnnxJavaType.FLOAT16)
+            } else {
+                OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(unnormedEmbedding512), shape)
+            }
+            inTensor.use { tensor ->
+                session.run(mapOf(inEntry.key to tensor)).use { res ->
+                    val outT = res[0] as OnnxTensor
+                    val outVec = FloatArray(512)
+                    if (outT.info.type == OnnxJavaType.FLOAT16) {
+                        val sb = outT.shortBuffer
+                        val cnt = min(sb.remaining(), 512)
+                        for (i in 0 until cnt) outVec[i] = DepthEstimationEngine.float16ToFloat(sb.get())
+                    } else {
+                        val fb = outT.floatBuffer
+                        fb.get(outVec, 0, min(fb.remaining(), 512))
+                    }
+                    val norm = ArcFaceRecognizer.computeL2Norm(outVec)
+                    if (!norm.isFinite() || norm < 1e-4f) return@runCatching null
+                    FloatArray(512) { idx -> outVec[idx] / norm }
+                }
+            }
+        }.getOrNull()
+    }
+
+    internal fun defaultSpecForSwapper(file: File): SwapperInputSpec {
         val l = file.name.lowercase()
         return when {
-            l.contains("simswap") -> SwapperInputSpec(ChannelLayout.RGB, InputNormMode.IMAGENET)
-            l.contains("blendswap") || l.contains("ghost_") ->
+            // FaceFusion core.py: simswap_unofficial_512 / simswap_512 uses mean=[0,0,0], std=[1,1,1] ([0..1] RGB),
+            // whereas simswap_256 uses ImageNet mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225].
+            l.contains("simswap") && l.contains("512") ->
+                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.UNSIGNED_0_TO_1)
+            l.contains("simswap") ->
+                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.IMAGENET)
+            l.contains("blendswap") ->
+                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.UNSIGNED_0_TO_1)
+            l.contains("ghost_") ->
                 SwapperInputSpec(ChannelLayout.BGR, InputNormMode.SIGNED_MINUS1_TO_1)
             l.contains("reswapper") -> SwapperInputSpec(ChannelLayout.RGB, InputNormMode.SIGNED_MINUS1_TO_1)
             l.contains("inswapper") -> SwapperInputSpec(ChannelLayout.RGB, InputNormMode.UNSIGNED_0_TO_1)
             else -> SwapperInputSpec(ChannelLayout.RGB, InputNormMode.SIGNED_MINUS1_TO_1)
         }
+    }
+
+    internal fun shouldRetryCorruptedOrSolarizedOutput(stats: InSwapperEngine.RawOutputStats): Boolean {
+        return stats.neonRedFraction > 0.015f ||
+            stats.collapsedBlackFraction > 0.02f ||
+            stats.nanFraction > 0.005f ||
+            stats.lumaCorrelation < 0.42f ||
+            stats.centerFaceDiff > 48.0f
+    }
+
+    internal fun computeSpecQualityCost(stats: InSwapperEngine.RawOutputStats): Float {
+        val corrPenalty = if (stats.lumaCorrelation < 0.50f) (0.50f - stats.lumaCorrelation) * 4.5f else 0f
+        val colorBreakdownPenalty = if (stats.centerFaceDiff > 44.0f) (stats.centerFaceDiff - 44.0f) / 18.0f else 0f
+        val rangeSpan = stats.maxVal - stats.minVal
+        val rangePenalty = if (rangeSpan < 0.40f) (0.40f - rangeSpan) * 2.0f else 0f
+        return stats.artifactScore + corrPenalty + colorBreakdownPenalty + rangePenalty
     }
 
     private fun runSingleTileWithSelfHealing(
@@ -530,10 +652,7 @@ object FaceFusionOptionDEngine {
         )
         var bestSpec = initialSpec
 
-        val hasCorruption = bestStats.neonRedFraction > 0.015f ||
-            bestStats.collapsedBlackFraction > 0.02f ||
-            bestStats.nanFraction > 0.005f ||
-            bestStats.lumaCorrelation < 0.10f
+        val hasCorruption = shouldRetryCorruptedOrSolarizedOutput(bestStats)
         val hasRangeCollapse = (bestStats.maxVal - bestStats.minVal) < 0.40f ||
             bestStats.gtOneFraction > 0.25f
         val isPassthrough = InSwapperEngine.shouldRetryNearIdentityPassthrough(
@@ -545,12 +664,12 @@ object FaceFusionOptionDEngine {
 
         if (hasCorruption || (isHyperOrSimSwap && (isPassthrough || hasRangeCollapse))) {
             val candidates = listOf(
-                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.IMAGENET),
-                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.SIGNED_MINUS1_TO_1),
                 SwapperInputSpec(ChannelLayout.RGB, InputNormMode.UNSIGNED_0_TO_1),
-                SwapperInputSpec(ChannelLayout.BGR, InputNormMode.IMAGENET),
+                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.SIGNED_MINUS1_TO_1),
+                SwapperInputSpec(ChannelLayout.RGB, InputNormMode.IMAGENET),
+                SwapperInputSpec(ChannelLayout.BGR, InputNormMode.UNSIGNED_0_TO_1),
                 SwapperInputSpec(ChannelLayout.BGR, InputNormMode.SIGNED_MINUS1_TO_1),
-                SwapperInputSpec(ChannelLayout.BGR, InputNormMode.UNSIGNED_0_TO_1)
+                SwapperInputSpec(ChannelLayout.BGR, InputNormMode.IMAGENET)
             ).filter { it != initialSpec }
 
             for (cand in candidates) {
@@ -559,21 +678,24 @@ object FaceFusionOptionDEngine {
                     isTargetNhwc, targetInputType, targetPixels, cropSize, cand, outputRangeHint, sourceTensor
                 )
                 if (hasCorruption || hasRangeCollapse) {
+                    val candCost = computeSpecQualityCost(candStats)
+                    val bestCost = computeSpecQualityCost(bestStats)
                     val candRange = candStats.maxVal - candStats.minVal
                     val bestRange = bestStats.maxVal - bestStats.minVal
                     val betterRange = !hasCorruption && hasRangeCollapse &&
-                        candStats.artifactScore <= 0.05f && candRange > bestRange + 0.25f
-                    if (candStats.artifactScore < bestStats.artifactScore || betterRange) {
+                        candCost <= 0.15f && candRange > bestRange + 0.25f
+                    if (candCost + 0.02f < bestCost || betterRange) {
                         bestPx = candPx
                         bestStats = candStats
                         bestSpec = cand
-                        if (bestStats.artifactScore < 0.02f && (bestStats.maxVal - bestStats.minVal) >= 0.45f) break
+                        val isCleanAndCorrelated = !shouldRetryCorruptedOrSolarizedOutput(bestStats) &&
+                            bestStats.lumaCorrelation >= 0.62f &&
+                            (bestStats.maxVal - bestStats.minVal) >= 0.45f
+                        if (isCleanAndCorrelated) break
                     }
                 } else {
-                    val candClean = candStats.neonRedFraction <= 0.01f &&
-                        candStats.collapsedBlackFraction <= 0.015f &&
-                        candStats.nanFraction <= 0.002f &&
-                        candStats.lumaCorrelation in 0.45f..0.985f &&
+                    val candClean = !shouldRetryCorruptedOrSolarizedOutput(candStats) &&
+                        candStats.lumaCorrelation in 0.48f..0.985f &&
                         (candStats.maxVal - candStats.minVal) >= 0.45f
                     if (candClean && candStats.centerFaceDiff > bestStats.centerFaceDiff * 1.45f + 3.0f) {
                         bestPx = candPx

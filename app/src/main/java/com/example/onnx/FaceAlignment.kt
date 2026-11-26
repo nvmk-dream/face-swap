@@ -109,16 +109,27 @@ object FaceAlignment {
         return floatArrayOf(a, -b, tx, b, a, ty)
     }
 
-    /**
-     * Exact ArcFace 5-point Umeyama similarity alignment (`diffX = 0`, `ratio = imageSize / 112.0f`)
-     * required by SimSwap 256/512 models (`arcface_112_v2` template scaled directly without
-     * InSwapper's 8px horizontal offset). Used exclusively by Option D SimSwap.
-     */
-    fun estimateNormArcFaceExact(srcPoints: List<PointF>, imageSize: Int): FloatArray {
-        require(srcPoints.size >= 5) { "At least 5 facial landmarks are required for alignment." }
-        val ratio = imageSize / 112.0f
-        val dstPoints = Array(5) { i ->
-            PointF(ARCFACE_DST_112[i].x * ratio, ARCFACE_DST_112[i].y * ratio)
+    // FaceFusion `arcface_112_v1` normalized 5-point template (required by simswap_256 and simswap_unofficial_512)
+    private val ARCFACE_V1_NORMALIZED = arrayOf(
+        PointF(0.35473214f, 0.45658929f),
+        PointF(0.64526786f, 0.45658929f),
+        PointF(0.50000000f, 0.61154464f),
+        PointF(0.37913393f, 0.77687500f),
+        PointF(0.62086607f, 0.77687500f)
+    )
+
+    // FaceFusion `ffhq_512` normalized 5-point template (required by CodeFormer, GFPGAN 1.4, GPEN-BFR 512, RestoreFormer++)
+    private val FFHQ_512_NORMALIZED = arrayOf(
+        PointF(0.37691676f, 0.46864664f),
+        PointF(0.62285697f, 0.46912813f),
+        PointF(0.50123859f, 0.61331904f),
+        PointF(0.39308822f, 0.72541100f),
+        PointF(0.61150205f, 0.72490465f)
+    )
+
+    private fun estimateNormForPoints(srcPoints: List<PointF>, dstPoints: Array<PointF>): FloatArray {
+        require(srcPoints.size >= 5 && dstPoints.size >= 5) {
+            "At least 5 facial landmarks are required for alignment."
         }
         val n = 5
         var srcMeanX = 0f
@@ -156,6 +167,43 @@ object FaceAlignment {
         val tx = dstMeanX - (a * srcMeanX - b * srcMeanY)
         val ty = dstMeanY - (b * srcMeanX + a * srcMeanY)
         return floatArrayOf(a, -b, tx, b, a, ty)
+    }
+
+    /**
+     * Exact ArcFace 5-point Umeyama similarity alignment (`diffX = 0`, `ratio = imageSize / 112.0f`).
+     */
+    fun estimateNormArcFaceExact(srcPoints: List<PointF>, imageSize: Int): FloatArray {
+        require(srcPoints.size >= 5) { "At least 5 facial landmarks are required for alignment." }
+        val ratio = imageSize / 112.0f
+        val dstPoints = Array(5) { i ->
+            PointF(ARCFACE_DST_112[i].x * ratio, ARCFACE_DST_112[i].y * ratio)
+        }
+        return estimateNormForPoints(srcPoints, dstPoints)
+    }
+
+    /**
+     * FaceFusion `arcface_112_v1` similarity alignment required by `simswap_256` and `simswap_512_unofficial`.
+     */
+    fun estimateNormArcFaceV1(srcPoints: List<PointF>, imageSize: Int): FloatArray {
+        require(srcPoints.size >= 5) { "At least 5 facial landmarks are required for alignment." }
+        val s = imageSize.toFloat()
+        val dstPoints = Array(5) { i ->
+            PointF(ARCFACE_V1_NORMALIZED[i].x * s, ARCFACE_V1_NORMALIZED[i].y * s)
+        }
+        return estimateNormForPoints(srcPoints, dstPoints)
+    }
+
+    /**
+     * FaceFusion `ffhq_512` similarity alignment used by `codeformer.onnx`, `gfpgan_1.4.onnx`,
+     * `gpen_bfr_512.onnx`, and `restoreformer_plus_plus.onnx`.
+     */
+    fun estimateNormFfhq(srcPoints: List<PointF>, imageSize: Int): FloatArray {
+        require(srcPoints.size >= 5) { "At least 5 facial landmarks are required for alignment." }
+        val s = imageSize.toFloat()
+        val dstPoints = Array(5) { i ->
+            PointF(FFHQ_512_NORMALIZED[i].x * s, FFHQ_512_NORMALIZED[i].y * s)
+        }
+        return estimateNormForPoints(srcPoints, dstPoints)
     }
 
     /**

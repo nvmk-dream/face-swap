@@ -17,7 +17,8 @@ data class SourceEmbeddingResult(
     val usedEmbeddedEmap: Boolean,
     val providerSummary: String,
     val rawEmbeddingL2Norm: Float = 1.0f,
-    val executionProvider: String = "CPU"
+    val executionProvider: String = "CPU",
+    val unnormedEmbedding512: FloatArray = rawNormedEmbedding512
 )
 
 /**
@@ -120,7 +121,8 @@ object ArcFaceRecognizer {
             usedEmbeddedEmap = usedEmap,
             providerSummary = summary,
             rawEmbeddingL2Norm = rawNorm,
-            executionProvider = activeEp
+            executionProvider = activeEp,
+            unnormedEmbedding512 = rawEmbedding.copyOf()
         )
     }
 

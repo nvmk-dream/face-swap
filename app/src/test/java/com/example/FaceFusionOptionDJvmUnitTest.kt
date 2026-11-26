@@ -51,6 +51,52 @@ class FaceFusionOptionDJvmUnitTest {
         assertEquals(ModelSlot.FACE_OCCLUDER, OnnxProtobufInspector.matchSlotForFileName("xseg_1.onnx"))
         assertEquals(ModelSlot.FACE_OCCLUDER, OnnxProtobufInspector.matchSlotForFileName("dfl_xseg.onnx"))
         assertEquals(ModelSlot.SEGMENTATION, OnnxProtobufInspector.matchSlotForFileName("segformer_B5_ce.onnx"))
+        assertEquals(null, OnnxProtobufInspector.matchSlotForFileName("crossface_simswap.onnx"))
+    }
+
+    @Test
+    fun simswap512_usesUnsigned0To1DefaultAndSelfHealingCatchesSolarizedStats() {
+        val spec512 = FaceFusionOptionDEngine.defaultSpecForSwapper(File("simswap_512_unofficial.onnx"))
+        assertEquals(FaceFusionOptionDEngine.ChannelLayout.RGB, spec512.channelLayout)
+        assertEquals(FaceFusionOptionDEngine.InputNormMode.UNSIGNED_0_TO_1, spec512.normMode)
+
+        val spec256 = FaceFusionOptionDEngine.defaultSpecForSwapper(File("simswap_256.onnx"))
+        assertEquals(FaceFusionOptionDEngine.ChannelLayout.RGB, spec256.channelLayout)
+        assertEquals(FaceFusionOptionDEngine.InputNormMode.IMAGENET, spec256.normMode)
+
+        val solarizedStats = com.example.onnx.InSwapperEngine.RawOutputStats(
+            minVal = 0.00f,
+            maxVal = 1.00f,
+            negFraction = 0.0f,
+            gtOneFraction = 0.0f,
+            nanFraction = 0.0f,
+            isSignedOutput = false,
+            neonRedFraction = 0.005f,
+            collapsedBlackFraction = 0.005f,
+            lumaCorrelation = 0.16f,
+            artifactScore = 0.03f,
+            centerFaceDiff = 81.3f
+        )
+        assertTrue(FaceFusionOptionDEngine.shouldRetryCorruptedOrSolarizedOutput(solarizedStats))
+
+        val cleanStats = com.example.onnx.InSwapperEngine.RawOutputStats(
+            minVal = 0.02f,
+            maxVal = 0.96f,
+            negFraction = 0.0f,
+            gtOneFraction = 0.0f,
+            nanFraction = 0.0f,
+            isSignedOutput = false,
+            neonRedFraction = 0.0f,
+            collapsedBlackFraction = 0.0f,
+            lumaCorrelation = 0.84f,
+            artifactScore = 0.0f,
+            centerFaceDiff = 16.5f
+        )
+        assertFalse(FaceFusionOptionDEngine.shouldRetryCorruptedOrSolarizedOutput(cleanStats))
+        assertTrue(
+            FaceFusionOptionDEngine.computeSpecQualityCost(cleanStats) <
+                FaceFusionOptionDEngine.computeSpecQualityCost(solarizedStats)
+        )
     }
 
     @Test

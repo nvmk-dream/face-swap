@@ -452,6 +452,11 @@ object OnnxProtobufInspector {
 
         val primaryDir = File(root, slot.subdirectory)
         primaryDir.listFiles()
+            ?.filter {
+                val l = it.name.lowercase()
+                !(slot == ModelSlot.SWAPPER && l.startsWith("crossface")) &&
+                    !(slot == ModelSlot.RECOGNIZER && l.startsWith("crossface"))
+            }
             ?.sortedBy { it.name.lowercase() }
             ?.forEach(::addIfMatch)
 
@@ -1017,6 +1022,7 @@ object OnnxProtobufInspector {
         if (DepthEstimationEngine.classifyDepthFile(fileName, parentPathHint) != null) {
             return ModelSlot.DEPTH
         }
+        if (lower.startsWith("crossface")) return null
         return when {
             lower.contains("det_10g") || lower.contains("scrfd") || lower.contains("det_2.5g") ->
                 ModelSlot.DETECTOR
@@ -1069,7 +1075,9 @@ object OnnxProtobufInspector {
         if (!lower.endsWith(".onnx")) return false
         return lower.contains("1k3d68") ||
             lower.contains("2d106det") ||
-            lower.contains("bisenet")
+            lower.contains("bisenet") ||
+            lower.contains("crossface_simswap") ||
+            lower.startsWith("crossface_")
     }
 
     private fun sanitizeImportedFileName(rawName: String?, fallback: String): String {
@@ -1387,13 +1395,13 @@ object OnnxProtobufInspector {
                 }
             }
 
-            // Also import any auxiliary 3D landmark (1k3d68.onnx, 2d106det.onnx) or occlusion/parsing models
+            // Also import any auxiliary 3D landmark (1k3d68.onnx, 2d106det.onnx), crossface_simswap.onnx, or occlusion/parsing models
             for ((docId, displayName, docSize) in rawAuxiliaryOnnx) {
                 val lower = displayName.trim().lowercase()
-                val auxSubDirName = if (lower.contains("1k3d68") || lower.contains("2d106det")) {
-                    "landmarks_3d"
-                } else {
-                    "segmentation"
+                val auxSubDirName = when {
+                    lower.contains("1k3d68") || lower.contains("2d106det") -> "landmarks_3d"
+                    lower.startsWith("crossface") -> "recognition"
+                    else -> "segmentation"
                 }
                 val auxDir = File(rootDir, auxSubDirName).apply { if (!exists()) mkdirs() }
                 val auxDest = File(auxDir, displayName.trim())
@@ -1606,19 +1614,29 @@ object OnnxProtobufInspector {
     ): Result<File> {
         return try {
             val root = getModelsRootDir(context)
-            val subDir = File(root, slot.subdirectory).apply { if (!exists()) mkdirs() }
             val pickedNameForNaming = queryDisplayName(context, uri)
-            val targetName = overrideFileName ?: when (slot) {
-                ModelSlot.DEPTH -> if (!pickedNameForNaming.isNullOrBlank()) {
+            val isCrossfaceAdapter = overrideFileName == null &&
+                pickedNameForNaming?.trim()?.lowercase()?.startsWith("crossface") == true
+            val subDir = if (isCrossfaceAdapter) {
+                File(root, ModelSlot.RECOGNIZER.subdirectory).apply { if (!exists()) mkdirs() }
+            } else {
+                File(root, slot.subdirectory).apply { if (!exists()) mkdirs() }
+            }
+            val targetName = overrideFileName ?: when {
+                isCrossfaceAdapter -> sanitizeImportedFileName(
+                    pickedNameForNaming,
+                    "crossface_simswap.onnx"
+                )
+                slot == ModelSlot.DEPTH -> if (!pickedNameForNaming.isNullOrBlank()) {
                     DepthEstimationEngine.canonicalImportedFileName(pickedNameForNaming, "depth")
                 } else {
                     slot.canonicalFileName
                 }
-                ModelSlot.SWAPPER -> computeSwapTargetFileName(
+                slot == ModelSlot.SWAPPER -> computeSwapTargetFileName(
                     pickedNameForNaming.orEmpty(),
                     slot.canonicalFileName
                 )
-                ModelSlot.ENHANCEMENT, ModelSlot.FACE_OCCLUDER -> sanitizeImportedFileName(
+                slot == ModelSlot.ENHANCEMENT || slot == ModelSlot.FACE_OCCLUDER -> sanitizeImportedFileName(
                     pickedNameForNaming,
                     slot.canonicalFileName
                 )

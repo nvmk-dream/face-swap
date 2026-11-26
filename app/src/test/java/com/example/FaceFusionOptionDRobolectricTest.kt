@@ -143,11 +143,17 @@ class FaceFusionOptionDRobolectricTest {
             PointF(200f, 235f)
         )
         val simSwap512 = FaceAlignment.estimateNormArcFaceExact(srcLandmarks, 512)
+        val simSwapV1 = FaceAlignment.estimateNormArcFaceV1(srcLandmarks, 512)
+        val ffhq512 = FaceAlignment.estimateNormFfhq(srcLandmarks, 512)
         val standard512 = FaceAlignment.estimateNorm(srcLandmarks, 512)
 
         assertEquals(6, simSwap512.size)
+        assertEquals(6, simSwapV1.size)
+        assertEquals(6, ffhq512.size)
         assertEquals(6, standard512.size)
         assertNotEquals(standard512[2], simSwap512[2], 1.0f)
+        assertNotEquals(simSwap512[5], simSwapV1[5], 1.0f)
+        assertNotEquals(simSwapV1[0], ffhq512[0], 0.05f)
     }
 
     @Test
@@ -170,8 +176,12 @@ class FaceFusionOptionDRobolectricTest {
     fun `multi variant coexistence keeps Option A B BC resolveModelFile untouched while Option D selects variants`() {
         cleanTestModelsDir()
         val swapDir = File(context.filesDir, "models/face_swap")
+        val recDir = File(context.filesDir, "models/recognition")
         val enhDir = File(context.filesDir, "models/enhancement")
         val occDir = File(context.filesDir, "models/occlusion")
+
+        writeDummyValidOnnxFile(recDir, "w600k_r50.onnx")
+        writeDummyValidOnnxFile(recDir, "crossface_simswap.onnx")
 
         writeDummyValidOnnxFile(swapDir, "hyperswap_1b_256.onnx")
         writeDummyValidOnnxFile(swapDir, "simswap_512_unofficial.onnx")
@@ -185,12 +195,14 @@ class FaceFusionOptionDRobolectricTest {
 
         writeDummyValidOnnxFile(occDir, "xseg_1.onnx")
 
-        // Option A / B / B+C primary resolution must stay pinned to HyperSwap 256 & GFPGAN 1.4
+        // Option A / B / B+C primary resolution must stay pinned to HyperSwap 256, w600k_r50, & GFPGAN 1.4
+        assertEquals("w600k_r50.onnx", OnnxProtobufInspector.resolveModelFile(context, ModelSlot.RECOGNIZER).name)
         assertEquals("hyperswap_1b_256.onnx", OnnxProtobufInspector.resolveModelFile(context, ModelSlot.SWAPPER).name)
         assertEquals("gfpgan_1.4.onnx", OnnxProtobufInspector.resolveModelFile(context, ModelSlot.ENHANCEMENT).name)
         assertEquals("xseg_1.onnx", OnnxProtobufInspector.resolveModelFile(context, ModelSlot.FACE_OCCLUDER).name)
+        assertEquals("crossface_simswap.onnx", FaceFusionOptionDEngine.resolveSimSwapEmbeddingConverterFile(context)?.name)
 
-        // All variants coexist without deletion
+        // All variants coexist without deletion or crossface pollution
         val swappers = FaceFusionOptionDEngine.listInstalledSwappers(context).map { it.name }
         assertEquals(4, swappers.size)
         val enhancers = FaceFusionOptionDEngine.listInstalledEnhancers(context).map { it.name }
@@ -240,7 +252,13 @@ class FaceFusionOptionDRobolectricTest {
         )
         assertNotNull(resD.outputBitmap)
         assertTrue(resD.pipelineSummary.contains("[Opt D]"))
-        assertTrue(resD.pipelineSummary.contains("CodeFormer") || resD.pipelineSummary.contains("Built-in") || resD.pipelineSummary.contains("Enhancer"))
+        assertTrue(
+            "Unexpected summary: ${resD.pipelineSummary}",
+            resD.pipelineSummary.contains("CodeFormer") ||
+                resD.pipelineSummary.contains("Built-in") ||
+                resD.pipelineSummary.contains("Enhancer") ||
+                resD.pipelineSummary.contains("512x512 Bicubic HD")
+        )
 
         val resB = InSwapperEngine.executeFaceSwap(
             context = context,

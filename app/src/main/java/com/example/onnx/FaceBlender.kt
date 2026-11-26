@@ -1494,16 +1494,40 @@ object FaceBlender {
 
         val clampedEnhance = enhancementStrength.coerceIn(0f, 1f)
         val tRestore0 = System.currentTimeMillis()
+        var optDFfhqMatrix: FloatArray? = null
         val gfp512 = if (!identityPreservationMode && clampedEnhance > 0.05f && (preloadedGfpganSession != null || gfpganFile != null)) {
             if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT) {
-                val optDEnh = FaceFusionOptionDEngine.runOptionDEnhancer512(
-                    ortEnv = ortEnv,
-                    enhancerFile = gfpganFile,
-                    crop128To512 = activeSwapCrop,
-                    codeformerFidelity = optionDConfig.codeformerFidelity,
-                    preferHardwareAccel = preferHardwareAccel,
-                    preloadedSession = preloadedGfpganSession
+                val geomPoints512 = listOf(
+                    geom512.leftEye,
+                    geom512.rightEye,
+                    geom512.nose,
+                    geom512.leftMouth,
+                    geom512.rightMouth
                 )
+                val ffhqMat = FaceAlignment.estimateNormFfhq(geomPoints512, HD_SIZE)
+                optDFfhqMatrix = ffhqMat
+                val swapBmp512 = if (activeSwapCrop.width == HD_SIZE && activeSwapCrop.height == HD_SIZE) {
+                    activeSwapCrop
+                } else {
+                    val upscaledInit = upscaleBitmapBicubicTo512(activeSwapCrop)
+                    Bitmap.createBitmap(HD_SIZE, HD_SIZE, Bitmap.Config.ARGB_8888).apply {
+                        setPixels(upscaledInit, 0, HD_SIZE, 0, 0, HD_SIZE, HD_SIZE)
+                    }
+                }
+                val ffhqInputCrop = FaceAlignment.warpAffineCrop(swapBmp512, ffhqMat, HD_SIZE)
+                if (swapBmp512 !== activeSwapCrop) swapBmp512.recycle()
+                val optDEnh = try {
+                    FaceFusionOptionDEngine.runOptionDEnhancer512(
+                        ortEnv = ortEnv,
+                        enhancerFile = gfpganFile,
+                        crop128To512 = ffhqInputCrop,
+                        codeformerFidelity = optionDConfig.codeformerFidelity,
+                        preferHardwareAccel = preferHardwareAccel,
+                        preloadedSession = preloadedGfpganSession
+                    )
+                } finally {
+                    ffhqInputCrop.recycle()
+                }
                 if (optDEnh != null) {
                     val label = if (optDEnh.isCodeFormer) {
                         "${optDEnh.usedEnhancerFileName} (w=${"%.2f".format(optDEnh.appliedFidelityW)})"
@@ -1555,20 +1579,55 @@ object FaceBlender {
                 } else {
                     (0.10f + 0.20f * clampedEnhance).coerceIn(0f, 0.30f)
                 }
+            } else if (swapStrategyOption == FaceSwapStrategyOption.OPTION_D_CRANIOFACIAL_FIT && activeSwapCrop.width >= 256) {
+                (0.12f + 0.24f * clampedEnhance).coerceIn(0f, 0.36f)
             } else if (activeSwapCrop.width >= 256) {
                 (0.06f + 0.16f * clampedEnhance).coerceIn(0f, 0.22f)
             } else {
                 (0.18f + 0.34f * clampedEnhance).coerceIn(0f, 0.52f)
             }
             val gfpWeight = (gfpBaseWeight * (ageMatchPlan?.gfpganWeightScale ?: 1.0f)).coerceIn(0f, 0.52f)
-            val invEnh = 1.0f - gfpWeight
-            for (i in 0 until total512) {
-                val bc = swapPx512[i]
-                val gc = gfpPx[i]
-                val r = (((gc ushr 16) and 0xFF) * gfpWeight + ((bc ushr 16) and 0xFF) * invEnh).toInt().coerceIn(0, 255)
-                val g = (((gc ushr 8) and 0xFF) * gfpWeight + ((bc ushr 8) and 0xFF) * invEnh).toInt().coerceIn(0, 255)
-                val b = (((gc and 0xFF) * gfpWeight + (bc and 0xFF) * invEnh)).toInt().coerceIn(0, 255)
-                swapPx512[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            val ffhqMat = optDFfhqMatrix
+            if (ffhqMat != null) {
+                val f00 = ffhqMat[0]
+                val f01 = ffhqMat[1]
+                val f02 = ffhqMat[2]
+                val f10 = ffhqMat[3]
+                val f11 = ffhqMat[4]
+                val f12 = ffhqMat[5]
+                val edgeMargin = 18f
+                val maxCoord = (HD_SIZE - 1).toFloat()
+                for (y in 0 until HD_SIZE) {
+                    val row = y * HD_SIZE
+                    val baseU = f01 * y + f02
+                    val baseV = f11 * y + f12
+                    for (x in 0 until HD_SIZE) {
+                        val u = f00 * x + baseU
+                        val v = f10 * x + baseV
+                        val edgeDist = min(min(u, maxCoord - u), min(v, maxCoord - v))
+                        if (edgeDist <= 0f) continue
+                        val edgeEnv = (edgeDist / edgeMargin).coerceIn(0f, 1f)
+                        val w = gfpWeight * edgeEnv
+                        val invW = 1.0f - w
+                        val idx = row + x
+                        val bc = swapPx512[idx]
+                        val gc = FaceAlignment.sampleBicubicClamped(gfpPx, HD_SIZE, HD_SIZE, u, v)
+                        val r = (((gc ushr 16) and 0xFF) * w + ((bc ushr 16) and 0xFF) * invW).toInt().coerceIn(0, 255)
+                        val g = (((gc ushr 8) and 0xFF) * w + ((bc ushr 8) and 0xFF) * invW).toInt().coerceIn(0, 255)
+                        val b = (((gc and 0xFF) * w + (bc and 0xFF) * invW)).toInt().coerceIn(0, 255)
+                        swapPx512[idx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    }
+                }
+            } else {
+                val invEnh = 1.0f - gfpWeight
+                for (i in 0 until total512) {
+                    val bc = swapPx512[i]
+                    val gc = gfpPx[i]
+                    val r = (((gc ushr 16) and 0xFF) * gfpWeight + ((bc ushr 16) and 0xFF) * invEnh).toInt().coerceIn(0, 255)
+                    val g = (((gc ushr 8) and 0xFF) * gfpWeight + ((bc ushr 8) and 0xFF) * invEnh).toInt().coerceIn(0, 255)
+                    val b = (((gc and 0xFF) * gfpWeight + (bc and 0xFF) * invEnh)).toInt().coerceIn(0, 255)
+                    swapPx512[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
             }
         }
 
